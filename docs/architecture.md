@@ -43,9 +43,9 @@ toolgate 是一个**本地常驻的工具层**，向云端 agent 暴露 6 个工
 
 ### 命题二：本地小模型的价值不在「替代云端」，而在「筛选」
 
-LFM3-1.7B 官方文档明确写着：不推荐用于 agentic coding 或复杂多步推理
-（"not recommended for agentic coding or complex multi-step reasoning
-due to its small size"）。
+参考实现里的生成式小模型（LFM3-1.7B）官方文档明确写着：不推荐用于
+agentic coding 或复杂多步推理（"not recommended for agentic coding or
+complex multi-step reasoning due to its small size"）。
 
 所以它不做云端做的事。它做云端做起来**贵且没必要**的事：
 
@@ -98,9 +98,10 @@ flowchart TD
         end
 
         subgraph ModelLayer["本地模型层（嵌入式 或 HTTP 解耦）"]
-            Router["d1-2B 快判定<br/>分类 / 路由 / 门控 / rerank"]
-            TextSLM["LFM3-1.7B 文本<br/>摘要 / 结构化 / 压缩"]
-            VisionSLM["LFM3-VL-2B 视觉<br/>OCR / grounding / 描述"]
+            Decider["decide 槽位<br/>判定 / 门控 / 多模态"]
+            Reranker["rerank 槽位<br/>候选排序"]
+            TextSLM["summarize 槽位<br/>摘要 / 结构化"]
+            VisionSLM["vision 槽位<br/>OCR / grounding / 描述"]
         end
 
         Engine["执行引擎<br/>安全底线 / 无损输出治理 / 写前快照"]
@@ -144,13 +145,14 @@ flowchart TD
     end
 
     subgraph Local["本地 toolgate"]
-        subgraph L1["L1 快判定 · d1-2B · 5.7ms"]
-            D1["分类 / 路由 / 门控 / rerank / 抽取"]
+        subgraph L1["L1 判定与排序 · 数 ms 到数十 ms"]
+            D1["decide 槽位<br/>判定 / 门控"]
+            RK["rerank 槽位<br/>候选排序"]
         end
-        subgraph L2["L2 生成 · LFM3-1.7B · 数百 ms"]
+        subgraph L2["L2 生成 · summarize 槽位 · 数百 ms"]
             LFM["摘要 / 结构化 / 压缩"]
         end
-        subgraph L3["L3 视觉 · LFM3-VL-2B · 约 1s"]
+        subgraph L3["L3 视觉 · vision 槽位 · 约 1s"]
             VL["OCR / 描述 / 元素定位"]
         end
         subgraph L0["L0 确定性 · 0ms"]
@@ -162,9 +164,11 @@ flowchart TD
     LLM -- "tools/call + intent" --> Tools
     Tools --> DET
     Tools --> D1
+    Tools -- "候选多？" --> RK
     D1 -- "需要生成？" --> LFM
     D1 -- "需要看图？" --> VL
     D1 -- "答案够了" --> Tools
+    RK --> Tools
     LFM --> Tools
     VL --> Tools
     Tools -- "content blocks" --> LLM
@@ -204,55 +208,171 @@ d1 判定「3 个测试超时，都在 async 相关」，LFM3 摘要成 20 行�
 
 ---
 
-## 3. 三级本地模型的能力边界
+## 3. 本地模型层：能力槽位
 
-以下是官方规格，不是推测。
+### 3.0 架构定义槽位，不定义模型
 
-### d1-2B（决策模型）
+本架构**不绑定任何具体模型**。它定义的是五个**能力槽位**，每个槽位有
+确定的输入输出契约与延迟预算；具体模型是可替换的实现。
 
-| 项 | 值 |
+这条直接来自原设计的第七条收益：
+
+> 绝对中立与可演进：不绑定任何 Agent 框架，兼容所有模型，随端侧能力平滑演进。
+
+如果架构里写死「用 d1-2B 做判定」，那它就不中立了——d1 停更、改许可证、
+出更强的替代品，架构都得跟着改。写「判定槽位需要一个能在 30ms 内输出
+带概率答案的模型」，换谁都能跑。
+
+**本文档 §3.1-3.3 讲槽位，§3.4 讲当前参考实现。前者是架构，后者是选型。**
+
+### 3.1 五个槽位
+
+| 槽位 | 输入 | 输出 | 延迟预算 | 必需特性 |
+|---|---|---|---|---|
+| classify | 文本 + 候选标签集 | 每个标签的分数 | < 20ms | 输出受限、带分数 |
+| rerank | query + N 个候选 | N 个相关度分数（保序） | < 100ms（N=300） | 批处理、可排序 |
+| decide | state（文本/JSON/图）+ 命名问题 | 每个问题的概率（+ 可选 span） | < 30ms | 输出受限、带概率 |
+| summarize | 文本（可达 256K） | 文本或 JSON | < 1s | 生成、结构化输出 |
+| vision | 图片 + 问题 | 文本 / 坐标 / OCR 文本 | < 2s | 多模态、grounding |
+
+**五个槽位不是按模型分的，是按「答案形状」分的**：
+
+- classify 的答案形状是「标签 → 分数」，候选集固定、数量少；
+- rerank 的答案形状是「候选 → 分数」，候选集可变、数量多；
+- decide 的答案形状是「问题 → 概率」，问题集固定、可能带多模态输入；
+- summarize 的答案形状是「一段文本」，长度不定；
+- vision 的答案形状是「对图的描述或坐标」，需要视觉编码。
+
+### 3.2 槽位契约
+
+每个槽位的契约用「输入 → 输出」的确定性描述，实现必须遵守。
+
+**classify**
+
+```text
+输入: { text: string, labels: string[] }        labels 长度 2-50
+输出: { scores: { [label]: number } }           每个分数在 [0,1]
+约束: scores 的 key 集合必须等于 labels；不生成任何额外文本
+```
+
+**rerank**
+
+```text
+输入: { query: string, documents: string[], top_n?: number }
+输出: { results: [{ index: number, score: number }] }  按 score 降序
+约束: results 覆盖全部输入文档；index 指向原始位置；不改变文档内容
+```
+
+**decide**
+
+```text
+输入: { state: string | object, images?: Image[], questions: string[] }
+输出: { answers: { [question]: { probability: number, span?: [number, number] } } }
+约束: 每个问题一个概率；span 仅在要求定位时返回；不生成自由文本
+```
+
+**summarize**
+
+```text
+输入: { text: string, schema?: object, max_tokens?: number }
+输出: { text: string } 或 { data: object }（有 schema 时）
+约束: temperature = 0（保证同输入同输出，见 §16.3）；输出按 schema 校验
+```
+
+**vision**
+
+```text
+输入: { image: Image, task: "describe" | "ocr" | "ground" | "classify", query?: string }
+输出: { text?: string, boxes?: [{ label, bbox: [x,y,w,h] }] }
+约束: task=ground 时 boxes 必填；bbox 用原图像素坐标
+```
+
+### 3.3 替换实现的判据
+
+换一个模型进来，必须**同时**满足四条：
+
+| 判据 | 怎么验 |
 |---|---|
-| 参数 | 1.92B |
-| 基座 | LFM3-VL-2B |
-| 上下文 | 128K |
-| 输入 | 一个 state（文本或 JSON）+ 图片/视频 + 任意数量命名问题 |
-| 输出 | **带概率的类型化答案，不生成 token** |
-| 延迟 | H100 5.7ms / MI325X 3.8ms 每决策 |
-| 语言 | 17 种含中文 |
-| 官方定位 | 路由与分诊、审核与护栏、意图分类、文档抽取、判定与 rerank、视觉检查 |
+| 输出形态匹配 | 不能拿自由生成模型冒充受限输出槽位——输出不受限就做不了门控 |
+| 延迟在预算内 | **本机实测**，不是官方标称（官方数字通常是在 H100 上测的） |
+| 许可证允许用途 | 商用场景排除 cc-by-nc 类许可 |
+| 中文能力达标 | 用本项目的中文样本实测，不看官方声称支持多少语言 |
 
-三个特性直接决定架构：
+第三条容易被忽略。当前参考实现里就有一个 cc-by-nc-4.0 的模型（§3.4），
+它只能用于非商用场景。
 
-1. **不生成 token** —— 输出是受限的，所以不会跑偏，也不需要解析文本。
-2. **一次调用可问任意数量问题** —— 一个 state 上可以同时问「有错吗」
-   「什么类型」「严重吗」，一次前向传播出全部答案。
-3. **带概率** —— 可以做置信度门控：低置信转云端，不硬答。
+### 3.4 当前参考实现
 
-### LFM3-1.7B（文本生成）
+以下是本机实测可用的实现，**作为参考而非架构的一部分**。
 
-| 项 | 值 |
-|---|---|
-| 参数 | 1.73B |
-| 上下文 | 256K |
-| 语言 | 17 种含中文 |
-| 官方定位 | 本地 agent、工具调用、结构化输出、领域微调 |
-| **明确不适用** | agentic coding、复杂多步推理 |
+| 槽位 | 参考实现 | 规模 | 关键事实 |
+|---|---|---|---|
+| classify / decide | jev 族（d1-2B、JevK5、openJev Verdict、NeoHorse-Jev） | 151M-8B | d1-2B 是族内唯一支持多模态的 |
+| rerank | jina-reranker-v3.5-mlx | 约 570M | listwise，block_size 125；**cc-by-nc-4.0 非商用** |
+| summarize | LFM3-1.7B | 1.73B | 256K 上下文；官方明确不适用 agentic coding |
+| vision | LFM3-VL-2B | 1.92B | OCR / grounding / 布局标注 |
 
-「不适用」这条要写进设计里：**不要让 LFM3 写代码或做规划**。
-它做的是「把长东西变短、把乱东西变结构化」。
+**关于 jev 类**：jev 不是某个模型，是一类输出形态（受限输出、带概率、
+一次前向出结果）。族内成员规模从 151M 到 8B，中文能力差异很大——
+openJev Verdict 中文失效、CLM-v0.1-8B 中文塌缩，都要微调才能用。
+d1-2B 官方支持 17 种语言含中文，是族内中文开箱可用的一个。
 
-### LFM3-VL-2B（视觉）
+**关于 classify 与 decide 的合并**：当前 jev 族同时覆盖这两个槽位，
+所以参考实现里合并成一行。但契约上是两个槽位——classify 只吃文本、
+候选集小；decide 可能吃图、问题集固定。将来如果出现纯文本的极快分类器
+（如 151M 的 GLiClass）和一个多模态判定器分别最优，它们就该拆开。
 
-| 项 | 值 |
-|---|---|
-| 参数 | 1.92B |
-| 输入 | 文本 + 图像 + 视频，支持多图 |
-| 能力 | OCR、布局标注、pointing、grounding、视觉引导工具调用 |
+### 3.5 为什么 rerank 必须独立成槽位
 
-**grounding 是这里最有价值的能力**：它能把「登录按钮」映射到图片里的
-具体坐标。这让「看截图改 UI」这件事不必上传原图——上传坐标就够。
+用 classify/decide 类模型做 rerank 在原理上可行，但成本结构不对：
 
----
+- decide 槽位：一个 state + 一组固定问题，输出每个问题的概率。
+  **问题数是常数**，一次前向搞定。
+- rerank 槽位：一个 query + N 个候选，输出 N 个分数。**N 随命中数变化**。
+
+用 decide 做 rerank，等于对每个候选问一次「这条相关吗」——N 次前向。
+而 listwise reranker 一次前向处理一整块候选（参考实现是 125 个），
+300 条命中只需要 3 次前向。
+
+这就是为什么 rerank 必须是独立槽位：**它的输入规模是变量**，
+而 decide 的输入规模是常数。这个差别决定了两者不能共用一个实现。
+
+### 3.6 为什么 vision 与 decide 都保留
+
+视觉槽位和判定槽位可能由同一个基座模型提供（参考实现里 d1 的基座
+就是 LFM3-VL-2B），但**输出形态不同**：
+
+- vision 做**生成**：描述图里有什么、OCR 出文字、给出坐标。输出是自由文本。
+- decide 做**判定**：在给定问题集上给概率答案。输出受限。
+
+一个具体例子，给一张报错截图：
+
+- 用 vision：「图里有一段红色报错文字，内容是 TypeError: undefined is
+  not a function」—— 可能漏细节、可能编。
+- 用 decide 问「图里有报错吗？报错类型是什么？严重吗？」—— 判定，
+  输出受限、带概率、可以门控。
+
+**要生成内容用 vision，要判定用 decide。** 同一个基座，两种用法。
+
+### 3.7 选型判据树
+
+```text
+要一个「几选一的答案」？
+  ├─ 纯文本、候选集小 → classify 槽位
+  ├─ 需要看图 → decide 槽位（需多模态实现）
+  └─ 问题集固定、要 span → decide 槽位
+要「给一批候选排序」？
+  └─ rerank 槽位
+要「一段生成的文字 / JSON」？
+  └─ summarize 槽位
+要「图里有什么 / 在哪 / 什么字」？
+  └─ vision 槽位
+要「规划、写代码、多步推理」？
+  └─ 云端
+```
+
+这张判据树的每一步都是「答案形状」问题，不是「模型大小」问题，
+也不是「用哪个厂商的模型」问题。
 
 ## 4. 三层结构与 intent 契约
 
@@ -260,12 +380,12 @@ d1 判定「3 个测试超时，都在 async 相关」，LFM3 摘要成 20 行�
 
 | 工具 | 职责 | L0 执行 | 本地模型介入 | 协商输出 |
 |---|---|---|---|---|
-| read | 读文本/图片 | 解码、嗅探、截断 | d1 判类型；LFM3 结构化；VL 看图 | raw / summary / structured / visual |
+| read | 读文本/图片 | 解码、嗅探、截断 | classify 判类型；summarize 结构化；vision 看图 | raw / summary / structured / visual |
 | write | 新建或整体覆盖 | 建父目录、写前快照 | 无 | 原文确认 + 快照路径 |
 | edit | 局部修改 | 匹配、锚点校验、快照 | d1 解释失败原因 | diff / 失败归因 |
 | search | 内容检索 / 文件枚举 | 遍历、正则、上限 | d1 rerank（命中 > 20） | 全部 / top-k / 结构化 |
-| bash | 一次性命令 | 执行、截断、落盘 | d1 判错；LFM3 摘要 | raw / summary / structured |
-| task | 后台长任务 | 进程管理、增量读取 | d1 判状态；LFM3 摘要 | 原始增量 / 摘要 + 状态 |
+| bash | 一次性命令 | 执行、截断、落盘 | decide 判错；summarize 摘要 | raw / summary / structured |
+| task | 后台长任务 | 进程管理、增量读取 | decide 判状态；summarize 摘要 | 原始增量 / 摘要 + 状态 |
 
 **write 为什么不需要本地模型**：它的输入是调用方给的完整内容，输出是
 「写成功/失败 + 快照路径」。没有需要理解的中间物，也没有可以压缩的
@@ -320,16 +440,16 @@ d1 判定「3 个测试超时，都在 async 相关」，LFM3 摘要成 20 行�
 ```text
 L0 执行 → 拿 stdout/stderr
 L0 双阈值截断（2000 行 / 50KB）+ 完整输出落盘
-L1 d1 判定（一次前向，多个问题）：
+L1 decide 判定（一次前向，多个问题）：
      has_error?          概率
      error_kind?         编译 / 测试 / 权限 / 网络 / 资源 / 未知
      severity?           阻断 / 警告 / 噪音
      needs_full_context? 是/否
-L2 LFM3 摘要（仅当 d1 判定 has_error 且 severity=阻断）：
+L2 summarize 摘要（仅当 decide 判定 has_error 且 severity=阻断）：
      失败根因 + 涉及的文件与测试 + 建议排查方向
 L0 协商：
      raw        → 截断后的原文 + 落盘指针
-     summary    → d1 判定 + LFM3 摘要 + 落盘指针
+     summary    → decide 判定 + summarize 摘要 + 落盘指针
      structured → JSON：{exitCode, errorKind, severity, failedItems[], spillPath}
      auto       → 输出 < 500 token 给原文；否则走 summary
 ```
@@ -337,14 +457,14 @@ L0 协商：
 为什么 bash 收益最大：一次失败的测试套件输出常在 3000-8000 行，
 其中真正有信息量的是最后 50 行加上中间散落的断言失败。人看也是这么看的。
 
-**d1 的四个问题一次问完**，这是它「任意数量命名问题」特性的直接用法。
+**decide 的四个问题一次问完**，这是它「任意数量命名问题」特性的直接用法。
 
-### 5.2 search —— rerank 是 d1 的官方用途
+### 5.2 search —— rerank 由独立槽位承担
 
 ```text
 L0 检索（正则 / 通配符），拿全部命中
 L0 若命中数 ≤ 20，直接返回（没必要 rerank）
-L1 d1 rerank（仅当命中数 > 20）：
+L1 rerank 槽位（仅当命中数 > 20）：
      对候选按「与 query 意图的相关性」打分，返回 top-k 的顺序
 L0 协商：按 intent 返回全部 / top-k / 结构化列表
 ```
@@ -358,11 +478,11 @@ L0 协商：按 intent 返回全部 / top-k / 结构化列表
 
 ```text
 L0 读文件、嗅探类型、截断
-L1 d1 判定：
+L1 decide 判定：
      file_kind?   代码 / 配置 / 日志 / 文档 / 数据
      sensitivity? 含密钥 / 含个人信息 / 普通
      best_view?   全文 / 结构 / 片段
-L2 LFM3 结构化（仅当 intent=structured 或 auto 且 best_view=结构）：
+L2 summarize 结构化（仅当 intent=structured 或 auto 且 best_view=结构）：
      代码 → 函数签名列表、TODO、导入
      配置 → 键值树
      日志 → 错误行与时间线
@@ -373,7 +493,7 @@ L2 LFM3 结构化（仅当 intent=structured 或 auto 且 best_view=结构）：
 
 ```text
 L0 嗅探 MIME、解码
-L1 d1 判定：
+L1 decide 判定：
      image_kind?  UI 截图 / 文档照片 / 图表 / 照片 / 代码截图
      has_text?    是/否
      need_pixels? 是/否（判断是否必须原图）
@@ -423,14 +543,14 @@ L0 校验：改动后文件仍是合法 UTF-8；patch 模式额外校验 hunk �
 **失败时的 d1 介入**
 
 ```text
-L1 d1 判定（仅当定位失败）：
+L1 decide 判定（仅当定位失败）：
      failure_kind?  上下文不足 / 文件已变 / 格式差异 / 根本不存在 / patch 冲突
      suggestion?    扩大上下文 / 重新 read / 忽略空白 / 确认路径 / 重算 hunk
 L0 返回：错误 + 归因 + 建议
 ```
 
 edit 本身不产生浪费，但**失败很贵**——一次失败意味着云端要重新 read
-（几千 token）再重试。d1 用 5.7ms 把「为什么失败」说清楚，能省掉这轮往返。
+（几千 token）再重试。decide 用数毫秒把「为什么失败」说清楚，能省掉这轮往返。
 
 **为什么 patch 模式也要有 hunk 校验**
 
@@ -443,15 +563,15 @@ unified diff 的 hunk 头带行号（@@ -12,3 +12,5 @@）。如果文件已经�
 
 ```text
 L0 启动 / 读累积输出 / 终止
-L1 d1 判定：
+L1 decide 判定：
      state?      运行中 / 已完成 / 卡住 / 已崩溃
      progress?   有进展 / 无变化 / 报错循环
-L2 LFM3 增量摘要（仅当 action=read 且累积输出 > 2000 token）
+L2 summarize 增量摘要（仅当 action=read 且累积输出 > 2000 token）
 协商：原始增量 / 摘要 + 状态
 ```
 
 「卡住」的判定值得单说：开发服务器启动后输出不再变化，可能是正常等待，
-也可能是死锁。d1 看最后几行 + 时间间隔能给出概率判断。
+也可能是死锁。decide 看最后几行 + 时间间隔能给出概率判断。
 
 ---
 
@@ -462,9 +582,9 @@ L2 LFM3 增量摘要（仅当 action=read 且累积输出 > 2000 token）
 | 层 | 模型 | 延迟 | 何时触发 |
 |---|---|---|---|
 | L0 | 无 | <1ms | 永远 |
-| L1 | d1-2B | 5.7ms（GPU）/ 数十 ms（CPU/MLX） | 需要判定时 |
-| L2 | LFM3-1.7B | 数百 ms | 需要生成文本时 |
-| L3 | LFM3-VL-2B | 约 1s | 需要看图时 |
+| L1 | decide / rerank 槽位 | 数 ms 到数十 ms | 需要判定或排序时 |
+| L2 | summarize 槽位 | 数百 ms | 需要生成文本时 |
+| L3 | vision 槽位 | 约 1s | 需要看图时 |
 | L4 | 云端 | 秒级 + token 费 | 需要规划/编码时 |
 
 **关键：L1 便宜到可以每个工具调用都跑。** 5.7ms 相对于一次 MCP 往返
@@ -924,7 +1044,7 @@ B 的复杂度不值得一开始就背。
 
 按收益排序接入，不做并行：
 
-1. **bash**（收益最大）→ d1 判定 + LFM3 摘要
+1. **bash**（收益最大）→ decide 判定 + summarize 摘要
 2. **read 图片**（第二）→ d1 分类 + VL 理解
 3. **search**（第三）→ d1 rerank
 4. **edit**（第四）→ d1 失败归因
@@ -1160,167 +1280,3 @@ LFM3 的摘要必须满足两个条件：
 - 环境变量白名单：默认不继承父进程环境，只传必要变量
 
 **资源耗尽**
-
-- bash/task 输出累积上限（已实现 8MB / 4MB）
-- search 结果数上限（已实现 max_results）
-- 递归深度与文件数上限（v1 未实现，需补）
-- 超时（bash 已实现，search 未实现）
-
-**权限越界**
-
-- 不主动提权
-- 启动时记录 uid/gid，返回给调用方供判断
-- 不访问其他用户的 home
-
-### 17.3 与 SLM 安全的关系
-
-§15.1 讲的是「不可信内容污染模型」，本节讲的是「工具操作本身越界」。
-两者是不同层面：
-
-- 前者防的是模型被骗（输出错误结论）
-- 后者防的是工具被滥用（执行危险操作）
-
-两者都需要，且前者不能替代后者。
-
----
-
-## 18. 部署形态与接口契约
-
-原文定义了「模型适配层（HTTP 解耦）」与「Task Input / Task Result」宏观边界。
-v2 前几版把它们判为「不做」，这是不对的——**它们不是不做，是归属不同**。
-
-### 18.1 模型适配层：进程内还是进程外
-
-原文设计是 HTTP 解耦（引擎通过 HTTP 调本地模型）。v2 默认进程内。
-两者各有道理，判据是部署场景：
-
-| 形态 | 延迟 | 数据边界 | 适用 |
-|---|---|---|---|
-| 进程内（嵌入式） | 最低（无 IPC） | 数据不出进程 | 单机单用户 |
-| 进程外（HTTP） | +1-3ms（本机回环） | 数据出进程但不出机器 | 多项目共享一个推理服务 |
-| 远程 | +网络延迟 | 数据出机器 | 不推荐（违背数据隔离） |
-
-**决策：两种都支持，默认进程内。**
-
-理由：d1 的 5.7ms 优势建立在无 IPC 开销上；而「多项目共享」的需求可以
-通过进程外模式满足，不必二选一。
-
-配置形态：
-
-@@@yaml
-slm:
-  mode: embedded | http        # 默认 embedded
-  http:
-    base_url: http://127.0.0.1:8080
-    models: { decide: d1-2B, text: LFM3-1.7B, vision: LFM3-VL-2B }
-  embedded:
-    backend: llama-cpp | mlx   # 按平台选
-    model_dir: ~/.toolgate/models
-@@@
-
-### 18.1b 能力感知：通过启动配置声明上游模型能力
-
-原文要求「如果主模型不支持 Vision，自动强制走本地降维」。
-
-v2 之前把这个推给了调用侧，理由「工具层拿不到模型信息」。这个理由
-只对了一半——MCP 协议确实不传模型能力，但**工具层可以通过启动配置知道**：
-
-@@@yaml
-upstream:
-  vision: true        # 上游模型是否接受图片输入
-  max_image_edge: 1568
-@@@
-
-有了这个开关，read 读到图片时的行为就确定了：
-
-| upstream.vision | 行为 |
-|---|---|
-| true | 按 §10.1 决策树：need_pixels 时返回 image block，否则返回结构化理解 |
-| false | **强制走 VL 理解**，只返回文本（OCR / 描述 / 元素列表），绝不返回 image block |
-
-这样「能力感知」在工具层落地，不依赖调用方记得传参，也不改 MCP 协议。
-
-默认值：vision = true（保守假设上游能看图）。若上游实际不支持，工具层
-返回的 image block 会被拒绝——这比静默失败好，因为错误信息明确。
-
-### 18.2 通信网关的三种形态
-
-原文列了 MCP Server / CLI / rpi-plugin-sdk。v2 的定位：
-
-| 形态 | 状态 | 用途 |
-|---|---|---|
-| MCP Server（stdio） | 已实现 | 主路径，供任意 agent 接入 |
-| CLI | 已实现 | 调试与脚本调用 |
-| 插件 SDK | **不做** | 见下 |
-
-**为什么不做插件 SDK**：插件形态意味着工具跑在宿主进程内，共享宿主的
-生命周期与内存。这与「本地常驻、跨 agent 复用」的目标冲突，且要为每个
-宿主维护一套 ABI。MCP 已经解决了跨 agent 复用的问题。
-
-### 18.3 Task Input / Task Result：这是调用方的契约
-
-原文 §六 定义了两个宏观边界。v2 明确：**它们由调用方实现，但契约在
-本文档定义**——因为工具层的行为要与之对齐。
-
-**Task Input**（调用方 → 其 agent 循环）
-
-@@@json
-{
-  "task_id": "req_01",
-  "goal": "分析截图 design.png，并修复 src/auth.rs 中的空指针",
-  "max_iterations": 5,
-  "attachments": [{ "type": "local_path", "path": "/tmp/design.png" }]
-}
-@@@
-
-**Task Result**（agent 循环 → 调用方）
-
-@@@json
-{
-  "task_id": "req_01",
-  "status": "partial",
-  "checkpoint_id": "ckpt_002",
-  "content": [
-    { "type": "text", "text": "已修复 auth.rs。日志已折叠，请按需读取 /tmp/bash_out_001.log" },
-    { "type": "image", "mimeType": "image/webp", "data": "UklGRl..." }
-  ]
-}
-@@@
-
-**工具层在其中的位置**：Task 内部的每一次工具调用是 tools/call，
-是 Task 的原子操作。工具层不接收 Task Input，也不产生 Task Result。
-
-这样既保留了原文的契约定义，又不与「只有 6 个工具」矛盾。
-
-### 18.4 断点续传的契约
-
-原文要求「达到步数上限未完成，保存 checkpoint_id 返回 partial」。
-工具层不实现，但契约要定义清楚：
-
-| 字段 | 谁产生 | 含义 |
-|---|---|---|
-| max_iterations | 调用方 | 本次任务最多几轮 |
-| checkpoint_id | 调用方（会话层） | 断点标识，可据此恢复 |
-| status: partial | 调用方 | 未完成但已保存进度 |
-| status: needs_escalation | 调用方 | 需要人介入 |
-
-**工具层能提供什么**：每次 tools/call 的结果都是可重放的（输入确定、
-输出确定），所以调用方只要记录「已完成哪些调用」，就能重建状态。
-
-这正是 §16.3「输出确定性」的另一个收益：**可重放**。
-
----
-
-
-
-## 19. 技术选型：Rust 强约束与「通用」
-
-原文档标题写着「基于 CacheRouter 理念、Pi 附件机制与 **Rust 强约束**的**通用**
-本地超级工具」。前两项在 §16 与 §10 展开，这两项补在这里。
-
-### 19.1 「强约束」约束的是什么
-
-不是「Rust 很快」，而是**四类错误从运行时前移到编译期**：
-
-| 约束 | 编译期拦住什么 | 对应的运行时事故 |
-|---|---|---|
