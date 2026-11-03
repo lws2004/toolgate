@@ -17,20 +17,33 @@ pub mod search;
 pub mod task;
 pub mod write;
 
-/// 工具运行上下文：工作目录、落盘存储、截断阈值。
+/// 工具运行上下文：工作目录、两处存储、截断阈值。
+///
+/// 两处存储刻意分开：
+///
+/// - spill 放系统临时目录，装「输出太大放不下」的副本，随系统清理无妨；
+/// - snapshots 放项目内的 .toolgate/snapshots，装「改之前的旧内容」，
+///   必须活到用户想起来回滚为止。
+///
+/// 合成一处会导致快照被系统的临时目录清理策略带走——回滚就失效了。
 #[derive(Debug, Clone)]
 pub struct ToolContext {
     pub cwd: PathBuf,
     pub spill: SpillStore,
+    pub snapshots: SpillStore,
     pub limits: TruncationOptions,
 }
 
 impl ToolContext {
-    /// 用工作目录创建上下文，落盘目录取系统临时目录。
+    /// 用工作目录创建上下文。
     pub fn new(cwd: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let cwd = cwd.into();
+        let spill = SpillStore::with_default_dir()?;
+        let snapshots = SpillStore::new(cwd.join(".toolgate").join("snapshots"))?;
         Ok(Self {
-            cwd: cwd.into(),
-            spill: SpillStore::with_default_dir()?,
+            cwd,
+            spill,
+            snapshots,
             limits: TruncationOptions::default(),
         })
     }

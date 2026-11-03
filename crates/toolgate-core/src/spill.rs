@@ -81,6 +81,41 @@ impl SpillStore {
             lines: content.lines().count(),
         })
     }
+
+    /// 在覆盖写之前保存旧内容，返回可回滚的快照指针。
+    ///
+    /// 与 persist 的区别是意图：persist 处理「输出太大放不下」，
+    /// snapshot 处理「改之前留一份」。两者都走内容寻址，所以对
+    /// 同一份旧内容反复快照不会产生多份副本。
+    ///
+    /// 回滚方式：用 read 读快照，再用 write 写回原路径。刻意不做
+    /// 自动回滚工具——回滚是低频动作，为它增加第 7 个工具位不值。
+    pub fn snapshot(&self, target: &Path, content: &str) -> io::Result<SpillRef> {
+        let digest = Sha256::digest(content.as_bytes());
+        let short = hex::encode(&digest[..8]);
+        let name: String = target
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let path = self.dir.join(format!("snapshot-{name}-{short}.bak"));
+        if !path.exists() {
+            fs::write(&path, content)?;
+        }
+        Ok(SpillRef {
+            path,
+            bytes: content.len(),
+            lines: content.lines().count(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -95,6 +130,20 @@ mod tests {
         let b = store.persist("bash", "hello\nworld\n").expect("persist b");
         assert_eq!(a.path, b.path, "相同内容应复用同一文件");
         assert_eq!(a.lines, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_keeps_old_content_restorable() {
+        let dir = std::env::temp_dir().join(format!("toolgate-snap-{}", std::process::id()));
+        let store = SpillStore::new(&dir).expect("create store");
+        let target = Path::new("/tmp/src/main.rs");
+        let snap = store.snapshot(target, "fn old() {}
+").expect("snapshot");
+        assert!(snap.path.to_string_lossy().contains("snapshot-main.rs"));
+        let restored = std::fs::read_to_string(&snap.path).expect("read back");
+        assert_eq!(restored, "fn old() {}
+");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

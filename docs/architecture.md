@@ -440,6 +440,36 @@ DSH 在工具执行之后还有两层（spill-policy 12500 token + tool-result-p
 通常不会触发。这是有意的——把治理放在离数据最近的地方，下游各层就都
 轻了。
 
+### 6.6 事务快照
+
+write 覆盖已有文件、edit 修改文件时，**落盘前**把旧内容存一份到
+项目内的 .toolgate/snapshots/，命名 snapshot-<文件名>-<sha256 前 16 位>.bak。
+快照路径随返回的 structuredContent.snapshot 回传。
+
+回滚方式：read 读快照，write 写回原路径。刻意不做自动回滚工具——
+回滚是低频动作，为它占第 7 个工具位不值。
+
+**为什么快照不放系统临时目录**
+
+最初实现时快照和「大输出落盘」共用一个存储，都在系统临时目录。
+端到端测试发现这是个真 bug：macOS 会定期清理 /var/folders 下的临时文件，
+用户几小时后想回滚时快照已经没了。
+
+所以拆成两处存储：
+
+| 存储 | 位置 | 生命周期 | 装什么 |
+|---|---|---|---|
+| spill | 系统临时目录 | 随系统清理无妨 | 工具输出副本 |
+| snapshots | <工作目录>/.toolgate/snapshots | 必须活到用户想起回滚 | 改动前的旧内容 |
+
+判据是「丢了会怎样」：输出副本丢了可以重跑命令，快照丢了就回不去了。
+
+**为什么不做「写操作前自动打快照 + 事务提交」**
+
+那需要一个事务边界，而工具层看不到「一次任务从哪开始到哪结束」。
+现在做的是「每次写都留一份」，粒度更细但不需要知道边界——代价是
+连续改十次会留十个快照（内容寻址会自动去重相同内容）。
+
 ---
 
 ## 7. 多模态协商
@@ -584,7 +614,8 @@ toolgate 把它放在 structuredContent.imageHash，不放进 content——
 | 模块 | 文件 | 状态 |
 |---|---|---|
 | 双阈值截断 | crates/toolgate-core/src/truncate.rs | 完成，5 个测试 |
-| 内容寻址落盘 | crates/toolgate-core/src/spill.rs | 完成，2 个测试 |
+| 内容寻址落盘 | crates/toolgate-core/src/spill.rs | 完成，3 个测试 |
+| 写前事务快照 | crates/toolgate-core/src/spill.rs | 完成（同文件 snapshot 方法） |
 | 行锚点 | crates/toolgate-core/src/hashline.rs | 完成，8 个测试 |
 | 类型嗅探 | crates/toolgate-core/src/media/mod.rs | 完成，5 个测试 |
 | 图片压缩流水线 | crates/toolgate-core/src/media/image_pipeline.rs | 完成，3 个测试 |
@@ -600,7 +631,7 @@ toolgate 把它放在 structuredContent.imageHash，不放进 content——
 验证方式：
 
 ```bash
-cargo test          # 46 个测试
+cargo test          # 47 个测试
 cargo build         # 零警告
 ./target/debug/toolgate list
 ./target/debug/toolgate call read '{"path":"Cargo.toml","limit":5}'

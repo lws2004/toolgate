@@ -76,14 +76,23 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         return Ok(ToolResponse::text("内容未变化，未写入。"));
     }
 
+    // 落盘前留一份原文，供回滚。
+    let snapshot = ctx.snapshots.snapshot(&path, &original).ok();
+
     tokio::fs::write(&path, &updated).await?;
 
     let diff = unified_diff(&original, &updated, &path.display().to_string());
+    let snapshot_meta = snapshot
+        .as_ref()
+        .map(|s| json!(s.path.display().to_string()))
+        .unwrap_or(json!(null));
+
     Ok(ToolResponse::text(diff).with_meta(json!({
         "path": path.display().to_string(),
         "changed": true,
         "bytesBefore": original.len(),
         "bytesAfter": updated.len(),
+        "snapshot": snapshot_meta,
     })))
 }
 
