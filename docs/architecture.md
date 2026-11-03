@@ -600,7 +600,7 @@ toolgate 把它放在 structuredContent.imageHash，不放进 content——
 验证方式：
 
 ```bash
-cargo test          # 41 个测试
+cargo test          # 46 个测试
 cargo build         # 零警告
 ./target/debug/toolgate list
 ./target/debug/toolgate call read '{"path":"Cargo.toml","limit":5}'
