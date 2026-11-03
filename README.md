@@ -1,41 +1,69 @@
 # toolgate
 
-端云协同的本地工具层。云端模型做规划，本地进程做执行，两者用 MCP 通信。
+围绕本地小模型构建的工具层。云端做规划，本地做理解与执行。
 
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
+![Status](https://img.shields.io/badge/architectural--review-v2-yellow)
 
-## 它解决什么问题
+> **状态**：架构已迭代到 v2（围绕本地小模型），**等待审阅**。
+> 仓库里的代码是 v1 骨架（无本地模型），与 v2 的差距见
+> [架构文档 §13](docs/architecture.md)。
 
-把编码 agent 的工具执行下沉到本地，会立刻遇到三个问题：
+## 它要回答的问题
 
-1. **上下文被大输出撑爆**——一次 find / 一次测试，几十万 token 就没了；
-2. **图片太大模型吃不下**——原始截图动辄几 MB，base64 后更夸张；
-3. **编辑在漂移的文件上失败**——读到的内容和要改的内容对不上。
+不是「怎么执行工具」，而是：
 
-toolgate 在工具边界上处理这三件事：超限输出落盘只回传指针，图片多级
-降级压缩，编辑用精确匹配或行锚点并在失配时拒绝写入。
+> **哪些东西根本不需要上传到云端？**
 
-## 快速开始
+一份 5000 行的失败日志、一张 800KB 的 UI 截图、一次命中 300 条的检索——
+这些内容的绝大部分对下一步决策没有用。toolgate 在数据离开本地之前，
+用本地小模型把它们压成「够用的形状」。
 
-```bash
-git clone https://github.com/lws2004/toolgate.git
-cd toolgate
-cargo build --release
+## 三层结构
 
-# 列出全部工具
-./target/release/toolgate list
+每个工具都是这三层：
 
-# 直接调一个工具（调试用）
-./target/release/toolgate call read '{"path":"Cargo.toml","limit":5}'
-
-# 以 MCP server 方式运行，供 agent 接入
-./target/release/toolgate serve
+```text
+执行层   → 读文件、跑命令、检索
+理解层   → 本地小模型介入：判定、摘要、抽取、看图
+协商层   → 决定回传什么：原文 / 摘要 / 结构化 / 原图 / 指针
 ```
 
-## 接入 MCP 客户端
+协商层由新增的 intent 参数控制：raw / summary / structured / visual / auto。
 
-在客户端的 MCP 配置里加一条 stdio server：
+## 本地模型的分工
+
+| 模型 | 参数 | 上下文 | 延迟 | 干什么 |
+|---|---|---|---|---|
+| d1-2B | 1.92B | 128K | **5.7ms/决策** | 分类、路由、门控、rerank、抽取 |
+| LFM3-1.7B | 1.73B | 256K | 数百 ms | 摘要、结构化、压缩 |
+| LFM3-VL-2B | 1.92B | — | 约 1s | OCR、grounding、视觉理解 |
+
+判据是**答案空间大小**：几选一 → d1；一段话 → LFM3；要看图 → VL；
+要规划或写代码 → 云端。
+
+## 六个工具
+
+| 工具 | 本地模型挡住什么 |
+|---|---|
+| bash | 几千行日志 → 错误摘要 + 落盘指针 |
+| search | 几百条命中 → rerank 后的 top-k |
+| read（文本） | 整文件 → 结构化提取或相关片段 |
+| read（图片） | 几 MB 截图 → 元素坐标 / OCR 文本 |
+| task | 累积输出 → 状态判断 + 增量摘要 |
+| write / edit | 挡不住什么，但前四个要有输出对象 |
+
+## 快速开始（v1 骨架，无本地模型）
+
+```bash
+cargo build --release
+./target/release/toolgate list
+./target/release/toolgate call read '{"path":"Cargo.toml","limit":5}'
+./target/release/toolgate serve   # MCP stdio server
+```
+
+接入 MCP 客户端：
 
 ```json
 {
@@ -48,40 +76,30 @@ cargo build --release
 }
 ```
 
-## 六个工具
+## 文档
 
-| 工具 | 做什么 | 治理 |
-|---|---|---|
-| read | 读文本（带行号）或图片 | 超 2000 行 / 50KB 头部截断，给 offset 续读 |
-| write | 新建或整体覆盖 | 自动建父目录；覆盖前留快照 |
-| edit | 局部修改 | 文本匹配（含模糊容错）或行锚点；失配拒绝写入；改前留快照 |
-| search | 内容检索 / 文件枚举 | 超限保留头部，完整结果落盘 |
-| bash | 一次性命令 | 拒绝 shell 字符串；尾部截断 + 落盘 |
-| task | 后台长任务 | start / read / kill / list |
+| 文档 | 内容 |
+|---|---|
+| [架构文档](docs/architecture.md) | 完整设计、成本模型、介入判据、路线图 |
+| [调研：pi](docs/research-notes-pi.md) | pi 源码实测，含四处与原设计的差异 |
+| [调研：DSH](docs/research-notes-dsh.md) | PTC、两层治理、checkpoint 机制 |
+| [调研：外部事实](docs/research-notes-external.md) | CacheRouter、MCP 规范、hashline 溯源 |
+| [调研：本地模型](docs/research-notes-models.md) | d1 / LFM3 / VL 的官方规格 |
+| [决策记录](docs/decisions/) | 4 份 ADR，含一次判断翻转 |
 
-## 设计文档
+## 当前代码状态
 
-完整架构、前提修正与路线图见 **[docs/architecture.md](docs/architecture.md)**。
+v1 骨架，47 个测试通过，release 构建零警告：
 
-那份文档里有一节专门列出**原设计里六处站不住的说法**，以及为什么改。
-读它比读 README 有用。
+- 双阈值截断（2000 行 / 50KB）
+- 按内容位置分治的落盘（read 不落盘，bash/search 落盘）
+- 写前事务快照（项目内 .toolgate/snapshots）
+- 图片压缩流水线（缩放 → 质量阶梯 → 尺寸兜底 → 熔断）
+- 行锚点（可选模式）
+- MCP stdio 传输（三版本协商）
 
-## 当前状态
-
-v0.1，核心能力已实现并有 47 个测试覆盖：
-
-- 双阈值截断、按内容位置分治、内容寻址落盘
-- 写前事务快照（项目内 .toolgate/snapshots，可读回回滚）
-- 图片压缩流水线（缩放 → PNG/JPEG 质量阶梯 → 尺寸兜底 → 熔断）
-- 行锚点（可选模式，默认关闭）
-- MCP stdio 传输，兼容 2026-07-28 / 2025-11-25 / 2025-06-18
-
-未实现（见路线图）：有损 WebP、进程组管理、流式输出、HTTP 传输。
-
-## 明确不做
-
-agent 循环、会话存储、检查点、上下文压缩、提示词构造、模型路由。
-这些属于调用侧，工具层做不了也不该做。理由见架构文档 §8。
+**v2 需要的本地模型接入层尚未实现**——按「先定架构，后写实现」的
+顺序，等架构审阅通过再动手。
 
 ## 许可
 
