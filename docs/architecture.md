@@ -80,7 +80,6 @@ write/edit 是唯二「挡不住什么」的工具，它们的存在是为了让
 ### 2.0 组件视图
 
 这张图保留原始架构图的全部组件，只在其上增加「本地模型层」。
-静态预览：![系统组件视图](images/system-overview.png)
 
 ```mermaid
 flowchart TD
@@ -135,8 +134,6 @@ flowchart TD
 
 同一套组件，按「答案空间大小」重排成四级阶梯。这张图回答的是
 「一次调用该走到哪一层」。
-
-静态预览：![成本阶梯视图](images/cost-ladder.png)
 
 ```mermaid
 flowchart TD
