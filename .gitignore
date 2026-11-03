@@ -1,0 +1,13 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# 运行期产物
+/.toolgate
+*.log
+
+# 编辑器
+.DS_Store
+.idea/
+.vscode/
