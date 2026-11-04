@@ -3,6 +3,7 @@
 //! 本 crate 不关心传输层。MCP、CLI 或嵌入式调用都复用同一套
 //! 工具实现与治理规则。
 
+pub mod encoding;
 pub mod hashline;
 pub mod media;
 pub mod spill;

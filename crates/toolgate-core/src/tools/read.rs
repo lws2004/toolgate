@@ -65,7 +65,11 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     }
 
     let bytes = tokio::fs::read(&path).await?;
-    if media::looks_binary(&bytes) {
+
+    // 先认编码：UTF-16 文件天然含 NUL 字节，不能按「有 NUL 即二进制」拦下。
+    let encoding = crate::encoding::FileEncoding::detect(&bytes);
+    let is_wide = encoding.name().starts_with("UTF-16");
+    if !is_wide && media::looks_binary(&bytes) {
         return Err(ToolError::Failed(format!(
             "{} 是二进制文件（{} 字节），不能按文本读取。若需处理请用 bash 调用专用工具。",
             path.display(),
@@ -73,7 +77,9 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         )));
     }
 
-    let text = String::from_utf8_lossy(&bytes);
+    // 按检测出的编码解码。had_errors 为真说明有字节无法在该编码下解释，
+    // 此时显示内容里的替换字符不是原文，必须告知调用方。
+    let (text, had_decode_errors) = encoding.decode(&bytes);
     let total_lines = text.lines().count();
 
     let offset = optional_usize(args, "offset").unwrap_or(1).max(1);
@@ -105,6 +111,13 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     };
 
     let mut out = body;
+    if had_decode_errors {
+        out.push_str(&format!(
+            "\n[警告：此文件按 {} 解码时出现无法解释的字节，\
+             显示内容里的问号方块（U+FFFD）是替换字符，不是原文。]",
+            encoding.name()
+        ));
+    }
     if truncation.truncated {
         let next = offset + shown.len();
         let reason = match truncation.truncated_by {
@@ -125,6 +138,8 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "shownLines": shown.len(),
         "truncated": truncation.truncated,
         "anchored": with_anchor,
+        "encoding": encoding.name(),
+        "decodeErrors": had_decode_errors,
     })))
 }
 

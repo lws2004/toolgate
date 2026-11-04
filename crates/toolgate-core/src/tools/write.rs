@@ -36,17 +36,26 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
 
     let existed = path.exists();
 
-    // 覆盖前留一份旧内容。新建文件没有旧内容，跳过。
-    let snapshot = if existed {
-        match tokio::fs::read_to_string(&path).await {
-            Ok(old) => ctx.snapshots.snapshot(&path, &old).ok(),
-            Err(_) => None, // 原文件不是合法 UTF-8，无法做文本快照
+    // 覆盖已有文件时沿用它的编码；新建文件用 UTF-8。
+    // 这样 write 一个 GBK 文件不会把它悄悄转成 UTF-8。
+    let (encoding, snapshot) = if existed {
+        match tokio::fs::read(&path).await {
+            Ok(old_bytes) => {
+                let enc = crate::encoding::FileEncoding::detect(&old_bytes);
+                let (old_text, _) = enc.decode(&old_bytes);
+                (enc, ctx.snapshots.snapshot(&path, &old_text).ok())
+            }
+            Err(_) => (crate::encoding::FileEncoding::default(), None),
         }
     } else {
-        None
+        (crate::encoding::FileEncoding::default(), None)
     };
 
-    tokio::fs::write(&path, content).await?;
+    // 目标编码无法表示新内容时明确报错，不静默替换成问号。
+    let out_bytes = encoding
+        .encode(content)
+        .map_err(|e| ToolError::Failed(format!("{} 写入失败：{e}", path.display())))?;
+    tokio::fs::write(&path, &out_bytes).await?;
 
     let lines = content.lines().count();
     let snapshot_meta = snapshot
@@ -71,6 +80,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "lines": lines,
         "created": !existed,
         "snapshot": snapshot_meta,
+        "encoding": encoding.name(),
     })))
 }
 

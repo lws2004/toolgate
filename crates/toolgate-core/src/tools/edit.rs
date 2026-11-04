@@ -58,9 +58,21 @@ pub fn spec() -> ToolSpec {
 
 pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolError> {
     let path = ctx.resolve(required_str(args, "path")?);
-    let original = tokio::fs::read_to_string(&path)
+    let bytes = tokio::fs::read(&path)
         .await
         .map_err(|e| ToolError::Failed(format!("无法读取 {}：{e}", path.display())))?;
+
+    // 读-改-写必须字节保真：按检测出的编码解码，改完再用同一编码写回。
+    let encoding = crate::encoding::FileEncoding::detect(&bytes);
+    let (original, had_decode_errors) = encoding.decode(&bytes);
+    if had_decode_errors {
+        return Err(ToolError::Failed(format!(
+            "{} 按 {} 解码时出现无法解释的字节。继续读写会破坏这些字节，\
+             请先用 bash 确认编码或转码（例如 iconv -f GBK -t UTF-8）。",
+            path.display(),
+            encoding.name()
+        )));
+    }
 
     let updated = if let Some(anchor_raw) = optional_str(args, "anchor") {
         apply_anchor_mode(&original, anchor_raw, optional_str(args, "newText").unwrap_or(""))?
@@ -79,7 +91,11 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     // 落盘前留一份原文，供回滚。
     let snapshot = ctx.snapshots.snapshot(&path, &original).ok();
 
-    tokio::fs::write(&path, &updated).await?;
+    // 按原编码写回。目标编码无法表示新内容时明确报错，不静默替换。
+    let out_bytes = encoding
+        .encode(&updated)
+        .map_err(|e| ToolError::Failed(format!("{} 写回失败：{e}", path.display())))?;
+    tokio::fs::write(&path, &out_bytes).await?;
 
     let diff = unified_diff(&original, &updated, &path.display().to_string());
     let snapshot_meta = snapshot
@@ -93,13 +109,72 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "bytesBefore": original.len(),
         "bytesAfter": updated.len(),
         "snapshot": snapshot_meta,
+        "encoding": encoding.name(),
     })))
+}
+
+/// 行尾风格。读改写必须保留它，否则 CRLF 文件会被整体转成 LF，
+/// git diff 会显示全文件修改。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineEnding {
+    Lf,
+    Crlf,
+}
+
+impl LineEnding {
+    /// 看第一个换行符前面是不是 \r。
+    fn detect(text: &str) -> Self {
+        match text.find('\n') {
+            Some(i) if i > 0 && text.as_bytes()[i - 1] == b'\r' => Self::Crlf,
+            _ => Self::Lf,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Lf => "\n",
+            Self::Crlf => "\r\n",
+        }
+    }
+}
+
+/// 每一行在**原始字节**里的 (start, end)，end 不含 \r 与 \n。
+///
+/// 不能用 lines().map(|l| l.len() + 1) 累加来算偏移——CRLF 文件每行是
+/// len + 2 字节，那样算出来的位置会一路偏小，替换到错误的地方。
+fn line_spans(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut spans = Vec::new();
+    let mut start = 0usize;
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'\n' {
+            let mut end = i;
+            if end > start && bytes[end - 1] == b'\r' {
+                end -= 1;
+            }
+            spans.push((start, end));
+            start = i + 1;
+        }
+    }
+    if start < bytes.len() {
+        spans.push((start, bytes.len()));
+    }
+    spans
+}
+
+/// 把行内容按原始字节切出来，供匹配与锚点使用。
+fn split_lines(text: &str) -> Vec<&str> {
+    line_spans(text)
+        .into_iter()
+        .map(|(s, e)| &text[s..e])
+        .collect()
 }
 
 /// 行锚点模式：校验哈希后替换单行。
 fn apply_anchor_mode(original: &str, anchor_raw: &str, new_text: &str) -> Result<String, ToolError> {
     let anchor = parse_anchor(anchor_raw).map_err(|e| ToolError::BadArgument(e.to_string()))?;
-    let mut lines: Vec<&str> = original.lines().collect();
+    let ending = LineEnding::detect(original);
+    let mut lines = split_lines(original);
     if anchor.line > lines.len() {
         return Err(ToolError::Failed(format!(
             "锚点行号 {} 超出文件行数 {}",
@@ -120,9 +195,9 @@ fn apply_anchor_mode(original: &str, anchor_raw: &str, new_text: &str) -> Result
     }
     lines[idx] = new_text;
 
-    let mut out = lines.join("\n");
+    let mut out = lines.join(ending.as_str());
     if original.ends_with('\n') {
-        out.push('\n');
+        out.push_str(ending.as_str());
     }
     Ok(out)
 }
@@ -194,7 +269,11 @@ fn locate(original: &str, old: &str) -> Result<(usize, usize), String> {
 
     // 归一化匹配：逐行比对，容忍引号/破折号/空白差异。
     let norm_old = normalize(old);
-    let orig_lines: Vec<&str> = original.lines().collect();
+    let spans = line_spans(original);
+    let orig_lines: Vec<&str> = spans
+        .iter()
+        .map(|(s, e)| &original[*s..*e])
+        .collect();
     let old_lines: Vec<&str> = old.lines().collect();
 
     let mut hits: Vec<usize> = Vec::new();
@@ -210,23 +289,24 @@ fn locate(original: &str, old: &str) -> Result<(usize, usize), String> {
     match hits.len() {
         1 => {
             let line_start = hits[0];
-            // 换算成字节偏移。
-            let byte_start: usize = orig_lines[..line_start]
-                .iter()
-                .map(|l| l.len() + 1)
-                .sum();
-            // 区间长度要区分末行：oldText 不以换行结尾时，不能把原文的
-            // 行尾换行一并吞掉，否则会把相邻两行粘成一行。
-            let window = &orig_lines[line_start..line_start + old_lines.len()];
-            let mut byte_len = 0usize;
-            for (i, line) in window.iter().enumerate() {
-                byte_len += line.len();
-                let is_last = i + 1 == window.len();
-                if !is_last || old.ends_with('\n') {
-                    byte_len += 1;
+            // 偏移直接从原始字节的行边界取，不做 len+1 累加——
+            // CRLF 文件每行是 len+2 字节，累加会一路偏小。
+            let (byte_start, _) = spans[line_start];
+            let (_, last_end) = spans[line_start + old_lines.len() - 1];
+            let mut byte_len = last_end - byte_start;
+
+            // oldText 以换行结尾时，把该行后的分隔符也纳入替换区间。
+            if old.ends_with('\n') {
+                let bytes = original.as_bytes();
+                let mut nl = last_end;
+                if bytes.get(nl) == Some(&b'\r') {
+                    nl += 1;
                 }
+                if bytes.get(nl) == Some(&b'\n') {
+                    nl += 1;
+                }
+                byte_len = nl - byte_start;
             }
-            let byte_len = byte_len.min(original.len() - byte_start);
             Ok((byte_start, byte_len))
         }
         0 => Err(format!(
@@ -335,6 +415,52 @@ mod tests {
         let hash = line_anchor("beta");
         let out = apply_anchor_mode(src, &format!("2#{hash}"), "BETA").expect("ok");
         assert_eq!(out, "alpha\nBETA\n");
+    }
+
+    #[test]
+    fn anchor_mode_preserves_crlf() {
+        // CRLF 文件必须保持 CRLF，否则 git diff 会显示全文件修改。
+        let src = "alpha\r\nbeta\r\n";
+        let hash = line_anchor("beta");
+        let out = apply_anchor_mode(src, &format!("2#{hash}"), "BETA").expect("ok");
+        assert_eq!(out, "alpha\r\nBETA\r\n");
+        assert_eq!(out.matches("\r\n").count(), 2, "两处 CRLF 都要在");
+    }
+
+    #[test]
+    fn anchor_mode_preserves_lf() {
+        let src = "alpha\nbeta\n";
+        let hash = line_anchor("beta");
+        let out = apply_anchor_mode(src, &format!("2#{hash}"), "BETA").expect("ok");
+        assert_eq!(out, "alpha\nBETA\n");
+        assert!(!out.contains('\r'));
+    }
+
+    #[test]
+    fn anchor_mode_keeps_missing_trailing_newline() {
+        let src = "alpha\nbeta";
+        let hash = line_anchor("beta");
+        let out = apply_anchor_mode(src, &format!("2#{hash}"), "BETA").expect("ok");
+        assert_eq!(out, "alpha\nBETA", "原文没有末尾换行，结果也不该有");
+    }
+
+    #[test]
+    fn normalized_match_offset_is_correct_with_crlf() {
+        // CRLF 文件每行是 len+2 字节。若按 len+1 累加偏移，
+        // 替换会落到错误位置。这里用 LF 形式的 oldText 强制走归一化路径。
+        let src = "one\r\ntwo\r\nthree\r\n";
+        let edits = vec![json!({ "oldText": "one\ntwo", "newText": "1\n2" })];
+        let out = apply_text_mode(src, &edits).expect("ok");
+        assert_eq!(out, "1\n2\r\nthree\r\n");
+        assert!(out.ends_with("three\r\n"), "第三行不能被破坏");
+    }
+
+    #[test]
+    fn exact_match_works_on_crlf_without_touching_other_lines() {
+        let src = "one\r\ntwo\r\nthree\r\n";
+        let edits = vec![json!({ "oldText": "two", "newText": "TWO" })];
+        let out = apply_text_mode(src, &edits).expect("ok");
+        assert_eq!(out, "one\r\nTWO\r\nthree\r\n");
     }
 
     #[test]
