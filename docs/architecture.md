@@ -1138,20 +1138,33 @@ v1 的做法（纯压缩）保留为降级路径。v2 的主路径是本地理�
 ```text
 读到图片
   ↓
-d1 判定 image_kind 与 need_pixels
-  ↓
-need_pixels = true（判断审美、精确像素对比、复杂图表推理）
-  → 走 v1 压缩流水线，返回原图
-  ↓
-need_pixels = false
-  → 按 kind 分流：
-     UI 截图   → VL grounding → 元素列表 + 坐标 + 层级
-     文档/表单 → VL OCR      → 文本 + 布局
-     代码截图  → VL OCR      → 代码文本（可直接 edit）
-     图表      → VL 描述     → 趋势 + 关键数值
-     照片      → VL 描述     → 内容描述
-  → 返回结构化结果，原图路径放 meta
+【前置】上游模型支持视觉吗？
+        （来自请求 _meta > 启动配置 > 保守默认 false，见 §18.1b）
+  ├─ 否 → 强制走本地理解，只返回文本，绝不返回 image block
+  │        └─ 按 kind 分流（同下方 need_pixels=false 分支）
+  └─ 是 → 继续
+       ↓
+     decide 槽位判定 image_kind 与 need_pixels
+       ↓
+     need_pixels = true（判断审美、精确像素对比、复杂图表推理）
+       → 走压缩流水线，返回原图
+       ↓
+     need_pixels = false
+       → 按 kind 分流：
+          UI 截图   → vision 槽位 grounding → 元素列表 + 坐标 + 层级
+          文档/表单 → vision 槽位 OCR      → 文本 + 布局
+          代码截图  → vision 槽位 OCR      → 代码文本（可直接 edit）
+          图表      → vision 槽位 描述     → 趋势 + 关键数值
+          照片      → vision 槽位 描述     → 内容描述
+       → 返回结构化结果，原图路径放 meta
 ```
+
+**前置判断为什么要放最前面**：如果上游根本收不了 image block，后面所有
+「要不要给原图」的判定都没有意义——给了也是白给，还可能让客户端报错中断。
+
+**注意前置判断的结果会影响 need_pixels 的语义**：上游不支持视觉时，
+即便 d1 判定「这张图必须看原图」，也只能退回文本理解，并在返回里说明
+「本可以给原图，但当前上游模型不支持」。
 
 ### 10.2 一个具体例子
 
@@ -1643,30 +1656,99 @@ slm:
     model_dir: ~/.toolgate/models
 ```
 
-### 18.1b 能力感知：通过启动配置声明上游模型能力
+### 18.1b 上游模型能力：运行时协商，不是启动声明
 
 原文要求「如果主模型不支持 Vision，自动强制走本地降维」。
 
-v2 之前把这个推给了调用侧，理由「工具层拿不到模型信息」。这个理由
-只对了一半——MCP 协议确实不传模型能力，但**工具层可以通过启动配置知道**：
+早期版本用启动配置声明：
 
 ```yaml
 upstream:
-  vision: true        # 上游模型是否接受图片输入
-  max_image_edge: 1568
+  vision: true
 ```
 
-有了这个开关，read 读到图片时的行为就确定了：
+**这个设计不准确。** toolgate 服务的是 DSH、pi 这类 agent，它们的**会话模型
+可以在会话中途切换**。启动时声明的能力在切换后就失效，产生两种错配：
 
-| upstream.vision | 行为 |
-|---|---|
-| true | 按 §10.1 决策树：need_pixels 时返回 image block，否则返回结构化理解 |
-| false | **强制走 VL 理解**，只返回文本（OCR / 描述 / 元素列表），绝不返回 image block |
+| 配置 | 实际发生 | 后果 |
+|---|---|---|
+| vision: true | 用户切到纯文本模型 | 返回的 image block 被拒（DSH 会抛 UNSUPPORTED_CONTENT） |
+| vision: false | 用户切到视觉模型 | 白白走 OCR，浪费视觉能力 |
 
-这样「能力感知」在工具层落地，不依赖调用方记得传参，也不改 MCP 协议。
+**能力判断必须发生在每次调用，而不是每次启动。**
 
-默认值：vision = true（保守假设上游能看图）。若上游实际不支持，工具层
-返回的 image block 会被拒绝——这比静默失败好，因为错误信息明确。
+#### MCP 2026-07-28 提供了正确的通道
+
+这个版本的规范取消了 initialize 握手：
+
+> There is no negotiation handshake. Every request carries its protocol
+> version, and the server accepts or rejects each request independently.
+
+**版本、身份与能力作为每个请求的元数据传递**（per-request metadata，
+放在 _meta 字段）。所以「当前会话用什么模型」可以随每次 tools/call 一起过来，
+天然支持中途切换。
+
+#### 但协议没有「模型能力」这个维度
+
+需要说清楚：MCP 规范的 capabilities 指的是**协议特性支持**
+（sampling、roots、elicitation 等），**不包含「上游模型是否支持视觉」**。
+
+这是协议层的空白，需要 toolgate 自定义扩展字段。所以下面是本项目的
+约定，不是标准。
+
+#### 三层优先级
+
+```text
+1. 请求级 _meta（最高）——客户端每次调用时告知当前模型能力
+2. intent 参数         ——客户端显式表达「我要原图」
+3. 启动配置            ——默认值，供不支持 _meta 的客户端兜底
+4. 保守默认            ——都没有时，不给 image block
+```
+
+请求形态：
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "read",
+    "arguments": { "path": "screenshot.png", "intent": "auto" },
+    "_meta": {
+      "toolgate/upstream": {
+        "vision": false,
+        "maxImageEdge": 1568
+      }
+    }
+  }
+}
+```
+
+#### 保守默认：不确定就不给
+
+客户端不传 _meta、启动配置也没设时，默认 **vision: false**，即不返回
+image block，只返回文本理解结果。
+
+理由：**给错比给少更糟**。给了不支持的内容，客户端可能直接报错中断；
+给少了，模型还能显式用 intent=visual 再要一次。
+
+#### 这与 §8.6 的「信息量优先」不矛盾
+
+两处的「保守」方向相反，因为场景不同：
+
+| 场景 | 不确定性 | 处理 | 理由 |
+|---|---|---|---|
+| 隔离回退（§8.6） | 内容敏感度已知，只是给不给 | **尽量多给** | 少给会导致模型瞎猜，猜错成本高 |
+| 能力协商（本节） | 对方能不能收未知 | **宁可少给** | 给错会导致硬失败，中断整轮 |
+
+判据是「不确定的是什么」：不确定「该不该给」就多给（有策略兜底），
+不确定「能不能收」就少给（有重试兜底）。
+
+#### 客户端侧的实现建议
+
+DSH 已经有 llm.resolveModelInfo() 能拿到 inputModalities，取值填进
+_meta 即可。pi 侧对应 model.inputLimits.images。
+
+不实现也可以——toolgate 会退到启动配置，再退到保守默认，只是多一轮往返。
 
 ### 18.2 通信网关的三种形态
 
