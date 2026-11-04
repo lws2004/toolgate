@@ -145,6 +145,79 @@ token 花多了可以接受，客户端报错中断要重来。
 **判据**：如果模型拿到这个返回后，下一步只能「猜」或「重试同样的调用」，
 说明失败不可行动，设计有问题。
 
+#### 怎么保证每个错误都可行动
+
+光有原则不够——实现时很容易顺手写一句 「工具执行失败」就返回。
+所以要三层保证，让「不可行动的错误」写不出来或测不过。
+
+**第一层：类型层**
+
+ToolError 的每个变体都强制携带 next_steps，构造时就必须想「用户下一步能做什么」：
+
+```rust
+pub enum ToolError {
+    UnknownTool { name: String, available: Vec<String> },
+    BadArgument { message: String, hint: String },
+    Failed { fact: String, reason: String, next_steps: Vec<String> },
+}
+```
+
+没有「只带 message 的变体」可选——想返回错误就必须填这三个字段。
+
+**第二层：返回层**
+
+错误响应在 structuredContent.error 里结构化，而不是只有一段文本：
+
+```json
+{
+  "isError": true,
+  "content": [{ "type": "text", "text": "..." }],
+  "structuredContent": {
+    "error": {
+      "fact": "文件不是合法 UTF-8，第 42 字节无法解码",
+      "reason": "读-改-写要求字节保真，lossy 写回会破坏原字节",
+      "nextSteps": [
+        "用 bash 转码后编辑：iconv -f GBK -t UTF-8 原文件 > /tmp/x",
+        "或改用 read 查看可读部分"
+      ]
+    }
+  }
+}
+```
+
+文本形态给人看，结构化形态给程序判断。
+
+**第三层：测试层**
+
+遍历所有错误路径，断言 nextSteps 非空：
+
+```rust
+#[test]
+fn every_error_carries_next_steps() {
+    // 逐个触发：文件不存在、编码非法、锚点失配、参数缺失、
+    // 未知工具、超时、输出超限……
+    for resp in all_error_paths() {
+        let steps = resp.meta["error"]["nextSteps"].as_array().unwrap();
+        assert!(!steps.is_empty(), "错误缺少可执行下一步：{resp:?}");
+    }
+}
+```
+
+**元测试**：用 match 穷举所有 ToolError 变体，新增变体时编译失败：
+
+```rust
+fn assert_all_variants_covered(e: &ToolError) {
+    match e {
+        ToolError::UnknownTool { .. } => {}
+        ToolError::BadArgument { .. } => {}
+        ToolError::Failed { .. } => {}
+        // 新增变体 → 编译失败 → 逼着补测试
+    }
+}
+```
+
+这条比前两层更重要：**前两层靠自觉，第三层靠编译器**。
+
 ---
 
 ## 2. 系统全景
@@ -1614,6 +1687,8 @@ v1 把「本地 LFM3 摘要」与「d1 路由」移出了工具层，理由是�
 | 置信度门控 | 小 | 纯逻辑 |
 | 降级路径 | 小 | 纯逻辑 |
 | 各工具的 L1/L2/L3 接入 | 大 | 上述全部 |
+| 错误自检三层（类型/返回/测试） | 小 | 纯逻辑 + 测试 |
+| 槽位可空时的降级分支 | 小 | 纯逻辑 |
 
 ### 13.3 需要改动
 
@@ -1664,6 +1739,8 @@ B 的复杂度不值得一开始就背。
 - 降级路径（模型不可用时静默回退到 L0）
 
 验收：能对一段固定文本问「有错吗」，拿到带概率的答案。
+
+同期完成错误自检三层（§1.4）——它是纯逻辑，不依赖模型，可以先做完。
 
 ### 阶段 2：单工具接入
 
