@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 检查架构文档的完整性。用于防止「插入内容时覆盖邻近章节」这类事故。
+# 检查架构文档的完整性。用于防止「插入内容时覆盖邻近章节」与「引用指向不存在的章节」这类事故。
 set -uo pipefail
 
 DOC="${1:-docs/architecture.md}"
@@ -11,21 +11,29 @@ if [ ! -f "$DOC" ]; then
 fi
 
 echo "=== 章节连续性 ==="
-missing=""
-for n in $(seq 0 19); do
-    if ! grep -q "^## ${n}\." "$DOC"; then
-        missing="$missing $n"
-    fi
-done
-if [ -n "$missing" ]; then
-    echo "缺失章节:$missing"
+nums=$(grep -oE '^## [0-9]+\.' "$DOC" | grep -oE '[0-9]+' | sort -n)
+if [ -z "$nums" ]; then
+    echo "没有找到任何编号章节"
     fail=1
+    max=0
 else
-    echo "§0-19 全部存在"
+    max=$(echo "$nums" | tail -1)
+    missing=""
+    for n in $(seq 0 "$max"); do
+        if ! echo "$nums" | grep -qx "$n"; then
+            missing="$missing $n"
+        fi
+    done
+    if [ -n "$missing" ]; then
+        echo "缺失章节:$missing（最大章节号 $max）"
+        fail=1
+    else
+        echo "§0-$max 全部存在"
+    fi
 fi
 
 echo "=== 附录 ==="
-for a in A B; do
+for a in A B C; do
     if grep -q "^## 附录 ${a}" "$DOC"; then
         echo "附录 ${a} 存在"
     else
@@ -33,6 +41,22 @@ for a in A B; do
         fail=1
     fi
 done
+
+echo "=== 交叉引用 ==="
+refs=$(grep -oE '§[0-9]+' "$DOC" | sed 's/§//' | sort -n -u)
+dangling=""
+for n in $refs; do
+    if ! echo "$nums" | grep -qx "$n"; then
+        dangling="$dangling §$n"
+    fi
+done
+if [ -n "$dangling" ]; then
+    echo "悬空引用:$dangling"
+    fail=1
+else
+    count=$(echo "$refs" | wc -l | tr -d ' ')
+    echo "交叉引用全部存在（${count} 个不同章节号）"
+fi
 
 echo "=== 代码围栏 ==="
 fences=$(grep -c '^```' "$DOC" || echo 0)

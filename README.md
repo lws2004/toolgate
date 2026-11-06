@@ -94,7 +94,7 @@ cargo build --release
 
 ## 当前代码状态
 
-v1 骨架，47 个测试通过，release 构建零警告：
+v1 骨架，57 个测试通过（以 `cargo test` 输出为准），release 构建零警告：
 
 - 双阈值截断（2000 行 / 50KB）
 - 按内容位置分治的落盘（read 不落盘，bash/search 落盘）
