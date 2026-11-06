@@ -63,11 +63,19 @@ for a in A B C D; do
 done
 
 echo "=== 交叉引用 ==="
-refs=$(grep -oE '§[0-9]+' "$tmp" | sed 's/§//' | sort -n -u)
+refs=$(grep -oE '§[0-9]+(\.[0-9]+){0,2}[a-z]?' "$tmp" | sed 's/§//' | sort -u)
 dangling=""
-for n in $refs; do
-    if ! echo "$nums" | grep -qx "$n"; then
-        dangling="$dangling §$n"
+for r in $refs; do
+    base=$(echo "$r" | grep -oE '^[0-9]+')
+    if ! echo "$nums" | grep -qx "$base"; then
+        dangling="$dangling §$r"
+        continue
+    fi
+    if echo "$r" | grep -qE '\.'; then
+        esc=$(echo "$r" | sed 's/\./\\./g')
+        if ! grep -qE "^#{2,4} ${esc}([^0-9a-z]|$)" "$tmp"; then
+            dangling="$dangling §$r"
+        fi
     fi
 done
 if [ -n "$dangling" ]; then

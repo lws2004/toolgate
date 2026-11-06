@@ -6,7 +6,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Status](https://img.shields.io/badge/architectural--review-v2-yellow)
 
-> **状态**：架构已迭代到 v2（围绕本地小模型），**等待审阅**。
+> **状态**：架构已迭代到 v2（围绕本地小模型），**已审阅（2026-11-07），阶段 0 完成**；实现仍按约定暂不启动。
 > 仓库里的代码是 v1 骨架（无本地模型），与 v2 的差距见
 > [架构文档 §13](docs/architecture/11-runtime.md)。
 
@@ -90,7 +90,7 @@ cargo build --release
 | [调研：DSH](docs/research-notes-dsh.md) | PTC、两层治理、checkpoint 机制 |
 | [调研：外部事实](docs/research-notes-external.md) | CacheRouter、MCP 规范、hashline 溯源 |
 | [调研：本地模型](docs/research-notes-models.md) | d1 / LFM3 / VL 的官方规格 |
-| [决策记录](docs/decisions/) | 4 份 ADR，含一次判断翻转 |
+| [决策记录](docs/decisions/) | 5 份 ADR，含一次判断翻转 |
 
 ## 当前代码状态
 

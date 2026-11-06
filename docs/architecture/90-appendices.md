@@ -18,7 +18,7 @@
 | **快思考路由 d1** | **归入 decide 槽位**（jev 类，§3.4） | d1 属于 jev 类，不是与 jev 并列的另一类 |
 | 模型适配层 HTTP 解耦 | 进程内/进程外都支持；槽位模型默认进程内，30B 级 agent 模型默认进程外（§18.1） | 兼顾延迟与共享需求 |
 | 执行引擎安全底线 | 独立成章（§17） | 原文有列但未展开 |
-| checkpoint 在引擎 | 归调用方，契约在 §18.4 定义 | 工具层无状态，但提供可重放 |
+| checkpoint 在引擎 | 归调用方，契约在 §18.4 定义 | 工具层无状态；只读工具可重放，写工具需调用方 checkpoint + operationId（§18.4） |
 | 事务回滚（写前快照） | 已实现，机制见 §20 | v1 曾误判归会话层 |
 | Task Input 宏观协议 | **调用方契约，本文档定义**（§18.3） | 不是不做，是归属不同 |
 | Task Result 契约 | 同上（§18.3） | |
@@ -90,9 +90,9 @@ isolation:
   redact_min_retention: 0.5
 
 slots:                    # 不写就是没有（§3.8）
-  classify:  { model: jev-d1-2b, provides: [probability] }
+  classify:  { model: d1-2B, provides: [probability] }
   rerank:    { model: jina-reranker-v3.5-mlx }
-  decide:    { model: jev-d1-2b, provides: [probability, span, multimodal] }
+  decide:    { model: d1-2B, provides: [probability, span, multimodal] }
   summarize: { model: lfm3-1.7b, provides: [text, structured, long_context] }
   vision:    { model: lfm3-vl-2b }
 

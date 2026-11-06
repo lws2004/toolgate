@@ -265,7 +265,7 @@ fn every_error_carries_next_steps() {
 }
 ```
 
-**元测试**：用 match 穷举所有 ToolError 与 ErrorCode 变体，并开启 `#![deny(non_exhaustive_omitted_patterns)]`——Rust 默认只给警告，只有把警告升级为错误，新增变体才会真的编译失败、逼着补测试：
+**元测试**：用 match 穷举所有 ToolError 与 ErrorCode 变体，**不要加 `_` 通配分支**——本 crate 的枚举 match 非穷举本身就是编译错误（E0004），新增变体会直接编译失败。`#![deny(non_exhaustive_omitted_patterns)]` 只用于跨 crate 的 `#[non_exhaustive]` 枚举；本项目的变体都在本 crate 内，不需要它：
 
 ```rust
 fn assert_all_variants_covered(e: &ToolError) {
@@ -274,7 +274,7 @@ fn assert_all_variants_covered(e: &ToolError) {
         ToolError::BadArgument { .. } => {}
         ToolError::Io { .. } => {}
         ToolError::Failed { .. } => {}
-        // 新增变体 → deny 后编译失败 → 逼着补测试
+        // 新增变体 → 非穷举编译失败 → 逼着补测试
     }
 }
 ```

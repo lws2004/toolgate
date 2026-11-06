@@ -71,6 +71,9 @@ reranker（如 bge-reranker-v2-m3，约 568M）。
 官方原文："not recommended for agentic coding or complex multi-step
 reasoning due to its small size"。
 
+**这是 1.7B 的边界，不是「本地模型」的边界。** 2026 年 30B 级开源模型在
+工具调用基准上已进入与云端前沿同一档，架构文档 §1.2 已按此修正论证方式。
+
 来源：https://huggingface.co/LiquidAI/LFM3-1.7B
 
 ## 四、LFM3-VL-2B（视觉生成）
@@ -104,7 +107,8 @@ d1 的基座就是 LFM3-VL-2B，但输出形态不同：
 | 给一批候选排序 | listwise reranker |
 | 一段生成的文字 / JSON | LFM3-1.7B |
 | 图里有什么 / 在哪 / 什么字 | LFM3-VL-2B |
-| 规划、写代码、多步推理 | 云端 |
+| 短程多步工具调用（3-5 步、工具集受限、每步可验证） | 30B 级本地模型（2026 年已可用，见架构 §1.2） |
+| 长程规划、跨文件推理、写代码 | 云端 |
 
 ## 七、部署变体
 
