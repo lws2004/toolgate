@@ -8,7 +8,7 @@
 
 > **状态**：架构已迭代到 v2（围绕本地小模型），**等待审阅**。
 > 仓库里的代码是 v1 骨架（无本地模型），与 v2 的差距见
-> [架构文档 §13](docs/architecture.md)。
+> [架构文档 §13](docs/architecture/11-runtime.md)。
 
 ## 它要回答的问题
 
@@ -45,7 +45,7 @@
 | summarize | 文本 → 文本或 JSON | < 1s |
 | vision | 图片 + 任务 → 文本 / 坐标 / OCR | < 2s |
 
-当前参考实现见 [架构文档 §3.4](docs/architecture.md)。换模型的条件是
+当前参考实现见 [架构文档 §3.4](docs/architecture/03-slots.md)。换模型的条件是
 同时满足：输出形态匹配、延迟在预算内（本机实测）、许可证允许、中文达标。
 
 ## 六个工具
@@ -85,7 +85,7 @@ cargo build --release
 
 | 文档 | 内容 |
 |---|---|
-| [架构文档](docs/architecture.md) | 完整设计、成本模型、介入判据、路线图 |
+| [架构文档](docs/architecture.md) | 总目录与核心命题（§0–§2）；分册在 [docs/architecture/](docs/architecture/) |
 | [调研：pi](docs/research-notes-pi.md) | pi 源码实测，含四处与原设计的差异 |
 | [调研：DSH](docs/research-notes-dsh.md) | PTC、两层治理、checkpoint 机制 |
 | [调研：外部事实](docs/research-notes-external.md) | CacheRouter、MCP 规范、hashline 溯源 |

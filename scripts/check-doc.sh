@@ -1,17 +1,37 @@
 #!/usr/bin/env bash
-# 检查架构文档的完整性。用于防止「插入内容时覆盖邻近章节」与「引用指向不存在的章节」这类事故。
+# 检查架构文档的完整性。默认检查总目录 + 全部分册；也可传单个文件。
+# 用于防止「插入内容时覆盖邻近章节」与「引用指向不存在的章节」这类事故。
 set -uo pipefail
 
-DOC="${1:-docs/architecture.md}"
-fail=0
-
-if [ ! -f "$DOC" ]; then
-    echo "找不到 $DOC"
-    exit 1
+if [ "$#" -gt 0 ]; then
+    FILES="$1"
+else
+    FILES="docs/architecture.md"
+    if [ -d docs/architecture ]; then
+        FILES="$FILES $(ls docs/architecture/*.md 2>/dev/null | sort)"
+    fi
 fi
 
+for f in $FILES; do
+    if [ ! -f "$f" ]; then
+        echo "找不到 $f"
+        exit 1
+    fi
+done
+
+tmp=$(mktemp "${TMPDIR:-/tmp}/toolgate-doc-check.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+cat $FILES > "$tmp"
+
+fail=0
+
+echo "=== 文件 ==="
+for f in $FILES; do
+    echo "  $f"
+done
+
 echo "=== 章节连续性 ==="
-nums=$(grep -oE '^## [0-9]+\.' "$DOC" | grep -oE '[0-9]+' | sort -n)
+nums=$(grep -oE '^## [0-9]+\.' "$tmp" | grep -oE '[0-9]+' | sort -n)
 if [ -z "$nums" ]; then
     echo "没有找到任何编号章节"
     fail=1
@@ -33,8 +53,8 @@ else
 fi
 
 echo "=== 附录 ==="
-for a in A B C; do
-    if grep -q "^## 附录 ${a}" "$DOC"; then
+for a in A B C D; do
+    if grep -q "^## 附录 ${a}" "$tmp"; then
         echo "附录 ${a} 存在"
     else
         echo "附录 ${a} 缺失"
@@ -43,7 +63,7 @@ for a in A B C; do
 done
 
 echo "=== 交叉引用 ==="
-refs=$(grep -oE '§[0-9]+' "$DOC" | sed 's/§//' | sort -n -u)
+refs=$(grep -oE '§[0-9]+' "$tmp" | sed 's/§//' | sort -n -u)
 dangling=""
 for n in $refs; do
     if ! echo "$nums" | grep -qx "$n"; then
@@ -59,16 +79,19 @@ else
 fi
 
 echo "=== 代码围栏 ==="
-fences=$(grep -c '^```' "$DOC" || echo 0)
-if [ $((fences % 2)) -ne 0 ]; then
-    echo "围栏数为奇数（${fences}），有未闭合的代码块"
-    fail=1
-else
-    echo "围栏 ${fences} 个，成对"
+for f in $FILES; do
+    fences=$(grep -c '^```' "$f" || echo 0)
+    if [ $((fences % 2)) -ne 0 ]; then
+        echo "$f 围栏数为奇数（${fences}），有未闭合的代码块"
+        fail=1
+    fi
+done
+if [ "$fail" -eq 0 ]; then
+    echo "各文件围栏均成对"
 fi
 
 echo "=== 占位符 ==="
-if grep -q '@@@' "$DOC"; then
+if grep -q '@@@' "$tmp"; then
     echo "发现未替换的 @@@ 占位符"
     fail=1
 else
@@ -76,12 +99,12 @@ else
 fi
 
 echo "=== 规模 ==="
-lines=$(wc -l < "$DOC" | tr -d ' ')
+lines=$(wc -l < "$tmp" | tr -d ' ')
 if [ "$lines" -lt 1500 ]; then
-    echo "行数 ${lines} 低于预期下限 1500，可能被截断"
+    echo "总行数 ${lines} 低于预期下限 1500，可能被截断"
     fail=1
 else
-    echo "行数 ${lines}"
+    echo "总行数 ${lines}"
 fi
 
 echo ""
