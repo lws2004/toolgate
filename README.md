@@ -85,12 +85,14 @@ cargo build --release
 
 | 文档 | 内容 |
 |---|---|
-| [架构文档](docs/architecture.md) | 总目录与核心命题（§0–§2）；分册清单见总目录[阅读地图](docs/architecture.md#阅读地图) |
+| [架构文档](docs/architecture.md) | 总目录与核心命题（§0–§2）；分册清单见总目录的[阅读地图](docs/architecture.md#阅读地图) |
 | [调研：pi](docs/research-notes-pi.md) | pi 源码实测，含四处与原设计的差异 |
 | [调研：DSH](docs/research-notes-dsh.md) | PTC、两层治理、checkpoint 机制 |
 | [调研：外部事实](docs/research-notes-external.md) | CacheRouter、MCP 规范、hashline 溯源 |
 | [调研：本地模型](docs/research-notes-models.md) | d1 / LFM3 / VL 的官方规格 |
 | [决策记录](docs/decisions/) | 5 份 ADR，含一次判断翻转 |
+
+> 路径基准：上表相对链接以仓库根为基准；分册文件位于 `docs/architecture/`。
 
 ## 当前代码状态
 

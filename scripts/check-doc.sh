@@ -106,6 +106,11 @@ else
     echo "无残留占位符"
 fi
 
+echo "=== 内部链接 ==="
+if ! python3 scripts/check-links.py; then
+    fail=1
+fi
+
 echo "=== 规模 ==="
 lines=$(wc -l < "$tmp" | tr -d ' ')
 if [ "$lines" -lt 1500 ]; then
