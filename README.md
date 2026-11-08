@@ -45,7 +45,7 @@
 | summarize | 文本 → 文本或 JSON | < 1s |
 | vision | 图片 + 任务 → 文本 / 坐标 / OCR | < 2s |
 
-当前参考实现见 [架构文档 §3.4](docs/architecture/03-slots.md#34-当前参考实现)。换模型的条件是
+当前参考实现见 [附件 E.2](docs/architecture/95-references.md#e2-槽位参考实现)（正文 §3.4 只讲选型原则）。换模型的条件是
 同时满足：输出形态匹配、延迟在预算内（本机实测）、许可证允许、中文达标。
 
 ## 六个工具
@@ -86,6 +86,7 @@ cargo build --release
 | 文档 | 内容 |
 |---|---|
 | [架构文档](docs/architecture.md) | 总目录与核心命题（§0–§2）；分册清单见总目录的[阅读地图](docs/architecture.md#阅读地图) |
+| [AGENTS.md](AGENTS.md) | 参与架构迭代 / 实现 / 评审的 agent 工作规范：红线、流程、验证清单 |
 | [调研：pi](docs/research-notes-pi.md) | pi 源码实测，含四处与原设计的差异 |
 | [调研：DSH](docs/research-notes-dsh.md) | PTC、两层治理、checkpoint 机制 |
 | [调研：外部事实](docs/research-notes-external.md) | CacheRouter、MCP 规范、hashline 溯源 |

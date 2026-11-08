@@ -3,6 +3,8 @@
 > 本文是 [architecture.md](../architecture.md) 的分册，章节编号与总目录一致。
 > 返回总目录：[architecture.md](../architecture.md)
 
+> 参考、比较、研究与实测数据统一放在 [95-references.md](95-references.md)（附件 E）；本文件只保留对照表、术语与配置参考。
+
 ## 附录 A：与原设计文档的逐条对照
 
 | 原设计 | 本文档 | 原因 |
@@ -16,7 +18,7 @@
 | 6 大厚工具 | 6 个，理由是三条约束 | 行业无收敛趋势 |
 | **本地 LFM3 摘要** | **升级为核心，且不绑定具体模型**（§3） | v1 移出是错的；现已抽象为槽位 |
 | **快思考路由 d1** | **归入 decide 槽位**（jev 类，§3.4） | d1 属于 jev 类，不是与 jev 并列的另一类 |
-| 模型适配层 HTTP 解耦 | 进程内/进程外都支持；槽位模型默认进程内，30B 级 agent 模型默认进程外（§18.1） | 兼顾延迟与共享需求 |
+| 模型适配层 HTTP 解耦 | 进程内/进程外都支持；判定槽位默认进程内、生成与批处理槽位默认进程外，30B 级 agent 模型默认进程外（§18.1） | 兼顾延迟、共享与故障隔离 |
 | 执行引擎安全底线 | 独立成章（§17） | 原文有列但未展开 |
 | checkpoint 在引擎 | 归调用方，契约在 §18.4 定义 | 工具层无状态；只读工具可重放，写工具需调用方 checkpoint + operationId（§18.4） |
 | 事务回滚（写前快照） | 已实现，机制见 §20 | v1 曾误判归会话层 |
@@ -29,11 +31,15 @@
 | 无（原文未提） | 能力槽位抽象（§3） | 架构不绑定模型，换模型不动架构 |
 | 无（原文未提） | 隔离强度外部可配（§8.3-8.7） | 被约束方不能决定约束 |
 | 无（原文未提） | 编排归属与编排下沉（§21、§21.7） | 审阅时补：一次调用里用多个工具，以及本地模型会多步之后角色怎么变 |
+| 无（原文未提） | 最少依赖原则（§1.5、§19.6） | 依赖是负债：默认层只留六类，其余进可选层或禁止层 |
 | 无（原文未提） | 编码与行尾保真（§5.6） | 读改写不能破坏用户文件 |
 | Rust 强约束 | §19.1 说明约束的是四类错误，不是「性能」 | 标题支柱之一，之前未展开 |
 | 通用 | §19.5 四个不绑定 + 明确不等于万能 | 标题支柱之一，之前未展开 |
 | CacheRouter 支撑端云协同 | 只支撑工具表稳定 | 论文无端云论述 |
 | LFM3-VL | LFM3-VL-2B | 名称精确性 |
+| 本地模型按毫秒计费（§1.1） | 按 prefill 时间 + 固定开销 + 生成时间计费（§6.4） | 2026-11-07 本机实测（§6.4），架构口径取 LFM3-1.7B-8bit |
+| 「256K 上下文能一次读完日志」（§9.3） | 落盘保留全量，喂模型只给有界候选窗口（§6.4、§9.3） | 12.8K token 的 prefill 是秒级；窗口上限不是延迟预算 |
+| 无（原文未提） | 各槽位本机实测（§6.5） | 2026-11-07 用本地权重校准 §3.1 预算，H100 口径五档无一成立 |
 
 ---
 
@@ -57,6 +63,7 @@
 | F1 / F2 / F3 | 三种使用形态：直连云端 agent / PTC 云端 agent / 本地 agent | §6.2 |
 | L0–L4 | 成本阶梯：确定性 / 判定 / 生成 / 视觉 / 云端 | §2.1、§6.1 |
 | 槽位 | 能力契约，不是具体模型：classify / rerank / decide / summarize / vision | §3.1 |
+| embedded / http | 槽位模型的两种部署形态：进程内动态库 / 本机回环 HTTP 服务 | §18.1 |
 | intent | 调用方表达的输出偏好：raw / summary / structured / visual / auto | §4.2 |
 | spill | 超限输出的落盘副本 + 指针 | §9.1 |
 | snapshot | 写前保存的旧内容副本 | §20 |
@@ -67,61 +74,75 @@
 
 ## 附录 D：配置参考
 
-一份完整配置示例（字段名与 §3.8 / §8.5 / §8.11 / §8.12 / §18.1 一致）：
+**默认配置：无配置文件也能启动。** 所有字段都有内置默认值；只写你要覆盖的字段，
+字段语义见对应章节。
+
+### 最小配置
+
+空文件即可。需要本地模型时，只增加要用的槽位：
 
 ```yaml
-intent:
-  default: raw            # v2 首版 raw；auto 需显式开启（§4.2）
-
-isolation:
-  default: summary
-  max_exposure: raw
-  rules:
-    - glob: "**/.env*"
-      level: none
-    - glob: "**/secrets/**"
-      level: none
-    - glob: "**/*.log"
-      level: summary
-  content_rules:          # §8.11，覆盖 bash/search 的输出
-    - kind: secret_pattern
-      level: redact
-  fallback_chain: [redact, structure, summarize, refuse]
-  redact_min_retention: 0.5
-
-slots:                    # 不写就是没有（§3.8）
-  classify:  { model: d1-2B, provides: [probability] }
-  rerank:    { model: jina-reranker-v3.5-mlx }
-  decide:    { model: d1-2B, provides: [probability, span, multimodal] }
-  summarize: { model: lfm3-1.7b, provides: [text, structured, long_context] }
-  vision:    { model: lfm3-vl-2b }
-
-slm:                      # §18.1
-  mode: embedded          # embedded | http
-  embedded:
-    backend: llama-cpp    # llama-cpp | mlx
-    model_dir: ~/.toolgate/models
-  http:
-    base_url: http://127.0.0.1:8080
-
-limits:                   # §9.1
-  max_lines: 2000
-  max_bytes: 51200
-
-spill:                    # §8.12
-  ttl_days: 7
-  max_bytes: 1073741824
-
-snapshot:                 # §20
-  keep: 20
-
-cache:                    # §16.3
-  max_bytes: 536870912
-
-logging:                  # §15.2
-  level: warn
+slots:
+  summarize: { model: lfm3-1.7b }
 ```
 
+### 常用覆盖
+
+```yaml
+slots:
+  summarize: { model: lfm3-1.7b }
+slm:
+  mode: http                 # 多客户端共享模型服务时
+fetch:
+  provider: dsh-web-fetch    # 需要 web 内容经过 toolgate 治理时；默认 none
+```
+
+### 默认值
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `intent.default` | `raw` | v2 首版保持 v1 行为；`auto` 需显式开启（§4.2） |
+| `isolation.default` | `summary` | 默认隔离档 |
+| `isolation.max_exposure` | `raw` | 外部策略的硬上限（§8.3） |
+| `isolation.rules` | `.env*` / `secrets/**` → `none`；`*.log` → `summary` | 内置路径规则，可追加覆盖 |
+| `isolation.content_rules` | `secret_pattern`、`path_username`、`host_metadata` → `redact` | 覆盖 bash/search 输出（§8.11） |
+| `isolation.fallback_chain` | `[redact, structure, summarize, refuse]` | 脱敏无意义时的降级顺序 |
+| `isolation.redact_min_retention` | `0.5` | 脱敏后保留率下限 |
+| `paths.expose_absolute` | `false` | 模型可见路径默认工作区相对；raw 显式开启才绝对 |
+| `slots` | `{}` | 不写就是没有模型；机械治理仍可用（§3.8） |
+| `slm.mode` | `auto` | 按槽位分档选择 embedded/http（§18.1） |
+| `slm.embedded.backend` | 平台默认 | macOS `mlx`，其他平台 `llama-cpp` |
+| `slm.embedded.model_dir` | `~/.toolgate/models` | 模型权重目录 |
+| `slm.embedded.max_resident_models` | `2` | 热槽位 + 一个冷槽位（§18.1） |
+| `slm.embedded.idle_ttl_seconds` | `600` | 冷槽位空闲卸载 |
+| `slm.http.base_url` | `http://127.0.0.1:8080` | 进程外模型服务地址 |
+| `limits.max_lines` | `2000` | 双阈值截断 |
+| `limits.max_bytes` | `51200` | 双阈值截断 |
+| `spill.ttl_days` | `7` | 落盘副本 TTL |
+| `spill.max_bytes` | `1073741824` | 每工作区上限 |
+| `snapshot.data` | `auto` | reflink / copy，见 §20.2b |
+| `snapshot.min_free_bytes` | `536870912` | 低于此值拒绝创建快照，不等待 GC |
+| `snapshot.keep_per_file` | `20` | 每文件保留最近 N 份 |
+| `snapshot.min_retention_hours` | `24` | 保护期 |
+| `snapshot.ttl_days` | `30` | 过期时间 |
+| `snapshot.max_bytes` | `1073741824` | 每工作区后台 GC 目标 |
+| `snapshot.gc_interval_hours` | `24` | 后台巡检间隔 |
+| `cache.max_bytes` | `536870912` | 摘要/图片缓存上限 |
+| `logging.level` | `warn` | 日志级别 |
+| `fetch.provider` | `none` | `read({url})` 的取数适配器；可选 dsh-web-fetch / pi / opencli / moli / command |
+| `fetch.transport` | `stdio` | `stdio`（NDJSON）或 `http` |
+| `fetch.command` | `[]` | provider=command/dsh-web-fetch 时的命令数组 |
+| `fetch.endpoint` | 空 | transport=http 时的 loopback URL |
+| `fetch.timeout_ms` | `30000` | provider 单次超时 |
+| `fetch.max_bytes` | `10485760` | 返回内容上限，超出由 provider 或 toolgate 截断 |
+| `fetch.max_concurrency` | `8` | URL 取数并发上限（受全局 max_concurrency 约束） |
+| `fetch.per_host_concurrency` | `2` | 同一 host 并发上限 |
+| `govern.endpoint` | `http://127.0.0.1:8099` | DSH/pi 钩子调用治理入口 |
+| `govern.timeout_ms` | `30000` | 治理请求超时 |
+| `govern.max_concurrency` | `min(CPU×2, 16)` | 治理请求并发上限 |
+| `govern.fail_open` | `false` | 治理不可用时默认拒绝，不静默放行 |
+
 **加载顺序**：CLI 参数 > 环境变量 `TOOLGATE_*` > 配置文件（`--config`，默认 `~/.toolgate/config.yaml`）> 内置默认。
+**缺省**：配置文件不存在时全部使用内置默认，不视为错误；存在但字段非法才 fail loud。
 **校验**：配置错误启动即失败（fail loud），不静默降级。
 **热加载**：不支持；改配置需重启（§8.8）。

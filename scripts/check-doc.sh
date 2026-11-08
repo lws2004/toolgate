@@ -88,7 +88,7 @@ fi
 
 echo "=== 代码围栏 ==="
 for f in $FILES; do
-    fences=$(grep -c '^```' "$f" || echo 0)
+    fences=$(grep -c '^```' "$f" || true)
     if [ $((fences % 2)) -ne 0 ]; then
         echo "$f 围栏数为奇数（${fences}），有未闭合的代码块"
         fail=1
