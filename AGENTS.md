@@ -36,7 +36,7 @@ toolgate 是本地常驻的工具层：云端做规划，本地做理解与执�
 | 任何改动 | [architecture.md](docs/architecture.md) §0–§2（定位、核心命题、系统全景） |
 | 架构迭代 | 相关分册 + [§13 差距](docs/architecture/11-runtime.md) + [评审报告](docs/architecture-review-2026-11-07.md)对应条目 |
 | 实现工具 | [04-tools.md](docs/architecture/04-tools.md) 对应章节 + §17 安全 + §20 快照 |
-| 模型 / 槽位 | [03-slots.md](docs/architecture/03-slots.md) + [15-deployment.md](docs/architecture/15-deployment.md) §18.1 |
+| 模型 / 槽位 | [03-slots.md](docs/architecture/03-slots.md) + [18-deployment.md](docs/architecture/18-deployment.md) §18.1 |
 | 依赖变化 | §1.5 + §19.6 + [附件 E.8](docs/architecture/95-references.md) |
 | 决策历史 | [docs/decisions/](docs/decisions/) |
 

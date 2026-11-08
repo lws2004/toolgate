@@ -26,9 +26,13 @@
 |---|---|---|---|
 | [03-slots.md](architecture/03-slots.md) | §3 | 五个能力槽位与替换判据 | 要接模型、换模型时 |
 | [04-tools.md](architecture/04-tools.md) | §4–§5 | 三层结构、intent、六个工具 | 要实现或改工具时 |
-| [06-governance.md](architecture/06-governance.md) | §6–§10 | 成本模型、介入判据、隔离、输出治理、附件 | 要定策略与阈值时 |
+| [06-cost.md](architecture/06-cost.md) | §6–§7 | 成本模型、介入判据 | 要定成本与阈值时 |
+| [08-isolation.md](architecture/08-isolation.md) | §8 | 数据隔离：四档、规则、回退 | 要定隔离策略时 |
+| [09-output.md](architecture/09-output.md) | §9–§10 | 输出治理、附件与多模态 | 要处理输出与图片时 |
 | [11-runtime.md](architecture/11-runtime.md) | §11–§14 | 边界、前提修正、差距、路线图 | 排期与范围判断时 |
-| [15-deployment.md](architecture/15-deployment.md) | §15–§22 | 风险、缓存、安全、部署、快照、编排、主动性 | 部署与运维时 |
+| [15-risk.md](architecture/15-risk.md) | §15–§17 | 风险、缓存、安全 | 评估风险与安全时 |
+| [18-deployment.md](architecture/18-deployment.md) | §18–§19 | 部署形态、接口契约、技术选型 | 部署与选型时 |
+| [20-behavior.md](architecture/20-behavior.md) | §20–§22 | 快照、编排、主动性 | 实现运行行为时 |
 | [90-appendices.md](architecture/90-appendices.md) | 附录 A–D | 对照表、术语表、配置参考 | 查表时 |
 | [95-references.md](architecture/95-references.md) | 附件 E | 参考、比较、研究与实测数据 | 查依据与背景时 |
 

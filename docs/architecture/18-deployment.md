@@ -1,0 +1,590 @@
+# toolgate 架构设计 · 部署形态与技术选型（§18–§19）
+
+> 本文是 [architecture.md](../architecture.md) 的分册，章节编号与总目录一致。
+> 返回总目录：[architecture.md](../architecture.md)
+
+## 18. 部署形态与接口契约
+
+模型适配层与 Task Input / Task Result 的边界决策如下——**它们不是不做，是归属不同**。
+
+### 18.1 模型适配层：进程内还是进程外
+
+模型适配层支持进程内与进程外两种形态，**默认按槽位分档，不是一刀切**：
+
+- **判定类槽位（classify / decide）默认进程内（embedded）**——预算几十毫秒，
+  IPC 的 1-3ms 占比不可忽略；
+- **生成与批处理槽位（rerank / summarize / vision）默认进程外（http）**——预算
+  秒级，IPC 可以忽略，而模型更大、常驻成本更高。
+
+| 形态 | 延迟 | 数据边界 | 适用 |
+|---|---|---|---|
+| 进程内（embedded） | 最低（无 IPC） | 数据不出进程 | 单实例、单信任域、模型小且常驻 |
+| 进程外（http，loopback） | +1-3ms（本机回环） | 数据出进程但不出机器 | 多实例共享、模型大、要故障隔离 |
+| 远程 | +网络延迟 | 数据出机器 | 不推荐（违背数据隔离） |
+
+**为什么不是五个槽位一律进程内**：进程内的收益是省掉 IPC 的 1-3ms，这笔收益只在
+「端到端预算几十毫秒」的槽位上成立。§3.1 的预算里只有 classify（<20ms）与
+decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank（批处理）
+的预算比 IPC 大两三个数量级，进程内省下的时间可以忽略，却要把数 GB 的模型
+装进工具进程。
+
+| 槽位 | 默认模式 | 理由 |
+|---|---|---|
+| classify | embedded | 预算 <20ms；参考实现是 2-4B 的 jev 类，常驻成本可控 |
+| decide | embedded | 预算 <30ms；判定在每次工具调用的热路径上 |
+| rerank | http | 批处理、N 可变；570M 模型常驻换不来收益 |
+| summarize | http | 预算 <1s；生成模型较大，进程内常驻不划算 |
+| vision | http | 预算 <2s；多模态后端平台绑定最重 |
+
+**30B 级 agent 模型默认走进程外**：它占的内存与显存不该由工具进程背，而且
+它通常要被多个 agent 共享。上面的进程内默认建立在「2B、数 GB、每次调用
+毫秒级」这三个前提上，30B 一个都不满足。
+
+**进程内默认还有三个前提**，任一不满足就该整机走 http：
+
+1. **单实例、单信任域**：多信任域要多实例（§18.2），每个实例各加载一份进程内
+   模型，内存翻倍；共享一个进程外模型服务才是正确形态；
+2. **单模型能装进进程**：模型权重加运行时开销超过可用内存时，进程内不可行；
+3. **能接受 native 崩溃带走工具进程**：见下面的故障边界，这是 embedded 的固有
+   代价，不是实现缺陷。
+
+#### 进程内模式的执行模型
+
+进程内 = 推理引擎以动态库（llama.cpp / MLX）形式加载进 toolgate 主进程，
+不是「模型文件放在同一目录」。架构对它提五条约束：
+
+1. **模型实例按模型文件去重，不按槽位编号。** 多个槽位指向同一模型时共享一个
+   实例（§3.9 的 provides）；实例是进程级单例，引用计数归零才能卸载。
+2. **常驻上限默认 2 个模型实例，热槽位优先。** classify / decide 指向同一模型时
+   共用一个实例（参考实现就是这种形态）；指向不同模型时两个都常驻，冷槽位不再
+   驻留。冷槽位按 LRU 竞争剩余名额。依据是参考实现的内存账：五个槽位全常驻
+   约 10GB（4B + 2.2B + 1.7B + 1.9B + 0.57B 的 8bit 权重，估算值，未含运行时
+   开销），普通开发机放不下。上限可配（`slm.embedded.max_resident_models`）；
+   启动时按模型文件大小估算常驻内存，估算值超过物理内存 50% 即拒绝启动。
+3. **加载时机：热槽位启动时预加载，冷槽位首次调用时懒加载。** 预加载在后台
+   线程进行，不阻塞 MCP 启动；未就绪期间该槽位按不可用降级，并在 meta 里标注
+   「模型加载中」。
+4. **并发：一个模型实例一个专用推理线程 + 有界队列，实例内推理串行。**
+   native 推理上下文不是线程安全的，不能直接在 tokio task 里跑；队列满时返回
+   排队深度或按 §7.3 降级，不无界堆积。不同实例之间可以并行。
+5. **卸载：冷槽位空闲 TTL（默认 10 分钟）后卸载；配置变更要重启（§8.8）。**
+   卸载只丢 KV 缓存，不影响落盘副本与快照。
+
+#### 进程内的故障边界
+
+三类失败必须分开，不能都用「降级」兜：
+
+| 失败 | 能否在进程内处理 | 行为 |
+|---|---|---|
+| 模型文件缺失 / 加载失败 | 能 | 该槽位置为不可用，按 §3.8 降级，工具继续（§7.3） |
+| 推理错误 / 超时 | 能 | 该次调用降级；连续失败 N 次后实例标记 poisoned，后续直接降级 |
+| native abort / SIGSEGV | **不能** | 整个 toolgate 进程退出 |
+
+第三类是进程内模式的固有代价：C++ / Apple 框架的崩溃不能靠 Rust 的
+`catch_unwind` 兜住。所以进程内模式**不承诺**§7.3 的「本地模型不可用工具必须
+仍工作」全覆盖——它只覆盖前两类。要覆盖第三类，必须用进程外模式，让模型服务
+自己崩，toolgate 调用失败后降级。
+
+**这也是选择 http 的第二个理由：不是延迟，是故障隔离。**
+
+#### 进程外模式（http）与共享
+
+进程外是本地回环 HTTP：`llama-server` / `rapid-mlx` 独立常驻，toolgate 只做客户端。
+它换来三件事：
+
+- **故障隔离**：模型进程崩溃不影响工具进程；
+- **共享**：同一台机器上的多个 toolgate 实例（多信任域，§18.2）共用一个模型服务，
+  避免重复加载；
+- **后端自由**：llama.cpp / MLX / vLLM 都可以，不限 Rust 绑定。
+
+代价是 +1-3ms 回环延迟，以及模型服务自身的生命周期要有人管（谁拉起、谁看护）。
+在单机单用户、判定槽位的场景下这两项是纯成本，所以判定类默认不走它。
+
+#### 配置形态
+
+```yaml
+slm:
+  mode: auto                   # auto（默认）| embedded | http
+  embedded:
+    backend: llama-cpp | mlx   # 槽位未覆盖时使用
+    model_dir: ~/.toolgate/models
+    max_resident_models: 2
+    idle_ttl_seconds: 600
+  http:
+    base_url: http://127.0.0.1:8080
+
+slots:
+  decide:    { model: d3-nano, mode: embedded }
+  summarize: { model: lfm3-1.7b, mode: http }
+```
+
+`mode` 是槽位级字段：不写时继承 `slm.mode`；`auto` 按上面的分档表展开，显式写
+`embedded` / `http` 则覆盖默认。`backend` 同理（槽位级可选）。
+
+**配置错误与资源失败要分开**：未知 backend、未知槽位名、模型常驻内存估算超过
+物理内存 50% → 启动即失败（fail loud）；模型文件缺失、显存不足 → 该槽位不可用
+（§3.8），不阻塞启动。
+
+**参考实现的部署形态**：§3.4 的参考模型当前都以进程外服务验证（MLX :8090、
+llama.cpp :8082），embedded 后端尚未实现（§13.1）。这是实现差距，不是架构
+默认被否定——进程内后端落地前，`mode` 的实际取值只能是 `http`。
+
+### 18.1b 上游模型能力：运行时协商，不是启动声明
+
+**决策：上游模型不支持 Vision 时自动走本地降维；能力判断必须发生在每次调用，
+不是启动声明。** toolgate 服务的是 DSH、pi 这类 agent，它们的**会话模型可以
+在会话中途切换**。启动时声明的能力在切换后就失效，产生两种错配：
+
+| 配置 | 实际发生 | 后果 |
+|---|---|---|
+| vision: true | 用户切到纯文本模型 | 返回的 image block 被拒（DSH 会抛 UNSUPPORTED_CONTENT） |
+| vision: false | 用户切到视觉模型 | 白白走 OCR，浪费视觉能力 |
+
+**能力判断必须发生在每次调用，而不是每次启动。**
+
+#### MCP 2026-07-28 提供了正确的通道
+
+这个版本的规范取消了 initialize 握手：
+
+> There is no negotiation handshake. Every request carries its protocol
+> version, and the server accepts or rejects each request independently.
+
+**版本、身份与能力作为每个请求的元数据传递**（per-request metadata，
+放在 _meta 字段）。所以「当前会话用什么模型」可以随每次 tools/call 一起过来，
+天然支持中途切换。
+
+#### 但协议没有「模型能力」这个维度
+
+需要说清楚：MCP 规范的 capabilities 指的是**协议特性支持**
+（sampling、roots、elicitation 等），**不包含「上游模型是否支持视觉」**。
+
+这是协议层的空白，需要 toolgate 自定义扩展字段。所以下面是本项目的
+约定，不是标准。
+
+#### 三层优先级
+
+```text
+1. 请求级 _meta（最高）——客户端每次调用时告知当前模型能力
+2. intent 参数         ——客户端显式表达「我要原图」
+3. 启动配置            ——默认值，供不支持 _meta 的客户端兜底
+4. 保守默认            ——都没有时，不给 image block
+```
+
+请求形态：
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "read",
+    "arguments": { "path": "screenshot.png", "intent": "auto" },
+    "_meta": {
+      "toolgate/upstream": {
+        "vision": false,
+        "maxImageEdge": 1568
+      },
+      "toolgate/session": { "session_id": "sess_01" },
+      "toolgate/turn": { "turn_id": "turn_01", "seq": 3, "budget": { "max_judgments": 8 } }
+    }
+  }
+}
+```
+
+`toolgate/session` 用于 task 表分区（§18.5）；`toolgate/turn` 用于 d1 判定聚合（§13.4），两者都是**可选**字段：缺省时服务端退化为无会话隔离与每工具单独判定，不报错。
+
+#### 保守默认：不确定就不给
+
+客户端不传 _meta、启动配置也没设时，默认 **vision: false**，即不返回
+image block，只返回文本理解结果。
+
+理由：**给错比给少更糟**。给了不支持的内容，客户端可能直接报错中断；
+给少了，模型还能显式用 intent=visual 再要一次。
+
+#### 这与 §8.6 的「信息量优先」不矛盾
+
+两处的「保守」方向相反，因为场景不同：
+
+| 场景 | 不确定性 | 处理 | 理由 |
+|---|---|---|---|
+| 隔离回退（§8.6） | 内容敏感度已知，只是给不给 | **尽量多给** | 少给会导致模型瞎猜，猜错成本高 |
+| 能力协商（本节） | 对方能不能收未知 | **宁可少给** | 给错会导致硬失败，中断整轮 |
+
+判据是「不确定的是什么」：不确定「该不该给」就多给（有策略兜底），
+不确定「能不能收」就少给（有重试兜底）。
+
+#### 客户端侧的实现建议
+
+DSH 已经有 llm.resolveModelInfo() 能拿到 inputModalities，取值填进
+_meta 即可。pi 侧对应 model.inputLimits.images。
+
+不实现也可以——toolgate 会退到启动配置，再退到保守默认，只是多一轮往返。
+
+### 18.2 通信网关的三种形态
+
+原文列了 MCP Server / CLI / rpi-plugin-sdk。v2 的定位：
+
+| 形态 | 状态 | 用途 |
+|---|---|---|
+| MCP Server（stdio） | 已实现 | 主路径，供任意 agent 接入 |
+| CLI | 已实现 | 调试与脚本调用 |
+| 插件 SDK | **不做** | 见下 |
+
+**一个 server 实例 = 一个信任域。** 隔离配置（§8.5）是进程级、改配置要重启（§8.8），所以同一个实例不能同时服务「需要 none 档」与「需要 raw 档」的两个 agent。多信任域的正确做法是**多实例**，各自持有自己的配置；多个实例可以共享同一个进程外 SLM 服务（§18.1），避免重复加载模型。这条同时解释了为什么 §18.2 的「跨 agent 复用」指的是同一信任域内的复用。
+
+**为什么不做插件 SDK**：插件形态意味着工具跑在宿主进程内，共享宿主的
+生命周期与内存。这与「本地常驻、跨 agent 复用」的目标冲突，且要为每个
+宿主维护一套 ABI。MCP 已经解决了跨 agent 复用的问题。
+
+### 18.3 Task Input / Task Result：这是调用方的契约
+
+原文 §六 定义了两个宏观边界。v2 明确：**它们由调用方实现，但契约在
+本文档定义**——因为工具层的行为要与之对齐。
+
+**Task Input**（调用方 → 其 agent 循环）
+
+```json
+{
+  "task_id": "req_01",
+  "goal": "分析截图 design.png，并修复 src/auth.rs 中的空指针",
+  "acceptance": ["cargo test 全绿", "不改动 src/ 之外的文件"],
+  "budget": { "max_iterations": 5, "max_seconds": 600 },
+  "attachments": [{ "type": "local_path", "path": "/tmp/design.png" }]
+}
+```
+
+**Task Result**（agent 循环 → 调用方）
+
+```json
+{
+  "task_id": "req_01",
+  "status": "partial",
+  "checkpoint_id": "ckpt_002",
+  "content": [
+    { "type": "text", "text": "已修复 auth.rs。日志已折叠，请按需读取 /tmp/bash_out_001.log" },
+    { "type": "image", "mimeType": "image/png", "data": "iVBORw0..." }
+  ]
+}
+```
+
+**acceptance 是本地执行的前提**（§21.7.1）：没有它，执行方不知道「尽力完成」
+做到哪算完。§18.3 之前只给了 goal，那是云端 agent 自己规划时的写法；交给本地执行
+时必须补上验收标准与预算。
+
+**status 的取值**：done（完成且自检通过）/ partial（有进展但未完成）/ failed（尝试后
+失败）/ needs_escalation（需要人介入）。后两个的区别是：failed 说明这条路走不通，
+needs_escalation 说明需要人做决定。
+
+**工具层在其中的位置**：Task 内部的每一次工具调用是 tools/call，
+是 Task 的原子操作。工具层不接收 Task Input，也不产生 Task Result。
+
+这样既保留契约定义，又不与「只有 6 个工具」矛盾。
+
+### 18.4 断点续传的契约
+
+**决策：达到步数上限未完成时，保存 checkpoint_id 并返回 partial。**
+工具层不实现，但契约要定义清楚：
+
+| 字段 | 谁产生 | 含义 |
+|---|---|---|
+| acceptance | 调用方 | 验收标准。本地执行据此判断「做到哪算完」（§21.7.1） |
+| budget.max_iterations | 调用方 | 本次任务最多几轮 |
+| budget.max_seconds | 调用方 | 本次任务最长多久 |
+| checkpoint_id | 调用方（会话层） | 断点标识，可据此恢复 |
+| status | 调用方 | done / partial / failed / needs_escalation（取值含义见 §18.3）；**预算耗尽一律 partial**（§21.7.5） |
+
+**工具层能提供什么**：分两类看，不能一概而论。
+
+| 工具 | 可重放？ | 原因 | 调用方要做什么 |
+|---|---|---|---|
+| read / search | 是 | 输入确定、输出确定、无副作用 | 记录调用即可重建 |
+| write / edit / bash（有副作用） | 否 | 重放会重复写、重复执行 | 用自己的 checkpoint 保证「已执行的调用不再执行」；工具层提供 operationId 做幂等键 |
+
+**可重放 ≠ 确定性**：确定性是「同输入同输出」，幂等是「重复执行不重复副作用」。§16.3 只能保证前者。
+
+写工具的返回带 `operationId`：相同 operationId 的重复调用返回首次结果，不重复执行。这是调用方做幂等重试的基础。
+
+### 18.5 执行模型：并发、取消、生命周期
+
+§21.2 要求工具「可编排」，但没说请求怎么并发执行。这一节补上，因为它是 F2（PTC）形态的前提。
+
+#### 并发
+
+- **v1 的串行是过渡实现，不是架构约束。** `McpServer::serve_stdio` 逐请求 `await`，在 PTC 里 `Promise.all` 会退化成排队。
+- v2 目标：每请求一个 tokio task，全局并发上限 `max_concurrency`（默认 `min(CPU×2, 16)`）；超出排队，返回 `queueDepth`。
+- 只读工具（read/search）可并行；写工具（write/edit）对同一路径加进程内锁，后写者等待而不是覆盖。冲突检测用「读时记录 (mtime, size, sha256) → 写前复核 → 不一致即拒绝」，不做三方合并（工具层不猜）。
+
+#### 多客户端隔离
+
+- `task` 表按会话分区：从请求 `_meta.toolgate/session` 取会话标识；无标识时按连接隔离。
+- 一个 server 实例 = 一个信任域（§18.2）；多信任域用多实例。
+- 客户端 A 不能 `kill` 客户端 B 的任务。
+
+#### 取消
+
+- 响应 MCP `notifications/cancelled`：杀掉进程组（不是只杀父进程），释放输出缓冲，把 task 标记为 cancelled。
+- 正在执行的写操作不中途放弃：等当前这一步完成再停（与 §21.7.5「不中途打断」同一条）。
+
+#### 生命周期
+
+- task 退出后保留 30 分钟或最多 100 条，先到先回收；
+- task_id 用会话内单调计数器（`t1`, `t2`…），不用时间戳——时间戳会破坏 §16.3 的输出确定性，且当前实现 `Instant::now().elapsed()` 几乎恒为 0，会撞 ID；
+- 进程退出时杀掉所有子进程组。
+
+#### 原子写
+
+spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到半截文件，§21.2 的「并发安全」只是空话。
+
+### 18.6 接入 DSH / pi：MCP sidecar，不替换内置工具
+
+**决策：toolgate 以 MCP sidecar 接入，不替换客户端内置工具。**
+
+| 客户端 | 已有能力 | toolgate 的增量 |
+|---|---|---|
+| DSH | 6+ 内置工具、PTC、spill/pruner、output schema | 本地 SLM 理解、四档隔离、统一治理策略、结构化 meta |
+| pi | 8 个平铺工具、截断与输出落盘、MCP 客户端 | 本地 SLM 理解、task、图片理解、统一错误码与写前快照 |
+
+内置工具已经覆盖执行；toolgate 的增量在「结果出本地之前」的理解与治理。做成同名工具会制造选择歧义，因此：
+
+1. **命名空间**：DSH 的 MCP 客户端把工具挂成 `mcp__<serverName>__<rawName>`；pi 同样在 MCP 命名空间下暴露。toolgate 原始工具名保持 `read` / `bash` / `edit` / `write` / `search` / `task`，客户端侧命名空间使它们与内置 `read` / `bash` 不重名。
+2. **DSH 配置**：profile 的 `@deepseek-ai/dsh-mcp-client` 条目用 StdioConfig（`serverName: toolgate`、`command` = toolgate 二进制、`args: ["serve"]`、`cwd` 与工作根一致）。PTC 的 run_code 直接按 `tools.mcp__toolgate__read(...)` 调用。
+3. **pi 配置**：`pi mcp add toolgate -- <toolgate> serve`，或写入 `~/.pi/agent/mcp.json` 的 `mcpServers.toolgate`；按 `codemode` / `deferred` / `direct` 选曝光。
+4. **渐进启用**：先开 `bash`（大输出）与 `read`（大文件/图片），验证后再开 `edit` / `write` / `search` / `task`。客户端提示层同时声明路由规则：大结果、敏感内容、图片优先 toolgate 的 `read` / `bash`，小文件日常操作留内置工具。
+5. **多客户端共享**：DSH、pi 同时接时用 `slm.mode: http` 共享本地模型服务（§18.1），不要每个客户端各加载一份模型；单客户端单实例可用 embedded。
+
+**价值定位**：DSH PTC 已经高效，toolgate 在 PTC 下不卖「省 token」，卖**隔离与确定性**——在结果交给 run_code 程序前完成脱敏/判定/结构化；pi 没有 PTC 的上下文隔离，toolgate 同时卖「长结果治理 + 本地理解」。
+
+**缓存边界**：toolgate 不改写已发送历史，但它通过两处进入客户端请求前缀——MCP 工具声明与工具返回结果。接入/升级/工具 schema 变化会导致一次前缀 miss；运行期不得增删工具或改 description。工具结果必须字节稳定（§16.3 的输出确定性、摘要缓存、图片复用、已发送不可回写），并控制在客户端 MCP 截断阈值内（pi 20KB），避免客户端随机落盘路径进入历史。满足这些，运行期不产生额外缓存损失；否则从该结果起持续 miss。
+
+### 18.7 统一治理入口：客户端自己 fetch，结果经 toolgate 治理
+
+**决策：默认不要求 toolgate 取数。DSH / pi 的 agent 自行选择原生 `web_fetch`、浏览器、`curl`、`lark-cli`、`opencli` 或任何 MCP 工具；结果在进入模型上下文之前，统一送到 toolgate 的 `govern` 接口。**
+
+这比按来源做 provider 更简单：只有一条治理路径、一个内容契约、一套脱敏/截断/摘要规则；fetch 方式仍由客户端决定，toolgate 不绑定 web 技术栈。
+
+#### `govern` 接口
+
+- 传输：本地回环 HTTP 或 Unix socket；**不是 MCP 工具**，避免新增工具声明和工具选择歧义；
+- 请求：
+
+```json
+{
+  "source": { "kind": "web|file|tool", "tool": "web_fetch", "url": "...", "path": "..." },
+  "content": [{ "type": "text", "text": "..." }],
+  "intent": "raw|summary|structured|visual|auto",
+  "policy": { "isolation": "summary" }
+}
+```
+
+- 响应：`{content, structuredContent, meta:{slm_status, confidence, redacted, truncated, spillPointer}, isError}`；
+- 处理链与 `read` 相同：类型/大小检查 → 截断/落盘 → 脱敏（含路径用户名）→ 本地 SLM → 协商；web 内容按不可信来源处理（§15.1）；
+- 失败返回结构化 error + next；`govern.fail_open` 默认 `false`，不静默放行敏感内容。
+
+#### 客户端钩子
+
+| 客户端 | 钩子 |
+|---|---|
+| DSH | `tool/result` / `agent/pre-step` 插件，在 tool result 进模型前调用 `govern`；`dsh-ledger-compact` 的 ingress 改写是同一种机制 |
+| pi | extension 的 tool result hook / MCP result adapter |
+| 无钩子的客户端 | 使用 `read({url})` + `fetch.provider` 作为兜底 |
+
+#### `read({url})` 的位置
+
+`read({url})` 保留为**无钩子客户端**的兜底：它内部调用 `fetch.provider`，拿到内容后仍走同一治理管线。它不是主路径；有客户端钩子时，agent 自己 fetch 后交给 `govern` 即可，不需要 toolgate 再取一次。
+
+### 18.8 fetch.provider 协议（仅 read({url}) 兜底）
+
+`fetch.provider` 只在客户端没有 `govern` 钩子、由 `read({url})` 取数时使用。协议版本 1；未知主版本直接 fail loud。
+
+#### 传输
+
+- `stdio`（默认）：toolgate 启动 provider 进程；stdin/stdout 各一行一个 JSON 对象（NDJSON）；stderr 只写日志；一次请求后进程退出。
+- `http`：POST 到配置的 loopback endpoint，body 为请求对象，返回响应对象；超时由 `fetch.timeout_ms` 控制。
+- 不流式；一次请求只取一个 URL；多 URL 由 toolgate 并发调度（见下面「并发与取消」）。
+
+#### 请求
+
+```json
+{
+  "protocolVersion": 1,
+  "id": "req_uuid",
+  "method": "fetch",
+  "params": {
+    "url": "https://...",
+    "headers": { "Accept": "text/html" },
+    "timeoutMs": 30000,
+    "maxBytes": 10485760,
+    "mode": "auto|text|raw|browser"
+  }
+}
+```
+
+`headers` 不应包含模型生成的凭据；认证凭据由 provider 配置持有。
+
+#### 响应
+
+```json
+{
+  "protocolVersion": 1,
+  "id": "req_uuid",
+  "ok": true,
+  "result": {
+    "status": 200,
+    "finalUrl": "https://...",
+    "contentType": "text/html; charset=utf-8",
+    "content": [{ "type": "text", "text": "..." }],
+    "bytes": 12345,
+    "truncated": false,
+    "cache": { "etag": "...", "lastModified": "..." }
+  }
+}
+```
+
+- 二进制/图片用 `{"type":"image","data":"base64","mimeType":"image/png"}`；`bytes` 是解码后大小。
+- 失败返回 `{ok:false,error:{code,message,retryable,next}}`；错误码：`FETCH_INVALID_URL` / `FETCH_BLOCKED_URL` / `FETCH_TIMEOUT` / `FETCH_HTTP_ERROR` / `FETCH_TOO_LARGE` / `FETCH_UNSUPPORTED_CONTENT` / `FETCH_PROVIDER_UNAVAILABLE` / `FETCH_PROTOCOL_ERROR`。
+- provider 负责 URL 校验、DNS/redirect/SSRF、认证、JS/browser、反爬、重试与正文提取；`finalUrl` 必须是实际落点。
+- provider 必须先执行 `maxBytes`；超过时返回 `truncated: true` 或 `FETCH_TOO_LARGE`，toolgate 再复核一次。
+- 可选 `method:"describe"` 返回 `{name, version, modes, maxBytes, supportsImages}`，供启动自检；不实现也不影响 `fetch`。
+- provider 是独立进程/信任域；toolgate 不把 headers、cookies、URL query 中的凭据写入日志；返回内容一律按不可信来源处理（§15.1）。
+
+#### 并发与取消
+
+- `read({url})` 的多个 URL 请求按 `fetch.max_concurrency`（默认 8）并发；全局仍受 §18.5 的 `max_concurrency` 约束，取两者较小值。
+- `fetch.per_host_concurrency` 默认 2：同一 host 限流，不同 host 可并行；provider 若声明更小值，按声明执行。
+- 单 URL 失败只影响该 URL；批量结果按**请求顺序**返回（不是完成顺序），失败项带 `error` / `next`，不丢弃其他结果。
+- 取消：MCP `notifications/cancelled` 或客户端 abort → 杀掉 provider 进程组 / 取消 HTTP；排队请求直接丢弃。
+- `stdio` provider 默认一请求一进程；`http` provider 可长驻并天然并发。provider 不得把多个 URL 串成一个串行循环；toolgate 按 URL 拆分并发。
+- `govern` 侧同理：多个 tool result 可并发调用，`govern.max_concurrency` 默认 `min(CPU×2,16)`；本地 SLM 按模型实例有界队列串行（§18.1），慢摘要只阻塞自己的队列，不阻塞其他结果。
+
+`dsh-web-fetch` 适配器直接包装其 `scripts/fetch-auto.py --json`：把单 URL 结果映射成上述 `result`，把 `ok:false` 映射为对应 error code。它的内部多 URL 循环是串行的，所以 toolgate 按 URL 拆成多个进程/请求并行，不把整批交给单个进程。
+
+---
+
+## 19. 技术选型：Rust 强约束与「通用」
+
+原文档标题写着「基于 CacheRouter 理念、Pi 附件机制与 **Rust 强约束**的**通用**
+本地超级工具」。前两项在 §16 与 §10 展开，这两项补在这里。
+
+### 19.1 「强约束」约束的是什么
+
+不是「Rust 很快」，而是**四类错误从运行时前移到编译期**：
+
+| 约束 | 编译期拦住什么 | 对应的运行时事故 |
+|---|---|---|
+| 所有权与借用 | 并发读写同一份状态 | 任务表被两个线程同时改，状态错乱 |
+| Send / Sync | 把非线程安全的东西跨线程共享 | 异步任务里共享裸指针，数据竞争 |
+| Result 强制处理 | 忽略 IO 失败 | 写文件失败但返回「成功」 |
+| 无空指针 | 空引用解引用 | 段错误 |
+
+第一条和第三条与本架构的核心命题直接对应：
+
+- 工具执行天然是并发 + IO 密集（§5.5 的 task 表被多个调用共享），
+  所有权约束让「谁在什么时候能改它」成为编译期事实；
+- 命题三要求「不确定性必须显式失败」，而 Result 类型让「忘记处理错误」
+  根本编译不过——这不是靠自律，是靠类型系统。
+
+### 19.2 无 GC 与延迟预算
+
+本地工具层的卖点是低延迟。d1 的 5.7ms 预算里塞不进一次 GC 停顿。（这条只对
+槽位模型成立。30B 级 agent 模型是秒级推理，GC 停顿相对可忽略——但它的内存
+开销会把进程外模式变成必须，见 §18.1。）
+
+更实际的是**延迟可预测性**：工具调用的延迟应该由「命令本身跑多久」决定，
+而不是「恰好在哪个时刻触发了 GC」。用带 GC 的运行时写工具层，
+延迟分布会有长尾。
+
+### 19.3 单二进制分发
+
+```bash
+cargo build --release    # 产出一个可执行文件，无运行时依赖
+```
+
+对比：Node 工具要 node + node_modules，Python 工具要解释器 + venv。
+「本地常驻工具」的分发成本直接决定它会不会被真的装上去。
+
+**默认构建就是纯 L0 版**（§1.5 的默认层，依赖清单见 §19.6）。**这个卖点只对它成立。** 带 SLM 的发行版需要模型后端：llama.cpp 是 C++ 动态库，MLX 是 Apple 框架，二者都会引入平台绑定。所以发行形态分两类：
+
+| 形态 | 内容 | 单二进制 | 适用 |
+|---|---|---|---|
+| 纯 L0 版 | 工具执行 + 机械治理 | 是 | 不需要本地模型的部署 |
+| 带 SLM 版 | 主程序 + 模型后端 + 模型文件 | 否（两件套） | 需要理解与压缩的部署 |
+
+评估 Rust 原生推理（candle）作为第三条路径，若成熟可恢复单二进制。
+
+### 19.4 代价：诚实地说
+
+| 代价 | 具体表现 |
+|---|---|
+| 开发速度 | 同样的逻辑，Rust 代码量约为 Python 的 1.5-2 倍 |
+| 编译时间 | 全量构建分钟级，增量秒级（本仓库 release 约 20s） |
+| 异步复杂度 | tokio 的生命周期标注在复杂场景下很难写 |
+| 生态 | 图片处理不如 Python（有损 WebP 的编码器就是例子，见 §10.2b） |
+| 模型后端 | llama.cpp/MLX 引入 C++/Apple 框架依赖；Rust 绑定成熟度需验证（§18.1、§19.3） |
+
+**这些代价是真实的，不是「习惯了就好」。** 选 Rust 的理由是分发与延迟，
+不是「性能」——工具层的瓶颈在模型推理和 IO，不在 CPU。
+
+### 19.5 「通用」的边界
+
+原文档说「通用"本地超级工具"」。「通用」指四个不绑定：
+
+| 不绑定 | 靠什么实现 |
+|---|---|
+| agent 框架 | 只依赖 MCP 协议（§18.2） |
+| 云端模型 | 工具层不知道对面是谁（§11） |
+| 本地模型 | 五个槽位，参考实现是四个模型族（jev / jina-reranker / LFM3 / LFM3-VL），全部可替换（§3、§18.1） |
+| 操作系统 | 纯 Rust 标准库 + 跨平台 crate |
+
+**但「通用」不等于「万能」**。§15.3 列了六类不适用场景：
+一次性脚本、极短会话、内容即答案、需精确全文、纯 CPU 老机器、数据本不敏感。
+
+一个诚实的架构应该同时说清「它能做什么」和「它不该被用在哪」。
+
+### 19.6 依赖分层与清单
+
+§1.5 的「最少依赖」原则落到技术选型的台账。**默认层就是发行契约**：§19.3 的
+纯 L0 版只能包含下表「默认层」的依赖；新增项走 §1.5 的准入四问，并同时更新
+本表与附件 E.8。
+
+**默认层：默认构建必需**
+
+| 依赖 | 用途 | 为什么值得这个依赖 |
+|---|---|---|
+| serde / serde_json | MCP 协议与结构化数据编解码 | 手写 JSON 解析器的边界条件（转义、Unicode、数字精度）远多于依赖成本 |
+| tokio | 异步 IO、进程管理、任务调度 | 工具层是 IO 密集的并发模型（§18.5），标准库没有异步运行时 |
+| thiserror | 库层错误枚举与 From/Display | 手写样板会在枚举变更时漏实现，而错误契约是 §1.4.5 的硬要求 |
+| anyhow | 边界层错误包装（CLI / MCP 传输） | core 对外错误用 thiserror 定义，anyhow 只用于边界层 |
+| tracing-subscriber | 运行日志与日志级别 | 可观测性最低要求；只进 CLI（tracing 是它的传递依赖） |
+| sha2 / hex | 快照与锚点的哈希 | 密码学哈希不能自写 |
+| base64 | MCP 图片 content block | 编解码边界条件（padding、变体）多 |
+| encoding_rs / chardetng | 编码检测与转换（§5.6） | 编码表与检测统计无法自维护 |
+| regex | 机械脱敏（§8.11） | 正则引擎是安全底线，不自写 |
+| similar | edit 的 diff 事实返回（§5.7） | 行级 diff 的正确性成本高于依赖 |
+| ignore | search 的 .gitignore 语义（§5.2） | 嵌套 .gitignore、全局排除等遍历语义复杂 |
+| image | 图片解码与压缩（§10.2） | 格式解码器不能自写；feature 只开 png/jpeg/webp |
+
+三条依赖方向约束：
+
+- **core 库不依赖 anyhow / tracing-subscriber**：core 的对外错误用 thiserror
+  定义枚举；anyhow 只允许边界层（CLI / MCP 传输）；日志实现只进 CLI。
+- **不用就不声明**：Cargo.toml 的每个依赖必须有源码引用；v1 骨架遗留的未使用
+  声明（core 的 `anyhow` / `tracing`、mcp / cli 的 `tracing`）已于 2026-11-08 清退。
+- **禁止版本通配**：用主版本约束（`"1"`），精确版本交给 `Cargo.lock`；
+  `cargo update` 单独提交，不与功能改动混在一起。
+
+**可选层：默认构建不含**
+
+| 能力 | 形态 | 隔离方式 | 为什么不做进默认层 |
+|---|---|---|---|
+| 本地模型推理（embedded） | llama.cpp / MLX 的 Rust 绑定或动态库 | Cargo feature `slm-embedded`（待实现） | C++ / Apple 框架绑定破坏单二进制，native 崩溃会带走整个进程（§18.1） |
+| WebP 编码 | ffmpeg / cwebp 子进程 | 运行时检测命令是否存在（§10.2b） | 为约 3.5% 的体积收益引入 C 依赖不值得（§10.2b 的三条判据） |
+| fetch provider | 外部子进程（dsh-web-fetch / pi / opencli / moli / command） | `fetch.provider` 配置，默认 `none` | 取数能力由客户端生态提供，不内建网络栈 |
+
+**禁止层**：agent 框架（ADR 0001）、数据库 / ORM、Web 框架、模板引擎、
+GC 运行时、日志聚合客户端。它们会把「本地常驻小工具」变成「需要运维的服务」，
+与分发目标冲突。
+
+**审计**：发布前跑 `cargo tree --duplicates` 与附件 E.8 对账；默认层出现新的
+直接依赖而本表未登记，视为架构变更而不是实现细节。
+
+---
+
