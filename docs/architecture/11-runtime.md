@@ -105,7 +105,7 @@ dsh-ledger-compact 的对照与六条借鉴见附件 E.5。
 | 模块 | 改动 |
 |---|---|
 | 每个工具的 run() | 从「执行 → 返回」改为「执行 → 理解 → 协商 → 返回」 |
-| ToolResponse | 增加 confidence、slm_status、intent 字段；content 与 structuredContent 按 §4.4 分流；输出密度按 §4.7 |
+| ToolResponse | 增加 confidence、slmStatus、intent、notices 字段（含 meta.noticeOverflow）；content 与 structuredContent 按 §4.4/§4.4b 分流；输出密度按 §4.7 |
 | ToolSpec | 每个工具增加 intent 参数与 outputSchema 声明；description 按 §4.6 写三段式（能做什么 / 不能做什么 / 什么时候用别的工具） |
 | ToolError | 按 §1.4.5 重构：四个变体 + ErrorCode 枚举 + 三段式 |
 | Cargo.toml | 按 §19.6 划分 default / optional feature；模型后端 feature 默认关闭 |
@@ -153,6 +153,8 @@ PTC 里每次子调用仍是一个独立的 MCP 请求，工具层不做批量�
 
 ## 14. 路线图
 
+第一期（阶段 1–4）只覆盖 macOS（§19.7）；Windows / Linux 从阶段 6 起规划。
+
 ### 阶段 0：架构定稿（当前）
 
 - [x] 前提修正
@@ -191,13 +193,13 @@ PTC 里每次子调用仍是一个独立的 MCP 请求，工具层不做批量�
 4. **edit**（第四）→ 四级匹配 + d1 失败归因 + 改动后的事实返回（§5.7）
 5. **task**（第五）→ d1 状态判断
 
-验收：每个工具都有 raw 与 summary 两条路径，且 auto 判定正确。
+验收：每个工具都有 raw 与 summary 两条路径，且 auto 判定正确；理解链（§4.8）先在 bash 与 read 图片落地，多步与并发行为有测试。
 
 ### 阶段 3：协商层与 intent
 
 - intent 参数全面接入
 - 结构化输出的 schema 固定
-- 置信度与 slm_status 进 meta
+- 置信度与 slmStatus 进 meta
 
 验收：调用方能用 intent 精确控制拿到什么。
 
@@ -207,15 +209,20 @@ PTC 里每次子调用仍是一个独立的 MCP 请求，工具层不做批量�
 - L0 预热与 L1 预判（§22）
 - 流式输出（暂不做：MCP progress notification 只报进度，不改变工具结果的返回形态）
 - 质量阶梯标定（优先：不需要新依赖，收益确定，见 §10.2b）
+- 理解链的并发调度调优（§4.8：链级并发上限与 DAG 拓扑）
 - 有损 WebP（条件触发，三条判据见 §10.2b）
 - 进程组管理
 
-### 阶段 5（可选）：本地 agent 编排
+### 阶段 5（可选）：本地 agent 消费形态验证
 
-- 30B 级模型走进程外适配（§18.1）
-- 工具在「本地 agent 消费」形态下的行为校验（§21.7）
+- 工具在「本地 agent 消费」形态下的行为校验（§21.7）：intent=raw、事实返回、错误 nextSteps、structuredContent 稳定
+- **不包含**本地 agent 自身的实现、模型部署与完成率评测——归调用方（§21.7.9）
 
-**前置条件**：§15.4 的「本地 agent 真实完成率」测出来。到不了 70%，这一阶段
-不该开工——它会把工具层拖进「替 agent 做决策」的歧路。
+**说明**：这是兼容性验证，不是 toolgate 的功能阶段；是否值得做取决于调用方是否采用本地 agent。
+
+### 阶段 6（后续规划）：Windows / Linux
+
+- 进程管理（Job Object / POSIX）、快照数据面（FICLONE / ReFS）、路径与权限（ACL / 盘符）的移植（§19.7）
+- 不在第一期承诺，不预留实现
 
 ---

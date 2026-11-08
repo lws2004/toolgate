@@ -61,6 +61,8 @@
 
 ## 快速开始（v1 骨架，无本地模型）
 
+> 平台范围：第一期只支持 macOS（Apple Silicon 优先）；Windows / Linux 为后续规划（架构 §19.7）。
+
 ```bash
 cargo build --release
 ./target/release/toolgate list

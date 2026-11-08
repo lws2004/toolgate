@@ -36,9 +36,9 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
 | summarize | http | 预算 <1s；生成模型较大，进程内常驻不划算 |
 | vision | http | 预算 <2s；多模态后端平台绑定最重 |
 
-**30B 级 agent 模型默认走进程外**：它占的内存与显存不该由工具进程背，而且
-它通常要被多个 agent 共享。上面的进程内默认建立在「2B、数 GB、每次调用
-毫秒级」这三个前提上，30B 一个都不满足。
+**30B 级 agent 模型不归本节管**：它是本地 agent（客户端）的模型，由客户端部署
+与加载，不需要 toolgate 进程背；同机共存时用进程外服务避免争内存（§21.7.9）。
+本节的模型适配层只服务五个槽位（2B 级）。
 
 **进程内默认还有三个前提**，任一不满足就该整机走 http：
 
@@ -54,7 +54,7 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
 不是「模型文件放在同一目录」。架构对它提五条约束：
 
 1. **模型实例按模型文件去重，不按槽位编号。** 多个槽位指向同一模型时共享一个
-   实例（§3.9 的 provides）；实例是进程级单例，引用计数归零才能卸载。
+   实例（§3.10 的 serves）；实例是进程级单例，引用计数归零才能卸载。
 2. **常驻上限默认 2 个模型实例，热槽位优先。** classify / decide 指向同一模型时
    共用一个实例（参考实现就是这种形态）；指向不同模型时两个都常驻，冷槽位不再
    驻留。冷槽位按 LRU 竞争剩余名额。依据是参考实现的内存账：五个槽位全常驻
@@ -62,11 +62,12 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
    开销），普通开发机放不下。上限可配（`slm.embedded.max_resident_models`）；
    启动时按模型文件大小估算常驻内存，估算值超过物理内存 50% 即拒绝启动。
 3. **加载时机：热槽位启动时预加载，冷槽位首次调用时懒加载。** 预加载在后台
-   线程进行，不阻塞 MCP 启动；未就绪期间该槽位按不可用降级，并在 meta 里标注
-   「模型加载中」。
+   线程进行，不阻塞 MCP 启动；未就绪期间该槽位按不可用降级，content 按 §4.4b 的
+   `SLOT_UNAVAILABLE` 告知（fallback=loading），`meta` 的 `slmStatus: loading`。
 4. **并发：一个模型实例一个专用推理线程 + 有界队列，实例内推理串行。**
    native 推理上下文不是线程安全的，不能直接在 tokio task 里跑；队列满时返回
-   排队深度或按 §7.3 降级，不无界堆积。不同实例之间可以并行。
+   排队深度或按 §7.3 降级，不无界堆积。不同实例之间可以并行。理解链内的并发
+   按 §4.8 调度：无依赖节点并行，同一实例的节点排队。
 5. **卸载：冷槽位空闲 TTL（默认 10 分钟）后卸载；配置变更要重启（§8.8）。**
    卸载只丢 KV 缓存，不影响落盘副本与快照。
 
@@ -100,6 +101,63 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
 代价是 +1-3ms 回环延迟，以及模型服务自身的生命周期要有人管（谁拉起、谁看护）。
 在单机单用户、判定槽位的场景下这两项是纯成本，所以判定类默认不走它。
 
+#### 模型来源：一个 `source` 字段
+
+**模型来源是部署形态，不是能力等级。** 来源类型与协议合成一个字段，避免「external + protocol」两层概念：
+
+| `source` | 来源 | 字段 | 形态 | 典型 |
+|---|---|---|---|---|
+| `local` | 本地权重 | `path` | embedded 加载，或 toolgate 拉起本地推理服务（http） | llama.cpp / MLX 权重 |
+| `openai` | OpenAI Chat Completions | `base_url` + `model`（+ `api_key_env`） | 按协议调用 HTTP 接口；第一期只允许 loopback | llama-server / vLLM / 兼容服务 |
+| `anthropic` | Anthropic Messages | 同上 | 同上 | Anthropic 兼容服务 |
+| `responses` | OpenAI Responses | 同上 | 同上 | OpenAI Responses 兼容服务 |
+| `auto` | 按 URL 推断 | `path` 或 `base_url` + `model` | 推断为上面某一种，规则见下 | 地址已含协议信息时 |
+
+```yaml
+models:
+  jev:
+    source: local
+    path: ~/.toolgate/models/jev
+    serves: [classify, decide]
+  lfm3-vl:
+    source: auto              # auto（默认）| local | openai | anthropic | responses
+    base_url: http://127.0.0.1:8080/v1
+    model: lfm3-vl
+    api_key_env: TOOLGATE_MODEL_KEY   # 可选；密钥从环境变量读，不落配置
+    serves: [summarize, vision]
+```
+
+**`source: auto` 的判定顺序**（只做保守推断，不猜）：
+
+1. 配了 `path` → `local`；
+2. `base_url` 路径含 `/chat/completions` → `openai`；
+3. 含 `/messages` → `anthropic`；
+4. 含 `/responses` → `responses`；
+5. host 是 `api.openai.com` → `openai`；`api.anthropic.com` → `anthropic`；
+6. 都不命中 → **启动失败**，要求显式写 `source`。
+
+不做启动探测：探测要发真实请求，且错误响应形状不可靠；猜错协议比报错更糟（§1.4.4 的可行动失败）。
+
+**协议能力不是能力等价**：三类接口是「传输形态」，各槽位能否用要看接口能力（适配器见 §3.10）：
+
+| 槽位 | openai | anthropic | responses | 说明 |
+|---|---|---|---|---|
+| summarize | 可用 | 可用 | 可用 | 文本 / JSON |
+| vision | 可用 | 可用 | 可用 | 多模态 content |
+| classify | 可用（JSON schema） | 可用（JSON / tool use） | 可用（structured outputs） | 概率需 `logprobs`，不支持时只能低风险 |
+| decide | **受限** | **受限** | **受限** | 无校准概率 → §7.2 置信度门控不可用；需实测各协议 logprobs 能力 |
+| rerank | **受限** | **受限** | **受限** | 无标准接口，需 provider 扩展 |
+
+**部署约束**：外部来源（`openai` / `anthropic` / `responses` / `auto` 解析为外部协议时）`mode` 只能是 `http`；`embedded` 只适用于 `source: local`。非法组合启动即失败（fail loud）。`base_url` 不写时用 `slm.http.base_url`。
+
+**数据边界**：外部协议默认只接受 loopback（127.0.0.1 / localhost）。远程 endpoint 会让数据出机器，违背 §8 的隔离目标——必须显式配置 `allow_remote: true` 并在启动时告警；第一期不实现远程来源。
+
+**依赖**：外部协议客户端（HTTP 客户端）属于可选层（Cargo feature `external-protocols`），默认构建不含；纯本地路径不需要它（§19.6）。
+
+**实例去重**：本地来源按模型文件路径去重；外部来源按 `base_url + source + model` 去重（§18.1 的实例管理）。
+
+**其他协议**：新增协议（如 Gemini 兼容）按同样方式加 `source` 枚举与可选层适配器，属于扩展，不改槽位契约。
+
 #### 配置形态
 
 ```yaml
@@ -113,13 +171,17 @@ slm:
   http:
     base_url: http://127.0.0.1:8080
 
-slots:
-  decide:    { model: d3-nano, mode: embedded }
-  summarize: { model: lfm3-1.7b, mode: http }
+models:
+  d3-nano:   { path: ~/.toolgate/models/d3-nano, mode: embedded, serves: [classify, decide] }
+  lfm3-1.7b: { path: ~/.toolgate/models/lfm3-1.7b, mode: http, serves: [summarize] }
+# slots 可省略：槽位按 serves 自动绑定（§3.10）
 ```
 
-`mode` 是槽位级字段：不写时继承 `slm.mode`；`auto` 按上面的分档表展开，显式写
-`embedded` / `http` 则覆盖默认。`backend` 同理（槽位级可选）。
+`mode` 是模型级字段：不写时继承 `slm.mode`；`auto` 按上面的分档表展开，显式写
+`embedded` / `http` 则覆盖默认。`backend` 同理（模型级可选）。
+
+**配置只写模型清单**：槽位按 §3.10 的 `serves` 自动绑定；上例两个模型覆盖三个
+槽位（classify 与 decide 共用 d3-nano）。
 
 **配置错误与资源失败要分开**：未知 backend、未知槽位名、模型常驻内存估算超过
 物理内存 50% → 启动即失败（fail loud）；模型文件缺失、显存不足 → 该槽位不可用
@@ -310,8 +372,10 @@ needs_escalation 说明需要人做决定。
 #### 并发
 
 - **v1 的串行是过渡实现，不是架构约束。** `McpServer::serve_stdio` 逐请求 `await`，在 PTC 里 `Promise.all` 会退化成排队。
-- v2 目标：每请求一个 tokio task，全局并发上限 `max_concurrency`（默认 `min(CPU×2, 16)`）；超出排队，返回 `queueDepth`。
+- v2 目标：每请求一个 tokio task，全局并发上限 `max_concurrency`（默认 `min(CPU×2, 16)`）；超出排队，返回 `queueDepth`。请求内的理解链并发（§4.8）属于该请求的子任务，不额外占用全局并发上限。
 - 只读工具（read/search）可并行；写工具（write/edit）对同一路径加进程内锁，后写者等待而不是覆盖。冲突检测用「读时记录 (mtime, size, sha256) → 写前复核 → 不一致即拒绝」，不做三方合并（工具层不猜）。
+- 写前复核是**默认且不可关闭**的行为：不提供跳过选项，也不因 intent 或隔离档位放宽。不一致即拒绝，按 §1.4.5 返回当前内容与 `nextSteps`（共同前置见 §5.4）。
+- 路径锁是**进程内锁**：只串行化本实例内的写。不同 toolgate 实例、客户端内置工具、外部进程同时写同一路径，不在该锁仲裁范围内（§18.6）。
 
 #### 多客户端隔离
 
@@ -321,7 +385,7 @@ needs_escalation 说明需要人做决定。
 
 #### 取消
 
-- 响应 MCP `notifications/cancelled`：杀掉进程组（不是只杀父进程），释放输出缓冲，把 task 标记为 cancelled。
+- 响应 MCP `notifications/cancelled`：杀掉进程组（不是只杀父进程），释放输出缓冲，把 task 标记为 cancelled。第一期用 POSIX 进程组（macOS）；Windows Job Object 属后续（§19.7）。
 - 正在执行的写操作不中途放弃：等当前这一步完成再停（与 §21.7.5「不中途打断」同一条）。
 
 #### 生命周期
@@ -355,6 +419,22 @@ spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到�
 
 **缓存边界**：toolgate 不改写已发送历史，但它通过两处进入客户端请求前缀——MCP 工具声明与工具返回结果。接入/升级/工具 schema 变化会导致一次前缀 miss；运行期不得增删工具或改 description。工具结果必须字节稳定（§16.3 的输出确定性、摘要缓存、图片复用、已发送不可回写），并控制在客户端 MCP 截断阈值内（pi 20KB），避免客户端随机落盘路径进入历史。满足这些，运行期不产生额外缓存损失；否则从该结果起持续 miss。
 
+**DSH / pi 与三种形态（§6.2）的关系**：它们本身是 agent 运行时，不是 toolgate 的一部分，也不是「本地 agent」的同义词。同一个客户端接云端模型时是 F1/F2 形态；换成 30B 本地模型、由本地模型驱动循环时，它承载的就是 F3 本地 agent（§21.7）。toolgate 在三种形态下是同一套 MCP 工具，行为不变；形态差异只体现在客户端怎么用工具（intent 默认值、是否使用 PTC）。
+
+**写侧能力边界：sidecar 不覆盖客户端自己的写**
+
+| 决策 | 内容 |
+|---|---|
+| 保护范围 | 只有经 toolgate `write` / `edit` 的改动受写前复核（§18.5）、写前快照（§20）与原子写（§18.5）保护 |
+| 不覆盖 | 客户端内置 `write` / `edit` / `bash`、格式化器与脚本、外部编辑、其他 toolgate 实例、共享工作目录下的多 agent 并发写 |
+| 原因 | §18.6 决策是不替换内置工具，因此工具层的锁与快照只作用于自己经手的路径；§20.4 已列出 bash 副作用与目录级改动的能力边界 |
+| 调用方责任 | 发起写之前自行取得当前真值（先读 / 拿版本指纹），并用 §18.4 的 checkpoint + `operationId` 保证「已执行的调用不再执行」 |
+| 失败模式 | 把 sidecar 的快照当成全局回滚点，误以为客户端内置工具的写也能回退 |
+
+**与 DSH「先读再改」的关系**：那是会话层的兜底，覆盖所有写通道（含绕过文件
+工具的 `bash` 与脚本）；本节的机制只覆盖 toolgate 经手的写。两者互补，不是
+替代，**不因接入 toolgate 而放宽客户端侧的先读约束**。对照与证据等级见附件 E.9。
+
 ### 18.7 统一治理入口：客户端自己 fetch，结果经 toolgate 治理
 
 **决策：默认不要求 toolgate 取数。DSH / pi 的 agent 自行选择原生 `web_fetch`、浏览器、`curl`、`lark-cli`、`opencli` 或任何 MCP 工具；结果在进入模型上下文之前，统一送到 toolgate 的 `govern` 接口。**
@@ -375,7 +455,7 @@ spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到�
 }
 ```
 
-- 响应：`{content, structuredContent, meta:{slm_status, confidence, redacted, truncated, spillPointer}, isError}`；
+- 响应：`{content, structuredContent:{..., notices}, meta:{slmStatus, confidence, redacted, truncated, spillPointer, noticeOverflow}, isError}`；`notices` 与 MCP 工具返回同源（§4.4b）；`meta` 的 redacted/truncated 是派生视图，不单独承载告知；
 - 处理链与 `read` 相同：类型/大小检查 → 截断/落盘 → 脱敏（含路径用户名）→ 本地 SLM → 协商；web 内容按不可信来源处理（§15.1）；
 - 失败返回结构化 error + next；`govern.fail_open` 默认 `false`，不静默放行敏感内容。
 
@@ -457,6 +537,65 @@ spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到�
 
 `dsh-web-fetch` 适配器直接包装其 `scripts/fetch-auto.py --json`：把单 URL 结果映射成上述 `result`，把 `ok:false` 映射为对应 error code。它的内部多 URL 循环是串行的，所以 toolgate 按 URL 拆成多个进程/请求并行，不把整批交给单个进程。
 
+### 18.9 配置校验与错误处理
+
+配置是用户最容易配错的地方。原则一句话：**配错必须显式失败，不能静默猜；能降级的只在运行时资源层降级，不掩盖配置错误。**
+
+#### 四层校验
+
+| 层 | 例子 | 处理 | 时机 |
+|---|---|---|---|
+| 语法 | YAML 缩进错、冒号缺失 | 启动失败；报文件:行:列 | 加载时 |
+| 结构 | 未知字段（拼写错）、类型错、枚举非法、必填缺失 | 启动失败；**一次报全部错误**，不是只报第一个 | 加载时 |
+| 语义 | `slots.<name>` 指向不存在的模型、`serves` 含未知槽位、`mode: embedded` + 外部 `source`、`api_key_env` 未设置 | 启动失败；报字段路径与期望 | 加载时 |
+| 资源 | 模型文件缺失、显存不足、端口占用、鉴权失败 | **该槽位不可用**（§3.8 降级），启动告警，不阻塞 | 启动 / 首次调用 |
+| 能力不符 | 声明 `serves` 但输出不符合槽位契约 | 首次校验失败 → 槽位不可用 / 禁用（§3.11），首次调用告警 | 首次调用 |
+
+前三层是「配置错误」，必须 fail loud；第四层是「资源失败」，降级但**必须告警**（§7.3 的降级要标注）。分界：配置错误改一行就能修，资源失败要装模型 / 加显存 / 改服务。
+
+#### 错误格式：可行动
+
+每个配置错误至少四段（与 §1.4.4 同一口径）：
+
+```json
+{
+  "code": "CONFIG_UNKNOWN_FIELD",
+  "field": "models.lfm3-vl.serve",
+  "value": "summarize",
+  "expected": "serves（槽位名列表）",
+  "fix": "把 serve 改成 serves；或检查是否漏写 s"
+}
+```
+
+- **字段路径必须到叶子**（`models.<id>.serves[0]`），不是「配置有误」；
+- 多错误**聚合返回**，一次列全，避免用户改一个重启一次；
+- 错误信息**不回显密钥值**（`api_key_env` 只报环境变量名）；
+- 退出码非 0（`serve` 与 `config check` 一致）。
+
+#### 未知字段一律拒绝
+
+配置 schema 使用「拒绝未知字段」策略（Rust serde 的 `deny_unknown_fields`）。理由：拼写错的字段如果被静默忽略，用户会以为配置生效了——这是最典型的「配置幻觉」。拒绝未知字段让拼写错误在启动时暴露。
+
+#### 启动前自检：`toolgate config check`
+
+```bash
+toolgate config check --config ~/.toolgate/config.yaml
+```
+
+- 只做语法 / 结构 / 语义三层校验，不加载模型、不监听端口；
+- 输出与启动时一致的可行动错误；
+- 用于改配置后、重启前验证，避免「重启—报错—再改」循环。
+
+#### 资源失败的降级与告知
+
+- 槽位不可用 → 该能力降级（§3.8），工具继续工作；
+- 降级必须写进启动日志与 `toolgate list` 的槽位状态（模型、来源、可用性）；
+- **不因资源失败而放宽配置校验**：配置错误（如 mode/source 冲突）不会因为「模型反正没装」而放过。
+
+#### 热加载
+
+不支持（§8.8）：改配置需重启。`config check` 是改前验证的正路；运行期不接受配置文件变更（避免「改了一半」的状态）。
+
 ---
 
 ## 19. 技术选型：Rust 强约束与「通用」
@@ -485,8 +624,8 @@ spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到�
 ### 19.2 无 GC 与延迟预算
 
 本地工具层的卖点是低延迟。d1 的 5.7ms 预算里塞不进一次 GC 停顿。（这条只对
-槽位模型成立。30B 级 agent 模型是秒级推理，GC 停顿相对可忽略——但它的内存
-开销会把进程外模式变成必须，见 §18.1。）
+槽位模型成立。30B 级 agent 模型由客户端部署、秒级推理，GC 停顿相对可忽略；
+它的内存开销属于客户端部署，不在工具层（§21.7.9）。）
 
 更实际的是**延迟可预测性**：工具调用的延迟应该由「命令本身跑多久」决定，
 而不是「恰好在哪个时刻触发了 GC」。用带 GC 的运行时写工具层，
@@ -505,7 +644,7 @@ cargo build --release    # 产出一个可执行文件，无运行时依赖
 
 | 形态 | 内容 | 单二进制 | 适用 |
 |---|---|---|---|
-| 纯 L0 版 | 工具执行 + 机械治理 | 是 | 不需要本地模型的部署 |
+| 纯 L0 版 | 工具执行 + 机械治理 | 是 | 第一期 macOS；不需要本地模型的部署 |
 | 带 SLM 版 | 主程序 + 模型后端 + 模型文件 | 否（两件套） | 需要理解与压缩的部署 |
 
 评估 Rust 原生推理（candle）作为第三条路径，若成熟可恢复单二进制。
@@ -532,7 +671,7 @@ cargo build --release    # 产出一个可执行文件，无运行时依赖
 | agent 框架 | 只依赖 MCP 协议（§18.2） |
 | 云端模型 | 工具层不知道对面是谁（§11） |
 | 本地模型 | 五个槽位，参考实现是四个模型族（jev / jina-reranker / LFM3 / LFM3-VL），全部可替换（§3、§18.1） |
-| 操作系统 | 纯 Rust 标准库 + 跨平台 crate |
+| 操作系统 | 第一期 macOS；长期目标是不绑定（§19.7） |
 
 **但「通用」不等于「万能」**。§15.3 列了六类不适用场景：
 一次性脚本、极短会话、内容即答案、需精确全文、纯 CPU 老机器、数据本不敏感。
@@ -576,6 +715,7 @@ cargo build --release    # 产出一个可执行文件，无运行时依赖
 | 能力 | 形态 | 隔离方式 | 为什么不做进默认层 |
 |---|---|---|---|
 | 本地模型推理（embedded） | llama.cpp / MLX 的 Rust 绑定或动态库 | Cargo feature `slm-embedded`（待实现） | C++ / Apple 框架绑定破坏单二进制，native 崩溃会带走整个进程（§18.1） |
+| 外部模型协议客户端（openai / anthropic / responses） | HTTP 客户端库（Cargo feature `external-protocols`） | 默认关闭；配置外部 `source`（openai / anthropic / responses / auto）时启用 | 默认层不引入 HTTP 客户端；纯本地路径不需要（§18.1） |
 | WebP 编码 | ffmpeg / cwebp 子进程 | 运行时检测命令是否存在（§10.2b） | 为约 3.5% 的体积收益引入 C 依赖不值得（§10.2b 的三条判据） |
 | fetch provider | 外部子进程（dsh-web-fetch / pi / opencli / moli / command） | `fetch.provider` 配置，默认 `none` | 取数能力由客户端生态提供，不内建网络栈 |
 
@@ -585,6 +725,40 @@ GC 运行时、日志聚合客户端。它们会把「本地常驻小工具」�
 
 **审计**：发布前跑 `cargo tree --duplicates` 与附件 E.8 对账；默认层出现新的
 直接依赖而本表未登记，视为架构变更而不是实现细节。
+
+### 19.7 平台支持：第一期只实现 macOS
+
+**决策：第一期（v2 首版，阶段 1–4）只实现 macOS；Windows 与 Linux 列入后续规划（阶段 6+）。**
+
+依据不是「mac 用户多」，而是平台差异面的成本：把一件事在三个平台同时做对，
+等于把进程管理、快照数据面、权限模型、模型后端四套差异一起调；先把 macOS 的
+工具 + 槽位 + 治理闭环验证完，再移植，返工面最小。
+
+**平台矩阵**：
+
+| 平台 | 第一期 | 后续规划 |
+|---|---|---|
+| macOS（Apple Silicon，macOS 14+） | **默认目标**：纯 L0 版与带 SLM 版都支持 | — |
+| macOS（Intel） | 不阻塞：纯 L0 版可用，带 SLM 版按 CPU 档降级（§6.3） | 按需优化 |
+| Windows | 不做 | 阶段 6+：Job Object、ReFS / CopyFile、ACL、盘符路径 |
+| Linux | 不做 | 阶段 6+：FICLONE、POSIX 权限、进程组 |
+
+**第一期与后续的平台差异面**：
+
+| 差异面 | macOS（第一期实现） | Windows / Linux（后续） |
+|---|---|---|
+| 进程管理 | POSIX 进程组（setpgid / kill） | Windows Job Object；Linux 进程组 |
+| 快照数据面 | APFS `clonefile` → `copyfile` 兜底（§20.2b） | Linux `FICLONE`；Windows ReFS / `CopyFile` |
+| 模型后端 | MLX（embedded，§18.1）；llama.cpp（http） | llama.cpp / 其他 |
+| 路径与权限 | POSIX 路径；文件 0600、目录 0700 | 盘符 / 反斜杠；ACL |
+| 依赖分发 | 单二进制 arm64（纯 L0 版） | 后续打包与签名 |
+
+**代码约束**：
+
+- 平台特定代码集中在 `platform/` 模块，用 `#[cfg(target_os = "macos")]` 隔离；通用逻辑不写 macOS 假设（不硬编码 `/tmp`、不假设路径分隔符）。
+- **不提前实现 Windows / Linux 分支，不为跨平台预留抽象**（§1.5 最少依赖；不越需求原则见 §4.6）。移植时再补。
+- 平台专属依赖（MLX 绑定）只能进可选层（§19.6）。
+- 第一期 CI 只在 macOS 跑测试；Windows / Linux 编译检查不作为门禁。
 
 ---
 

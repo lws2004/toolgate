@@ -388,3 +388,34 @@ cargo tree -p <crate> --prefix none | sort -u | wc -l   # 单个依赖的子树
 必要成本。其余直接依赖的子树均 ≤ 14，没有可轻易替换的大依赖。若未来默认层
 出现新的超过 10 个子依赖的直接依赖，应按 §1.5 准入四问重新论证。
 
+---
+
+## E.9 写侧安全：与 DSH 的对照（2026-11-08）
+
+> 本节是**比较与研究记录**，不是架构约束；写侧决策落在 §5.4、§18.5、§18.6、§20.4。
+> 发起原因：结论「修改可以不用先读」在跨项目讨论中被读成「工具层不读文件」，需要钉清「读」的归属。
+
+### 对照表
+
+| 维度 | toolgate | DSH（本机运行时） |
+|---|---|---|
+| 读的归属 | 工具层 L0 必读原文并记指纹；模型侧 `read(intent=raw)` 取锚点，不回传全文 | agent 侧强制先读，据此拼 `old_string` |
+| 脏写防护 | 写前复核 `(mtime, size, sha256)`，不一致即拒绝（§18.5） | 版本守卫 `FsWriteIntent` 是可选参数，省略即无条件覆盖 |
+| 失败后 | 返回当前内容 + `nextSteps`（重新 read / 重算锚点） | `FS_STALE_VERSION` → 重读 → rebase → 重试 |
+| 可恢复 | 字节级写前快照 + 临时文件/rename 原子写 + 快照路径（§20） | git 与会话日志，无内置文件级快照 |
+| 写通道 | 6 个工具是唯一入口；bash 副作用明确不覆盖（§20.4） | 文件工具 / bash / 格式化器 / 脚本 / 多 teammate 都能写 |
+| 并发 | 同路径进程内锁（§18.5），跨实例无仲裁 | 会话层 + 外部编辑无 watcher，read 触发刷新 |
+
+### 证据等级
+
+- **架构文档（一手）**：`04-tools.md` §5.4 共同前置、`18-deployment.md` §18.5 / §18.6、`20-behavior.md` §20.4。
+- **源码（一手）**：DSH checkout `packages/fs/fs/src/types.ts:117`（`FsWriteIntent` 注释「省略 intent 即无条件 create-or-overwrite」）、`src/index.ts:290`（`editText` 的 `expected?` 可选）、`packages/extensions/tool-cordis/src/api-catalog.ts:1587`（对外描述 omission allows unconditional overwrite）。
+- **运行时注入的硬约束（官方指令）**：DSH 提示层要求写前先读、edit 前先读，并声明 bash / 格式化器 / 脚本不完全受版本守卫保护。
+- **实测判定**：typed-decide Choice（jev-1.14.0），候选 `keep` / `adopt` / `hybrid`，结果 `hybrid 0.97`、`confidence 0.96`、`margin 0.95`；自检 34 PASS / 0 FAIL。该判定只用于「DSH 运行环境下三选一」，不作跨架构优劣的裁决。
+
+### 结论与落地
+
+1. 「不用先读」不成立：省的是**模型侧的全文回传**，不是工具层的读。toolgate 的读被下沉到 L0，且写前复核默认强制。
+2. 机制下沉（指纹复核 / 行锚点 / 字节快照 / 原子写）在设计上更可靠，但成立前提是「所有写都经由受控工具层」。DSH 不满足该前提，故不能照搬。
+3. 本次修订据此把边界写成决策：§18.6 明确 sidecar 不覆盖客户端内置工具的写，§20.4 补两行覆盖不到的场景；客户端侧「先读」约束不因接入 toolgate 而放宽。
+

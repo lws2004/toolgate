@@ -14,7 +14,7 @@
 
 | 档位 | 上传什么 | 由谁实现 | 丢失什么 |
 |---|---|---|---|
-| none | 什么都不上传，只回「此内容受策略限制」 | 策略层 | 全部 |
+| none | 什么都不上传，返回 `IsolationRefused` 错误（§1.4.5） | 策略层 | 全部 |
 | understand | 只上传判定结果（类型、有无错误、数量） | classify / decide 槽位 | 具体内容 |
 | summary | 上传摘要 + 原始指针 | summarize 槽位 | 原文细节 |
 | raw | 原文 | 无 | 无 |
@@ -163,23 +163,22 @@ isolation:
 
 ### 8.7 回退必须显式告知
 
-被回退时，返回里必须说清四件事：
+被回退时，返回里必须说清四件事，字段固定（渲染与预算见 §4.4b 的 `ISOLATION_FALLBACK`）：
+
+| 字段 | 内容 | 例 |
+|---|---|---|
+| `requested` | 请求档位 | `raw` |
+| `actual` | 实际动作 | `structure` |
+| `rule` | 命中的规则（脱敏后） | `**/.env*` |
+| `reason` | 为什么没用更高一级（枚举） | `retention_below_threshold` |
 
 ```text
-请求档位：raw
-实际动作：redact（抹掉 3 处，保留 99.4%）
-命中规则：**/config/** → max_exposure: raw，但脱敏层发现 3 个密钥
-为什么没用更高一级：redact 已是最优，内容完整保留
+[ISOLATION_FALLBACK] requested=raw actual=redact rule=**/config/** reason=redact_optimal
+[ISOLATION_FALLBACK] requested=raw actual=structure rule=**/.env* reason=retention_below_threshold
 ```
 
-再看一个走低级的例子：
-
-```text
-请求档位：raw
-实际动作：structure
-命中规则：**/.env* → level: none
-为什么没用 redact：脱敏后保留率 8%，低于阈值 50%，脱敏无意义
-```
+`reason` 只写回退原因，不复制脱敏统计——脱敏结果由 `REDACTED` 单独告知
+（count / retention）。`rule` 的脱敏见 §4.4b「敏感信息」。
 
 **不告知等于欺骗**：模型会以为自己拿到了原文，基于不完整信息做决策，
 然后在不该确定的地方确定。
@@ -347,7 +346,7 @@ isolation:
       level: redact
 ```
 
-命中后按 `fallback_chain` 处理。`none` 档命中时，返回「输出含受策略限制的内容」+ 退出码 + 字节数 + 行数，不返回内容本身。
+命中后按 `fallback_chain` 处理。`none` 档命中时按 §1.4.5 的 `IsolationRefused` 错误返回（fact：输出含受策略限制的内容；reason：命中输出内容级规则；nextSteps：调整策略或改用允许的路径），并附退出码、字节数、行数，不返回内容本身。`ISOLATION_FALLBACK.actual=refuse` 只用于回退链内的 refuse，不用于策略层 `none`。
 
 #### 路径中的用户名与元数据
 
@@ -362,13 +361,15 @@ isolation:
 | 临时目录 | `/tmp/xxx`、`/var/folders/...` | `<tmp>/...` |
 | Git remote | `https://<user>@github.com/org/repo` | `https://[USER]@github.com/org/repo` |
 
+第一期只实现 macOS 与临时目录两行（§19.7）；Linux / Windows / UNC 行属后续平台规划。
+
 **规则**：
 
 - 模型可见路径默认一律工作区相对路径（`<workspace>/...`）；工作区外输出 `<external>/...`；
 - 用户名段替换为 `[USER]`，主机名替换为 `[HOST]`，内网 IP 替换为 `[IP]`；保留结构，不保留身份；
 - 把当前进程的 `$USER` / `$LOGNAME` / `%USERNAME%`、主机名作为运行时动态敏感词，按词边界替换；不能只依赖 `/Users/`、`/home/` 前缀。`whoami`、`hostname`、`git config user.*` 的输出同样处理；
 - `none` / `understand` 档返回 opaque 句柄（`spill://<hash>`），不返回绝对路径；`raw` 档只有显式配置 `paths.expose_absolute: true` 才返回绝对路径，且仍要过 `path_username` 规则；
-- 路径规则同时作用于 read/write/edit 的返回 meta、bash/search/task 的输出文本和错误 message，不能只作用于文件工具。
+- 路径规则同时作用于 read/write/edit 的返回 meta、bash/search/task 的输出文本、错误 message 与 §4.4b 的 notice params（rule / pointer / failed），不能只作用于文件工具。
 
 **边界**：内容级规则是启发式，不是完备的。它抓不到自然语言描述的凭据（§8.10 已列）。用户名匹配也可能误伤项目名，因此替换为 `[USER]` 后保留上下文，不做哈希（低熵用户名可被穷举反推）。它不能替代路径规则，只能补位。
 

@@ -44,11 +44,15 @@ read/edit 又无处落地。
 
 ```text
 执行层   → 真正做操作：读文件、跑命令、检索
-理解层   → 本地 SLM 介入：判定、摘要、抽取、看图
+理解层   → 本地 SLM 介入：判定、摘要、抽取、看图；可组成有界多步链（§4.8）
 协商层   → 决定回传什么：原文 / 摘要 / 结构化 / 原图 / 指针
 ```
 
 协商层是新概念，也是本架构与普通工具层的分水岭。它决定「云端看到什么」。
+
+**理解层不是一条固定流水线**：单步判定与摘要是最小形态；当输出需要「读一段 →
+判断够不够 → 再读 → 摘要 → 自检」时，工具层可以编排一条有界多步链（§4.8）。
+链路仍在单次工具调用内、动作菜单固定、无状态、无副作用。
 
 ### 4.2 intent：把协商权交给调用方
 
@@ -73,7 +77,7 @@ read/edit 又无处落地。
 
 **关键约束：intent 只是「请求」，不是「结果」。** 实际返回什么由
 隔离策略决定——intent 请求超过策略允许的上限时，走回退链（先尝试脱敏、
-结构化、摘要，最后才降级），并在返回里明确告知（§8.6、§8.7）。
+结构化、摘要，最后才降级），并按 §4.4b 的 `ISOLATION_FALLBACK` 明确告知（§8.6、§8.7）。
 模型不能通过 intent 绕过外部配置。
 
 ### 4.3 协商结果必须可预测
@@ -92,14 +96,260 @@ read/edit 又无处落地。
 
 | 通道 | 载体 | 放什么 | 放错什么会出事 |
 |---|---|---|---|
-| 模型可见 | content 文本 | 截断、降级、低置信、隔离回退、槽位不可用——凡影响下一步判断的事实 | 只放程序字段 → 模型以为拿到的是完整原文 |
-| 程序可读 | structuredContent | 耗时、路径、行号、字节数、错误码、置信度数值 | 放告知性文字 → 程序要解析自然语言 |
+| 模型可见 | content 文本 | 凡影响下一步判断的事实——至少包括 §4.4b 的 10 个 notice code | 只放程序字段 → 模型以为拿到的是完整原文 |
+| 程序可读 | structuredContent / meta | 耗时、路径、行号、字节数、错误码、置信度数值；`notices` 数组（structuredContent）；`noticeOverflow`（meta） | 放自然语言文案 → 程序要解析自然语言 |
+
+`notices` 是结构化数据，不是自然语言文案，因此可同时出现在 structuredContent
+（§4.4b 的「一个事实源、两个通道」）。
 
 **为什么不能假设 structuredContent 不进模型上下文**：这取决于客户端。DSH 的 mcp-client 只把 content 投影给模型，但 MCP 协议不保证这一点；pi / Claude Code 等客户端可能序列化整个 result。所以：
 
-> 任何模型必须知道的告知，必须出现在 content 文本里；structuredContent 只承担程序判断。
+> 任何模型必须知道的告知，必须出现在 content 文本里；structuredContent 不承担「必须让模型知道」的告知义务，其中的 `notices` 是结构化数据视图（§4.4b）。
 
 这条是 §8.7「不告知等于欺骗」的落地方式，也解释了 §7.3 的「降级」为什么只能对程序静默、不能对模型静默。
+
+### 4.4b 告知协议：一个事实源，两个通道
+
+§4.4 只规定了「告知必须进 content」，没规定告知长什么样。同一件事各处各写一遍，
+会出现两种问题：漏说（模型把降级产物当原文）与漂移（content 说 A、structuredContent 说 B）。
+本节把告知收敛成一组**枚举 + 模板**。
+
+**先分三类**——标准不同：
+
+| 类型 | 例子 | 处理 |
+|---|---|---|
+| 告知性（改变认知） | 下表 10 个 notice code 覆盖的全部场景 | 必须进 content，一条不能漏；用固定模板压成一行 |
+| 事实性（下一步依据） | 路径、行号、exitCode、diff、文件级变化、候选位置 | 结构化字段为主，文本只渲染必要项（§5.7） |
+| 程序性（逻辑判断） | 耗时、字节数、错误码、置信度数值、spillPath | 默认只进 structuredContent；当它是 notice 模板的必填字段时，作为模板的一部分进 content |
+
+判据：**漏一条告知是决策事故，多一条告知只是几十 token**（§1.4.2 的可恢复性判据）。
+所以告知类不能靠「精简文案」省，只能靠「换表达形式」省。
+
+**notice 是唯一事实源。** 一次返回的所有告知先产出中间表示：
+
+```text
+notices: [{ code, params }]
+```
+
+content 由固定模板渲染，structuredContent 原样携带同一份 `notices`。
+**文案是视图，不是事实源**——两处各写一份文案迟早漂移。
+
+**生成分两段，合并成一个数组**：
+
+| 阶段 | 产出 | 输入 |
+|---|---|---|
+| 决策（`decide_output`，纯函数，§4.5） | `ISOLATION_FALLBACK` / `DEGRADED`（能力/延迟/上游类）/ `SLOT_UNAVAILABLE` | intent、隔离配置、上游能力、槽位可用性 |
+| 执行后（`finalize_notices`，纯函数） | `TRUNCATED` / `REDACTED` / `LOW_CONFIDENCE` / `NORMALIZED` / `UNCALIBRATED` / `LOSSY_DECODE` / `SNIFFED` / `DEGRADED`（压缩熔断） | 执行层观测值：截断量、脱敏计数、d1 概率、匹配级别、解码结果、嗅探结果、压缩结果 |
+
+两个函数都是纯函数：同输入同输出。`decide_output` 不读执行结果，`finalize_notices`
+不读配置与模型，二者都不产生副作用；对外只有一个 `notices` 数组。
+
+**枚举与模板**（10 个 code；新增 code 算契约变更）。notice code 用全大写蛇形，
+与 §1.4.5 的 ErrorCode（PascalCase）分属两个命名空间——同名时以命名风格区分，
+不要互相映射：
+
+| code | 触发 | params（顺序固定） | 渲染示例 |
+|---|---|---|---|
+| `TRUNCATED` | 输出被裁短，或摘要替代原文且原文可回溯 | kept:u64 total:u64 unit:lines\|bytes pointer:option<string> | `[TRUNCATED] kept=2000 total=8734 unit=lines pointer=spill://ab12cd34` |
+| `DEGRADED` | 非隔离原因的输出形态或质量降级（槽位可用但输出被迫变化，含有损压缩） | requested:enum actual:enum reason:enum slot:option<string> | `[DEGRADED] requested=summary actual=none reason=latency_over_budget slot=summarize` |
+| `LOW_CONFIDENCE` | d1 概率低于门控（§7.2） | p:f32(2) views:both\|local | `[LOW_CONFIDENCE] p=0.62 views=local` |
+| `ISOLATION_FALLBACK` | 隔离回退命中（§8.7） | requested:enum actual:enum rule:string reason:enum | `[ISOLATION_FALLBACK] requested=raw actual=structure rule=**/.env* reason=retention_below_threshold` |
+| `SLOT_UNAVAILABLE` | 槽位不可用或未配置 | slot:string fallback:enum | `[SLOT_UNAVAILABLE] slot=vision fallback=metadata` |
+| `REDACTED` | 内容被脱敏 | count:u32 retention:percent(1) | `[REDACTED] count=3 retention=99.4%` |
+| `NORMALIZED` | edit 按第 2/3 级归一化命中（§5.4） | level:2\|3 kind:eol\|whitespace | `[NORMALIZED] level=2 kind=eol` |
+| `UNCALIBRATED` | 概率来自非校准适配器（§3.10） | slot:string adapter:enum | `[UNCALIBRATED] slot=decide adapter=json` |
+| `LOSSY_DECODE` | 解码出现替换字符（§5.6） | encoding:string replacements:u32 | `[LOSSY_DECODE] encoding=gbk replacements=3` |
+| `SNIFFED` | 嗅探结果与扩展名不一致，或判为二进制（§10.4） | ext:string actual:enum | `[SNIFFED] ext=.txt actual=binary` |
+
+**`TRUNCATED` 的语义**：`kept` 是保留内容的体量——read / search 保留头部（`kept` 行数，read 的续读 offset = kept + 1），bash / task 保留尾部（`kept` 行数）；摘要替代原文时 `unit=bytes`（`kept` 是摘要字节数、`total` 是原文字节数），`pointer` 必须指向原文。
+
+**格式约定**（渲染器统一实现，测试锁定）：
+
+- 浮点固定两位小数（`p=0.62`），百分比固定一位小数（`retention=99.4%`）；`p` 与 `retention` 内部均按 0–1 比例存储，`retention` 渲染时乘 100；
+- 整数不带千分位；枚举值用 snake_case（`retention_below_threshold`）；
+- 列表用 `,` 分隔，每项先 URL 编码（文件名含逗号不会破坏解析）；
+- 空值字段直接省略，不渲染 `key=`；
+- `reason` 只允许有限枚举，禁止自由文本（见「敏感信息」）。
+
+**枚举值域**：
+- `DEGRADED.requested` / `actual`：输出形态 `raw` / `summary` / `structured` / `visual` / `none`；`actual` 另可 `metadata` / `compressed`；
+- `ISOLATION_FALLBACK.requested`：隔离档位 `none` / `understand` / `summary` / `raw`；`actual`：回退动作 `redact` / `structure` / `summarize` / `refuse`；
+- `unit`：`lines` / `bytes`；`views`：`both` / `local`；`fallback`：`metadata` / `text` / `mechanical` / `loading`；
+- `adapter`：`native` / `json` / `text` / `ordered`；
+- `SNIFFED.actual`：`binary` / `text` / `png` / `jpeg` / `gif` / `webp` / `pdf` / `zip` / `gzip` / `other`。
+
+**code 选择规则**（同一事实只发一条，组合按此裁决）：
+
+1. **槽位不可用只发 `SLOT_UNAVAILABLE`**，不再发 `DEGRADED`；`DEGRADED` 只用于「槽位可用但输出形态或质量被迫变化」（延迟超预算、上游能力不支持、有损压缩、压缩熔断）。
+2. **`TRUNCATED` 只用于「裁短或摘要替代原文」且原文可回溯**；形态从 A 变 B 但未裁短用 `DEGRADED`。
+3. **隔离回退到 redact 发两条**：`ISOLATION_FALLBACK`（原因）与 `REDACTED`（结果）；`ISOLATION_FALLBACK.reason` 只写回退原因，不复制脱敏统计。
+4. **判为二进制且只回元信息时只发 `SNIFFED`**，不叠加 `DEGRADED`（没有形态决策）。
+5. **`LOW_CONFIDENCE` 与 `UNCALIBRATED` 正交**：前者是概率低，后者是概率性质；p=0.95 但 adapter=json 仍要 `UNCALIBRATED`，可同时出现。
+6. **`NORMALIZED` 与 `LOSSY_DECODE` 只在对应动作发生时发**，不影响其他 code。
+
+**渲染顺序**（固定，属于契约）：不同 code 按下行顺序拼接；同 code 多条按固定二级键排序
+（`slot` → `pointer` → `failed` 首项 → `level` 的字典序；二级键缺省时按 params 序列化后的字典序），不按并发节点的完成顺序：
+
+```text
+ISOLATION_FALLBACK → REDACTED → TRUNCATED → SLOT_UNAVAILABLE
+→ DEGRADED → LOW_CONFIDENCE → NORMALIZED → UNCALIBRATED → LOSSY_DECODE → SNIFFED
+```
+
+模板语法固定为 `[CODE] key1=value1 key2=value2 …`：字段顺序即上表顺序，字段间用单个
+空格分隔；单值字段的值内不允许出现空格与 ` · `。列表参数按格式约定用 `,` 分隔，
+逗号只出现在列表分隔位置。不放时间戳与随机 ID（§16.3 对策二）。
+**模板、字段顺序、渲染顺序都是契约**：改动等同工具描述改动，按 §16.3 对策一
+同步 `serverInfo.version`，否则历史消息字节变化会让前缀缓存全部失效。
+
+**信息分级与预算**（本节 G0/G1/G2 是信息等级，与 §2.1 的成本阶梯 L0–L4 无关）：
+
+| 级 | 内容 | 默认 |
+|---|---|---|
+| G0 必给 | 上表 10 个 code 的全部告知 | 总是 |
+| G1 默认给 | 下一步依据：路径、行号、diff、exitCode | 总是（structuredContent 为主，文本只列关键项） |
+| G2 按需 | 解释、候选、引用线索 | intent=structured 或配置开启 |
+
+预算（设计目标，非实测）：
+
+- 每条 notice ≤ 1 行；每条 notice 的 params ≤ 4 个；
+- 常规返回 ≤ 3 条 notice；出现安全类（`ISOLATION_FALLBACK`、`REDACTED`）时 ≤ 6 条；
+- 全部 notice 合计 ≤ 400 UTF-8 字节（约 100 token，按 4 字节/token 估算）。
+
+**超预算合并算法**（确定性，实现按此顺序）：
+
+1. **同 code 合并**：count 类求和（两处 REDACTED → `count=5`）；列表类合并去重；
+   阈值类取最差值。
+2. **按类优先级保留**：安全（`ISOLATION_FALLBACK`、`REDACTED`）> 完整性
+   （`TRUNCATED`）> 可用性（`SLOT_UNAVAILABLE`、`DEGRADED`）> 认知
+   （`LOW_CONFIDENCE`、`UNCALIBRATED`、`SNIFFED`、`NORMALIZED`、`LOSSY_DECODE`）。
+3. **超 6 条时**：从认知类最低优先级开始整条省略；省略数量记入
+   `meta.noticeOverflow`（usize，程序字段，不进 content）。安全类与
+   完整性类永不省略。
+4. **仍超 400 字节时**：先缩短 `reason` / `pointer` 等字符串字段（取规则 ID、内容
+   哈希前缀），不删 code。
+
+「code 选择规则」保证同一事实不重复触发；最坏组合按上述算法压到 ≤ 6 条。
+
+**敏感信息**：notice 与 content、structuredContent 一样可能被模型看到（§4.4），必须过 §8.11：
+
+- `rule` 渲染脱敏后的 glob：绝对路径转工作区相对或 `<external>`；无法安全渲染时用规则 ID（`rule=rule-07`）；
+- `reason` 只允许有限枚举：`retention_below_threshold` / `no_redactable_pattern` / `redact_optimal` / `capability_missing` / `upstream_no_vision` / `latency_over_budget` / `lossy_compression` / `compression_exceeded`；
+- `REDACTED.count` 只给数量，不给类型与内容；
+- 测试：配置绝对路径规则时，notice 渲染不得出现用户名与绝对路径前缀。
+
+**不套 notice 的三类**：
+
+- **错误响应**——ToolError 的 fact / reason / nextSteps 三段（§1.4.5）是错误契约，保持原样。
+- **操作事实**——快照路径、嗅探的 kind/mime/encoding 字段、edit 第 4 级语义对齐的候选位置走 structuredContent 的专门字段，文本只渲染必要说明。
+- **启动与运维输出**——配置校验、`toolgate list` 的槽位状态不是模型返回，不适用 notice。
+
+**适用边界**：凡经治理管线产生的结果都带 `notices`——MCP 工具返回与 §18.7 的 `govern` 响应；`structuredContent.notices` 为数组，空时省略该字段。JSON 字段一律 camelCase（与 `nextSteps` 一致），Rust 内部字段可 snake_case、序列化时转换。
+
+**Rust 类型草案**：
+
+```rust
+/// 序列化为 {"code": "TRUNCATED", "params": {...}}；tag 判别式即 notice code。
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(tag = "code", content = "params",
+       rename_all = "SCREAMING_SNAKE_CASE",
+       rename_all_fields = "camelCase")]
+pub enum Notice {
+    Truncated { kept: u64, total: u64, unit: TruncUnit, #[serde(default, skip_serializing_if = "Option::is_none")] pointer: Option<String> },
+    Degraded { requested: OutputShape, actual: DegradedActual, reason: DegradeReason, #[serde(default, skip_serializing_if = "Option::is_none")] slot: Option<String> },
+    LowConfidence { p: f32, views: ConfidenceViews },
+    IsolationFallback { requested: IsolationLevel, actual: FallbackAction, rule: String, reason: IsolationReason },
+    SlotUnavailable { slot: String, fallback: SlotFallback },
+    Redacted { count: u32, retention: f32 },
+    Normalized { level: NormalizeLevel, kind: NormalizeKind },
+    Uncalibrated { slot: String, adapter: AdapterKind },
+    LossyDecode { encoding: String, replacements: u32 },
+    Sniffed { ext: String, actual: SniffActual },
+}
+
+// 新增变体必须补 match（无 _ 通配）。code() 供程序分支；序列化 tag 由 serde 属性生成。
+// code() 的字符串必须与 serde tag 完全一致，由 §15.7 的枚举测试锁定。
+// Option 字段已用 skip_serializing_if 省略空值，与「空值字段省略」一致。
+impl Notice {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Notice::Truncated { .. } => "TRUNCATED",
+            Notice::Degraded { .. } => "DEGRADED",
+            Notice::LowConfidence { .. } => "LOW_CONFIDENCE",
+            Notice::IsolationFallback { .. } => "ISOLATION_FALLBACK",
+            Notice::SlotUnavailable { .. } => "SLOT_UNAVAILABLE",
+            Notice::Redacted { .. } => "REDACTED",
+            Notice::Normalized { .. } => "NORMALIZED",
+            Notice::Uncalibrated { .. } => "UNCALIBRATED",
+            Notice::LossyDecode { .. } => "LOSSY_DECODE",
+            Notice::Sniffed { .. } => "SNIFFED",
+        }
+    }
+}
+
+// 值枚举一律 snake_case 序列化，与模板渲染一致（unit=lines，不是 LINES）。
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum TruncUnit { Lines, Bytes }
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputShape { Raw, Summary, Structured, Visual, None }
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum DegradedActual { Raw, Summary, Structured, Visual, None, Metadata, Compressed }
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationLevel { None, Understand, Summary, Raw }
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackAction { Redact, Structure, Summarize, Refuse }
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotFallback { Metadata, Text, Mechanical, Loading }
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterKind { Native, Json, Text, Ordered }
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum SniffActual { Binary, Text, Png, Jpeg, Gif, Webp, Pdf, Zip, Gzip, Other }
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfidenceViews { Both, Local }
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum NormalizeKind { Eol, Whitespace }
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NormalizeLevel {
+    #[serde(rename = "2")] L2,
+    #[serde(rename = "3")] L3,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum DegradeReason { CapabilityMissing, UpstreamNoVision, LatencyOverBudget, LossyCompression, CompressionExceeded }
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationReason { RetentionBelowThreshold, NoRedactablePattern, RedactOptimal }
+```
+
+序列化示例：`{"code":"TRUNCATED","params":{"kept":2000,"total":8734,"unit":"lines","pointer":"spill://ab12cd34"}}`。
+
+`match` 不写 `_` 通配分支——新增 code 即编译失败（§15.7）。
+
+**测试层**（§15.7）：枚举穷举（新增即编译失败）、渲染快照（每个 code 一组固定
+params → 完整期望字节，另加多 notice 组合用例）、告知完备性（10 个 code 每个至少
+一条路径断言 content 含对应 code）、预算（10 code 全触发按合并算法 ≤6 条、≤400 字节）、
+敏感信息（绝对路径规则下不出现用户名）。
 
 ### 4.5 输出形态的单一决策表
 
@@ -117,12 +367,51 @@ decide_output(
   upstream_capability, // vision 是否可用（§18.1b）
   slot_available,      // 该输出依赖的槽位是否可用（§3.8）
   latency_budget       // 本机档位下的预算（§3.1）
-) -> (output_shape, fallback, meta)
+) -> (output_shape, fallback, decision_notices, meta)
 ```
+
+`decision_notices` 只含本阶段能决定的形态类告知（`ISOLATION_FALLBACK` / `DEGRADED`
+（能力/延迟/上游）/ `SLOT_UNAVAILABLE`，**不含压缩熔断**）；执行后由
+`finalize_notices(decision_notices, observed)` 合并执行事实类告知（截断量、脱敏计数、
+d1 概率、压缩熔断等，§4.4b「生成分两段」）。最终 `notices` 是唯一事实源：content 由它按
+固定模板渲染，structuredContent 原样携带；`meta` 只放程序字段。
+
+**`finalize_notices` 契约**（与 `decide_output` 一样是纯函数）：
+
+```rust
+pub struct ObservedFacts {
+    pub truncation: Option<TruncationObs>,      // kept / total / unit / pointer
+    pub redaction: Option<RedactionObs>,        // count / retention
+    pub confidence: Option<ConfidenceObs>,      // p / views
+    pub normalization: Option<NormalizationObs>,// level / kind
+    pub decode: Option<DecodeObs>,              // encoding / replacements
+    pub sniff: Option<SniffObs>,                // ext / actual
+    pub compression: Option<CompressionObs>,    // requested / actual / slot / reason
+    pub uncalibrated: Option<UncalibratedObs>,  // slot / adapter
+}
+
+pub struct TruncationObs { pub kept: u64, pub total: u64, pub unit: TruncUnit, pub pointer: Option<String> }
+pub struct RedactionObs { pub count: u32, pub retention: f32 }
+pub struct ConfidenceObs { pub p: f32, pub views: ConfidenceViews }
+pub struct NormalizationObs { pub level: NormalizeLevel, pub kind: NormalizeKind }
+pub struct DecodeObs { pub encoding: String, pub replacements: u32 }
+pub struct SniffObs { pub ext: String, pub actual: SniffActual }
+// lossy：requested=visual actual=compressed reason=lossy_compression slot=vision
+// cutoff：requested=visual actual=metadata reason=compression_exceeded slot=vision
+pub struct CompressionObs { pub requested: OutputShape, pub actual: DegradedActual, pub slot: Option<String>, pub reason: DegradeReason }
+pub struct UncalibratedObs { pub slot: String, pub adapter: AdapterKind }
+
+pub fn finalize_notices(decision: Vec<Notice>, observed: &ObservedFacts) -> Vec<Notice>
+```
+
+- 只产执行事实类 code（`TRUNCATED` / `REDACTED` / `LOW_CONFIDENCE` /
+  `NORMALIZED` / `UNCALIBRATED` / `LOSSY_DECODE` / `SNIFFED` / `DEGRADED` 压缩熔断），
+  不产 `ISOLATION_FALLBACK` / `SLOT_UNAVAILABLE`；
+- 输出按 §4.4b 的固定渲染顺序排序；同输入同输出。
 
 决策顺序固定为三段，前一段是硬约束：
 
-1. **能力**：上游收不收这种 content block。不收 → 降级为文本并在 content 里说明。
+1. **能力**：上游收不收这种 content block。不收 → 降级为文本并按 §4.4b 的 `DEGRADED` 告知。
 2. **隔离**：路径规则与内容级规则取交集，再与 `max_exposure` 取 min。超出 → 按 `fallback_chain` 逐级尝试。
 3. **意图**：intent 只在允许范围内表达偏好，不能突破前两段。
 
@@ -130,6 +419,7 @@ decide_output(
 
 - 对任意输入，`output_shape` 不超出 `max_exposure`；
 - 对任意输入，`fallback` 链的每一步都在配置里；
+- `decision_notices` 只含 §4.4b 决策阶段的三类 code；
 - 同样的输入两次调用得到同样的输出（§16.3 对策二）。
 
 各章不再重复写「什么情况下给什么」，只引用本节。
@@ -158,9 +448,9 @@ decide_output(
 | 约束 | 具体要求 | 违反的后果 |
 |---|---|---|
 | 不编造 | read 读不到就报错；search 无命中就返回空；bash 无输出就返回空。摘要 / OCR / 结构化输出必须能回退到原文（spill 指针、图片路径、行号范围） | 模型基于假内容做决策，且无法发现 |
-| 不假装成功 | write 未落盘不报成功；edit 未匹配不猜位置；超时或部分失败明确标注，不把部分结果当完整 | 调用方以为状态已变，后续全部踩空 |
+| 不假装成功 | write 未落盘不报成功；edit 未匹配不猜位置；超时按 `Timeout` 错误码；任何部分完成都明确标注已完成项，不把部分结果当完整 | 调用方以为状态已变，后续全部踩空 |
 | 不越界猜测 | edit 多处命中即拒绝（§5.4）；路径不存在不猜相似路径；不自动回滚（§20.3）；不自动装依赖 | 工具替模型做了它没授权的决定 |
-| 降级必须告知 | 截断、摘要、脱敏、隔离回退、槽位不可用时，模型可见通道必须有说明（§4.4） | 模型拿到降级产物却当成原文 |
+| 降级必须告知 | 截断、摘要、脱敏、隔离回退、槽位不可用时，模型可见通道必须有说明（§4.4b） | 模型拿到降级产物却当成原文 |
 | 错误归因准确 | `PathNotFound` / `EncodingInvalid` / `AnchorMismatch` / `EditAmbiguous` / `Timeout` / `OutputLimit` / `SlotUnavailable` / `IsolationRefused` 各自对应真实原因，不用 `Failed` 兜底一切（§1.4.5） | 模型按错误码分支时走错路径 |
 
 **边界必须写进工具描述。** 每个 ToolSpec 的 description 固定三段：**能做什么**、**不能做什么**、**什么时候该用别的工具**。模型看不到的边界等于不存在——它会产生「工具应该能做」的幻觉，然后反复试错。
@@ -201,12 +491,80 @@ description:
 
 **自检**：把返回内容交给一个不了解上下文的模型，它能否直接拿来做下一步？若需要人再读一遍才能理解，就是设计错了。
 
+### 4.8 理解链路：有界多步与并发
+
+**问题**：§4.1 的理解层原来是一条固定流水线（判定 → 摘要）。本地小模型已经具备多步执行能力（§1.2 的 2026 年事实：端侧 2B 级模型在 agentic 基准上可排同规模前列），固定流水线浪费了「读一段 → 判断够不够 → 再读」和「多个独立片段同时处理」这两类能力。
+
+**决策：理解层升级为「有界多步 DAG」，边界四条**：
+
+| 约束 | 内容 |
+|---|---|
+| 动作菜单固定 | 只能从下表 7 个动作里选，不生成新动作 |
+| 单次调用内 | 不跨 tools/call、不写文件、不产生持久状态 |
+| 有界预算 | 最多 5 步、并发 ≤ 4；链级 token / 延迟预算按 §6.1 |
+| 每步可验证 | 每步输出有 schema 或机械校验；不达标降级到机械路径 |
+
+**动作菜单**：
+
+| 动作 | 作用 | 归属 |
+|---|---|---|
+| `recall` | 从落盘副本召回指定片段（行号 / 正则 / 头部 / 尾部） | 确定性 |
+| `decide` | 在命名问题上给概率答案 | decide 槽位 |
+| `summarize` | 有界文本 → 摘要或 schema 化 | summarize 槽位 |
+| `vision` | 图片 → 文字 / 坐标 | vision 槽位 |
+| `rerank` | 候选排序 | rerank 槽位 |
+| `self_check` | 对前一步输出做达标判定（如「摘要是否覆盖全部失败项」） | decide 槽位 |
+| `merge` | 合并并行分支的结果（去重、按 schema 汇总） | 确定性 |
+
+**链是 DAG，不是串行脚本。** 节点之间只有数据依赖才连边；没有依赖的节点并发执行：
+
+```text
+bash 失败（输出 8000 行）：
+  recall(错误行) ──┬── decide(has_error)
+  recall(尾部)   ──┘        │
+                            ▼
+                    summarize(失败摘要) → self_check(覆盖失败项？)
+                            │
+              不覆盖：recall(补充片段) → summarize(二次) → merge
+              覆盖：返回摘要 + 指针
+```
+
+多个召回片段各自 summarize 的分支是并行的；`self_check` 依赖 summarize，只能串行。
+
+**并发模型**（与 §18.1、§18.5 一致）：
+
+- 未依赖的链节点并发提交，调度器是工具层内的 tokio task；
+- **同一模型实例内部仍串行**（§18.1 的有界队列），不同模型实例可并行——「decide + vision」能同时跑，「两个 summarize」仍排队；
+- 链级并发上限 `chain.max_parallel`（默认 `min(4, CPU/2)`），超过排队，不无界展开；
+- **并发不改变结果**：同输入同输出的约束（§16.3）按节点级落实——节点输出确定、DAG 拓扑固定，并发只影响延迟。
+
+**下一步由谁选**：由 `decide` 槽位在菜单内做受限选择（答案空间 = 7 个动作），或由机械条件触发（如「召回窗口含错误行 → 必须 summarize」）。**不做自由生成式规划**——那会跨出 §1.2 的答案空间判据。
+
+**与 §13.4 批量的关系**：§13.4 方案 B 是「一次 d1 调用问多个问题」（模型内批量）；本节是「多个链节点并行提交」（调度层并发）。两者互补：批量减少调用次数，并发缩短关键路径。
+
+**与 §21.7 本地 agent 的区别**（关键边界）：
+
+| 维度 | 理解链（本节） | 本地 agent（§21.7） |
+|---|---|---|
+| 范围 | 单次工具调用内 | 跨工具调用的任务循环 |
+| 目标 | 把本次结果定形 | 完成一个任务 |
+| 规划 | 固定动作菜单内的受限选择 | 开放式多步规划 |
+| 状态 | 无（链结束即丢弃） | 有（任务状态、checkpoint） |
+| 副作用 | 无（只读） | 有（写文件、跑命令） |
+| 失败 | 降级到机械路径，按 §4.4b 的 `DEGRADED` 告知 | 任务层 partial / 升级云端 |
+
+**为什么不是「内置 agent 循环」**：链的目标不是完成任务，是「这次工具结果怎么给」；动作全只读、菜单固定、单次调用内、无状态。§21.7.3 拒绝的是有目标、有状态、有副作用的 agent 循环，不是单次调用内的多步理解。
+
+**什么时候进链**：输出 > 500 token、图片、或失败归因需要多步；小输出单步判定即可（§7.1）。超预算按 §7.3 降级（给已完成步骤 + 机械结果），不中途扩展预算。
+
 ---
 
 ## 5. 各工具的智能路径
 
 每个工具写清楚：L0 做什么、本地模型在哪一步介入、协商层给什么。
 **不是所有工具都需要全部三级**——不需要的就不写，这是「不越需求」。
+本节描述**最小路径**；实际执行可按 §4.8 组成有界多步链（补读、自检、并行召回），
+链不改变这里的分层职责。
 
 ### 5.1 bash —— 收益最大的一个
 
@@ -402,12 +760,17 @@ edit 拿到锚点后重算该行哈希，**不符即拒绝写入**，并把该�
 
 **三种模式的共同前置**
 
+**「不用先读」的准确含义**：省掉的是模型把全文读进上下文、再回传 `oldText` / patch 里的原文；**工具层每次写之前必须读原文并记版本指纹**，这不是可关闭的优化，是写侧安全的前置条件（§18.5）。三种模式只是寻址方式不同，共同前置完全相同。
+
 ```text
-L0 读原文（按检测出的编码解码）→ 写前快照（§20）
+L0 读原文（按检测出的编码解码）→ 记录 (mtime, size, sha256) → 写前快照（§20）
+L0 写前复核：指纹与读时不一致即拒绝，不做三方合并（§18.5）
 L0 按模式定位与替换（偏移基于原始字节，不基于解码后的字符）
 L0 写回：按原编码编码；无法无损表示时报错
 L0 校验：patch 模式额外校验 hunk 行号与内容匹配
 ```
+
+复核失败按 §1.4.5 的 ToolError 三段式返回，`nextSteps` 给出「重新 read / 重算锚点」，不把旧内容静默改写。`read(intent=raw)` 的产物是行锚点与版本指纹，不是供模型回传的全文；编排里中间结果不进模型历史（§21.3、§22.4）。
 
 **匹配的四级策略：让失败在本地消化掉**
 
@@ -421,8 +784,8 @@ L0 校验：patch 模式额外校验 hunk 行号与内容匹配
 | 级 | 策略 | 谁做 | 命中后 |
 |---|---|---|---|
 | 1 | 精确字节匹配 | 机械 | 直接应用 |
-| 2 | 行尾归一化（CRLF/LF、尾随空白） | 机械 | 应用，并告知「按行尾归一化命中」 |
-| 3 | 空白归一化（行首缩进、行内多空格、全角空格 / NBSP） | 机械 | 应用，并告知 |
+| 2 | 行尾归一化（CRLF/LF、尾随空白） | 机械 | 应用，按 §4.4b 的 `NORMALIZED` 告知（level=2 kind=eol） |
+| 3 | 空白归一化（行首缩进、行内多空格、全角空格 / NBSP） | 机械 | 应用，按 §4.4b 的 `NORMALIZED` 告知（level=3 kind=whitespace） |
 | 4 | 语义对齐（内容被重排、模型记的是旧版本） | d1 判定 | 给出「最像的位置 + 差异类型」，能安全改就改，不能才报错 |
 
 **两条硬约束**
@@ -529,7 +892,7 @@ L2 summarize 增量摘要（仅当 action=read 且累积输出 > 2000 token）
 | 场景 | 行为 |
 |---|---|
 | 能无损解码 | 正常处理，写回时用原编码 |
-| 解码出现替换字符 | read 正常返回但**明确警告**；edit 拒绝（继续会破坏字节） |
+| 解码出现替换字符 | read 正常返回但按 §4.4b 的 `LOSSY_DECODE` 明确警告（encoding / replacements）；edit 拒绝（继续会破坏字节） |
 | 写回时目标编码无法表示 | **报错**，不静默替换成问号 |
 | UTF-16 | 不当二进制（它天然含 NUL 字节），按文本处理 |
 

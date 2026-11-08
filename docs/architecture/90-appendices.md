@@ -61,11 +61,16 @@
 | 术语 | 含义 | 首次定义 |
 |---|---|---|
 | F1 / F2 / F3 | 三种使用形态：直连云端 agent / PTC 云端 agent / 本地 agent | §6.2 |
+| 本地 agent | 进程外、由 30B 级本地模型驱动的 agent 循环，通过 MCP 消费 6 个工具；不是 toolgate 的组件，也不是槽位 | §21.7 |
+| 第一期 | v2 首版（阶段 1–4），平台范围只含 macOS（§19.7） | §19.7 |
 | L0–L4 | 成本阶梯：确定性 / 判定 / 生成 / 视觉 / 云端 | §2.1、§6.1 |
 | 槽位 | 能力契约，不是具体模型：classify / rerank / decide / summarize / vision | §3.1 |
 | embedded / http | 槽位模型的两种部署形态：进程内动态库 / 本机回环 HTTP 服务 | §18.1 |
 | intent | 调用方表达的输出偏好：raw / summary / structured / visual / auto | §4.2 |
 | spill | 超限输出的落盘副本 + 指针 | §9.1 |
+| notice | 成功返回中的结构化告知单元：code + params，content 按固定模板渲染、structuredContent 原样携带 | §4.4b |
+| 告知协议 | 10 个 notice code 的枚举、模板、预算与测试约定 | §4.4b |
+| G0 / G1 / G2 | 返回信息等级：必给 / 默认给 / 按需；与成本阶梯 L0–L4 无关 | §4.4b |
 | snapshot | 写前保存的旧内容副本 | §20 |
 | 信任域 | 共享同一套隔离配置的一组客户端；一个 server 实例 = 一个信任域 | §18.2 |
 | turn | 客户端的一次任务回合；在无状态协议下由 `_meta.toolgate/turn` 显式传递，可选 | §13.4 |
@@ -109,9 +114,20 @@ fetch:
 | `isolation.fallback_chain` | `[redact, structure, summarize, refuse]` | 脱敏无意义时的降级顺序 |
 | `isolation.redact_min_retention` | `0.5` | 脱敏后保留率下限 |
 | `paths.expose_absolute` | `false` | 模型可见路径默认工作区相对；raw 显式开启才绝对 |
-| `slots` | `{}` | 不写就是没有模型；机械治理仍可用（§3.8） |
+| `models` | `{}` | 模型清单；每个模型声明 `serves`（能服务哪些槽位，§3.10） |
+| `models.<id>.source` | `auto` | `auto`（按 path / base_url 推断）；也可显式 `local` / `openai` / `anthropic` / `responses`（§18.1） |
+| `models.<id>.adapter` | `auto` | 形状适配器：`auto` / `native` / `json` / `text` / `ordered`（§3.10） |
+| `models.<id>.path` | 空 | `source: local`（或 auto 推断为 local）的权重路径 |
+| `models.<id>.base_url` | 空 | 外部来源的接口地址（默认仅 loopback） |
+| `models.<id>.model` | 空 | 外部来源的上游模型名 |
+| `models.<id>.api_key_env` | 空 | 外部来源的密钥环境变量名，不落配置 |
+| `models.<id>.allow_remote` | `false` | 是否允许非 loopback 的 OpenAI 兼容地址（不推荐，§18.1） |
+| `slots` | 空 | 显式覆盖槽位绑定；默认空 = 按 serves 自动解析（§3.10） |
+| `slots.<name>` | 自动 | 槽位 → 模型 id 的显式覆盖（§3.10） |
 | `slm.mode` | `auto` | 按槽位分档选择 embedded/http（§18.1） |
-| `slm.embedded.backend` | 平台默认 | macOS `mlx`，其他平台 `llama-cpp` |
+| `slm.probe` | `first-use` | 能力校验时机：first-use / startup / off（§3.11） |
+| `slm.disable_after_failures` | `3` | 连续失败多少次禁用槽位（§3.11） |
+| `slm.embedded.backend` | `macOS mlx`（第一期） | 第一期只实现 macOS/MLX；Linux / Windows 见 §19.7 |
 | `slm.embedded.model_dir` | `~/.toolgate/models` | 模型权重目录 |
 | `slm.embedded.max_resident_models` | `2` | 热槽位 + 一个冷槽位（§18.1） |
 | `slm.embedded.idle_ttl_seconds` | `600` | 冷槽位空闲卸载 |
@@ -144,5 +160,5 @@ fetch:
 
 **加载顺序**：CLI 参数 > 环境变量 `TOOLGATE_*` > 配置文件（`--config`，默认 `~/.toolgate/config.yaml`）> 内置默认。
 **缺省**：配置文件不存在时全部使用内置默认，不视为错误；存在但字段非法才 fail loud。
-**校验**：配置错误启动即失败（fail loud），不静默降级。
+**校验**：语法 / 结构 / 语义错误启动即失败（fail loud），多错误聚合、未知字段拒绝、错误带字段路径与修法（§18.9）；资源失败按 §3.8 降级但告警。改前先跑 `toolgate config check`。
 **热加载**：不支持；改配置需重启（§8.8）。
