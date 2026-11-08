@@ -151,7 +151,7 @@ content 由固定模板渲染，structuredContent 原样携带同一份 `notices
 | code | 触发 | params（顺序固定） | 渲染示例 |
 |---|---|---|---|
 | `TRUNCATED` | 输出被裁短，或摘要替代原文且原文可回溯 | kept:u64 total:u64 unit:lines\|bytes pointer:option<string> | `[TRUNCATED] kept=2000 total=8734 unit=lines pointer=spill://ab12cd34` |
-| `DEGRADED` | 非隔离原因的输出形态或质量降级（槽位可用但输出被迫变化，含有损压缩） | requested:enum actual:enum reason:enum slot:option<string> | `[DEGRADED] requested=summary actual=none reason=latency_over_budget slot=summarize` |
+| `DEGRADED` | 非隔离原因的输出形态或质量降级（槽位可用但输出被迫变化，含有损压缩） | requested:enum actual:enum reason:enum slot:option<string> | `[DEGRADED] requested=summary actual=none reason=capability_missing slot=summarize` |
 | `LOW_CONFIDENCE` | d1 概率低于门控（§7.2） | p:f32(2) views:both\|local | `[LOW_CONFIDENCE] p=0.62 views=local` |
 | `ISOLATION_FALLBACK` | 隔离回退命中（§8.7） | requested:enum actual:enum rule:string reason:enum | `[ISOLATION_FALLBACK] requested=raw actual=structure rule=**/.env* reason=retention_below_threshold` |
 | `SLOT_UNAVAILABLE` | 槽位不可用或未配置 | slot:string fallback:enum | `[SLOT_UNAVAILABLE] slot=vision fallback=metadata` |
@@ -180,7 +180,7 @@ content 由固定模板渲染，structuredContent 原样携带同一份 `notices
 
 **code 选择规则**（同一事实只发一条，组合按此裁决）：
 
-1. **槽位不可用只发 `SLOT_UNAVAILABLE`**，不再发 `DEGRADED`；`DEGRADED` 只用于「槽位可用但输出形态或质量被迫变化」（延迟超预算、上游能力不支持、有损压缩、压缩熔断）。
+1. **槽位不可用只发 `SLOT_UNAVAILABLE`**，不再发 `DEGRADED`；`DEGRADED` 只用于「槽位可用但输出形态或质量被迫变化」（上游能力不支持、有损压缩、压缩熔断）。
 2. **`TRUNCATED` 只用于「裁短或摘要替代原文」且原文可回溯**；形态从 A 变 B 但未裁短用 `DEGRADED`。
 3. **隔离回退到 redact 发两条**：`ISOLATION_FALLBACK`（原因）与 `REDACTED`（结果）；`ISOLATION_FALLBACK.reason` 只写回退原因，不复制脱敏统计。
 4. **判为二进制且只回元信息时只发 `SNIFFED`**，不叠加 `DEGRADED`（没有形态决策）。
@@ -233,7 +233,7 @@ ISOLATION_FALLBACK → REDACTED → TRUNCATED → SLOT_UNAVAILABLE
 **敏感信息**：notice 与 content、structuredContent 一样可能被模型看到（§4.4），必须过 §8.11：
 
 - `rule` 渲染脱敏后的 glob：绝对路径转工作区相对或 `<external>`；无法安全渲染时用规则 ID（`rule=rule-07`）；
-- `reason` 只允许有限枚举：`retention_below_threshold` / `no_redactable_pattern` / `redact_optimal` / `capability_missing` / `upstream_no_vision` / `latency_over_budget` / `lossy_compression` / `compression_exceeded`；
+- `reason` 只允许有限枚举：`retention_below_threshold` / `no_redactable_pattern` / `redact_optimal` / `capability_missing` / `upstream_no_vision` / `lossy_compression` / `compression_exceeded`；
 - `REDACTED.count` 只给数量，不给类型与内容；
 - 测试：配置绝对路径规则时，notice 渲染不得出现用户名与绝对路径前缀。
 
@@ -365,13 +365,12 @@ decide_output(
   path_rule,           // 命中的路径规则（可空）
   content_rules,       // §8.11 的输出内容级规则（可空）
   upstream_capability, // vision 是否可用（§18.1b）
-  slot_available,      // 该输出依赖的槽位是否可用（§3.8）
-  latency_budget       // 本机档位下的预算（§3.1）
+  slot_available       // 该输出依赖的槽位是否可用（§3.8）
 ) -> (output_shape, fallback, decision_notices, meta)
 ```
 
 `decision_notices` 只含本阶段能决定的形态类告知（`ISOLATION_FALLBACK` / `DEGRADED`
-（能力/延迟/上游）/ `SLOT_UNAVAILABLE`，**不含压缩熔断**）；执行后由
+（能力/上游）/ `SLOT_UNAVAILABLE`，**不含压缩熔断**）；执行后由
 `finalize_notices(decision_notices, observed)` 合并执行事实类告知（截断量、脱敏计数、
 d1 概率、压缩熔断等，§4.4b「生成分两段」）。最终 `notices` 是唯一事实源：content 由它按
 固定模板渲染，structuredContent 原样携带；`meta` 只放程序字段。
@@ -501,7 +500,7 @@ description:
 |---|---|
 | 动作菜单固定 | 只能从下表 7 个动作里选，不生成新动作 |
 | 单次调用内 | 不跨 tools/call、不写文件、不产生持久状态 |
-| 有界预算 | 最多 5 步、并发 ≤ 4；链级 token / 延迟预算按 §6.1 |
+| 有界预算 | 最多 5 步、并发 ≤ 4；链级 token / 步数按本节边界，不设延迟门控 |
 | 每步可验证 | 每步输出有 schema 或机械校验；不达标降级到机械路径 |
 
 **动作菜单**：
@@ -555,7 +554,7 @@ bash 失败（输出 8000 行）：
 
 **为什么不是「内置 agent 循环」**：链的目标不是完成任务，是「这次工具结果怎么给」；动作全只读、菜单固定、单次调用内、无状态。§21.7.3 拒绝的是有目标、有状态、有副作用的 agent 循环，不是单次调用内的多步理解。
 
-**什么时候进链**：输出 > 500 token、图片、或失败归因需要多步；小输出单步判定即可（§7.1）。超预算按 §7.3 降级（给已完成步骤 + 机械结果），不中途扩展预算。
+**什么时候进链**：输出 > 500 token、图片、或失败归因需要多步；小输出单步判定即可（§7.1）。超预算按本节边界收束（给已完成步骤 + 机械结果），不中途扩展预算。
 
 ---
 
