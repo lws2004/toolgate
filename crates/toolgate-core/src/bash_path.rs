@@ -187,25 +187,28 @@ pub struct BashDecision {
 /// 归并阈值 0.5 与 §7.2 的门控阈值是两回事：门控决定采不采用，归并决定落到哪个字段值。
 pub fn merge_decision(probs: &BTreeMap<String, f64>) -> BashDecision {
     let p = |key: &str| probs.get(key).copied().unwrap_or(0.0);
-    let has_error = p(L1_QUESTION_KEYS[0]) >= 0.5;
+    let has_error_probability = p(L1_QUESTION_KEYS[0]);
+    let has_error = has_error_probability >= 0.5;
 
-    let error_kind = if !has_error {
-        "none".to_owned()
-    } else {
-        let mut best_index = 0usize;
-        let mut best = p(L1_QUESTION_KEYS[1]);
-        for (offset, key) in L1_QUESTION_KEYS[1..5].iter().enumerate() {
-            let candidate = p(key);
-            if candidate > best {
-                best = candidate;
-                best_index = offset;
-            }
+    // kind 候选取 argmax（五个 kind 问）。
+    let mut best_index = 0usize;
+    let mut best = p(L1_QUESTION_KEYS[1]);
+    for (offset, key) in L1_QUESTION_KEYS[1..5].iter().enumerate() {
+        let candidate = p(key);
+        if candidate > best {
+            best = candidate;
+            best_index = offset;
         }
+    }
+    let (error_kind, kind_probability) = if has_error {
         if best < 0.5 {
-            "unknown".to_owned()
+            ("unknown".to_owned(), best)
         } else {
-            L1_ERROR_KINDS[best_index].to_owned()
+            (L1_ERROR_KINDS[best_index].to_owned(), best)
         }
+    } else {
+        // 判为「无错」时没有选类别，结论只依赖 has_error 本身。
+        ("none".to_owned(), has_error_probability)
     };
 
     let severity = if p(L1_QUESTION_KEYS[6]) >= 0.5 {
@@ -221,10 +224,11 @@ pub fn merge_decision(probs: &BTreeMap<String, f64>) -> BashDecision {
         error_kind,
         severity: severity.to_owned(),
         needs_full_context: p(L1_QUESTION_KEYS[8]) >= 0.5,
-        confidence: L1_QUESTION_KEYS
-            .iter()
-            .map(|key| p(key))
-            .fold(f64::INFINITY, f64::min),
+        // confidence 是「本次结论所依赖的问题概率的最小值」：has_error 与被选中的类别。
+        // **不是全部问题的最小值**：多选问题的非答案概率天然就低（它们本来就该低），
+        // 取全部最小值会把任何多问题判定压到低置信档，§7.2 的门控等于失效
+        // （2026-11-09 本机实测：bash 与 edit 的 confidence 恒为 0.01~0.11，恒走 both_views）。
+        confidence: has_error_probability.min(kind_probability),
     }
 }
 
@@ -374,18 +378,22 @@ mod tests {
     #[test]
     fn merge_decision_follows_spec() {
         // has_error 低 → errorKind=none，severity=warning。
+        // confidence = 结论所依赖的问题的最小值：判为「无错」时只取 has_error 本身（0.2），
+        // 不是九问的最小值（0.1）——否则任何多问题判定都会被压到低置信档。
         let d = merge_decision(&probs([0.2, 0.9, 0.1, 0.1, 0.1, 0.1, 0.2, 0.1, 0.1]));
         assert!(!d.has_error);
         assert_eq!(d.error_kind, "none");
         assert_eq!(d.severity, "warning");
         assert!(!d.needs_full_context);
-        assert!((d.confidence - 0.1).abs() < 1e-9);
+        assert!((d.confidence - 0.2).abs() < 1e-9);
 
         // has_error 高 → kind 取 argmax（test），severity=blocking。
+        // confidence = min(has_error 0.9, 被选中的 kind 0.8) = 0.8。
         let d = merge_decision(&probs([0.9, 0.2, 0.8, 0.3, 0.1, 0.1, 0.7, 0.1, 0.2]));
         assert!(d.has_error);
         assert_eq!(d.error_kind, "test");
         assert_eq!(d.severity, "blocking");
+        assert!((d.confidence - 0.8).abs() < 1e-9);
 
         // kind 最大者 < 0.5 → unknown；severity_noise ≥ 0.5 → noise。
         let d = merge_decision(&probs([0.9, 0.2, 0.3, 0.1, 0.1, 0.1, 0.1, 0.9, 0.1]));
