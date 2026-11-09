@@ -54,7 +54,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     // 目标编码无法表示新内容时明确报错，不静默替换成问号。
     let out_bytes = encoding
         .encode(content)
-        .map_err(|e| ToolError::Failed(format!("{} 写入失败：{e}", path.display())))?;
+        .map_err(|e| ToolError::failed(format!("{} 写入失败：{e}", path.display())))?;
     tokio::fs::write(&path, &out_bytes).await?;
 
     let lines = content.lines().count();

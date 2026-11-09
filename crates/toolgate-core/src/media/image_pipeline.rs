@@ -71,7 +71,7 @@ pub fn prepare_with(
     cfg: &PipelineConfig,
 ) -> Result<ToolResponse, ToolError> {
     let img = image::load_from_memory(bytes)
-        .map_err(|e| ToolError::Failed(format!("图片解码失败（{mime}）：{e}")))?;
+        .map_err(|e| ToolError::failed(format!("图片解码失败（{mime}）：{e}")))?;
 
     let (ow, oh) = img.dimensions();
     let digest = crate::spill::sha256_short(bytes);

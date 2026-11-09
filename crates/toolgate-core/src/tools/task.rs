@@ -73,7 +73,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "read" => read_output(args, ctx),
         "kill" => kill(args).await,
         "list" => list(),
-        other => Err(ToolError::BadArgument(format!(
+        other => Err(ToolError::bad_argument(format!(
             "action 只能是 start / read / kill / list，收到 {other}"
         ))),
     }
@@ -102,7 +102,7 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
         .stderr(Stdio::piped())
         .kill_on_drop(false)
         .spawn()
-        .map_err(|e| ToolError::Failed(format!("无法启动 {binary}：{e}")))?;
+        .map_err(|e| ToolError::failed(format!("无法启动 {binary}：{e}")))?;
 
     let pid = child.id().unwrap_or(0);
     let output = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -158,7 +158,7 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
 
     registry()
         .lock()
-        .map_err(|_| ToolError::Failed("任务表锁失效".to_owned()))?
+        .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?
         .insert(
             task_id.clone(),
             Job {
@@ -181,10 +181,10 @@ fn read_output(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
     let task_id = required_str(args, "task_id")?;
     let reg = registry()
         .lock()
-        .map_err(|_| ToolError::Failed("任务表锁失效".to_owned()))?;
+        .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?;
     let job = reg
         .get(task_id)
-        .ok_or_else(|| ToolError::Failed(format!("没有这个任务：{task_id}")))?;
+        .ok_or_else(|| ToolError::failed(format!("没有这个任务：{task_id}")))?;
 
     let raw = job
         .output
@@ -228,9 +228,9 @@ async fn kill(args: &Value) -> Result<ToolResponse, ToolError> {
     let child = {
         let reg = registry()
             .lock()
-            .map_err(|_| ToolError::Failed("任务表锁失效".to_owned()))?;
+            .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?;
         reg.get(task_id)
-            .ok_or_else(|| ToolError::Failed(format!("没有这个任务：{task_id}")))?
+            .ok_or_else(|| ToolError::failed(format!("没有这个任务：{task_id}")))?
             .child
             .clone()
     };
@@ -238,7 +238,7 @@ async fn kill(args: &Value) -> Result<ToolResponse, ToolError> {
     guard
         .kill()
         .await
-        .map_err(|e| ToolError::Failed(format!("终止失败：{e}")))?;
+        .map_err(|e| ToolError::failed(format!("终止失败：{e}")))?;
     Ok(ToolResponse::text(format!("已请求终止任务 {task_id}。"))
         .with_meta(json!({ "taskId": task_id })))
 }
@@ -246,7 +246,7 @@ async fn kill(args: &Value) -> Result<ToolResponse, ToolError> {
 fn list() -> Result<ToolResponse, ToolError> {
     let reg = registry()
         .lock()
-        .map_err(|_| ToolError::Failed("任务表锁失效".to_owned()))?;
+        .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?;
     if reg.is_empty() {
         return Ok(ToolResponse::text("当前没有后台任务。"));
     }

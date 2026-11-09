@@ -852,7 +852,7 @@ mod sanitize_tests {
             rule: "/Users/lanws/workspace/toolgate/**/.env*".to_owned(),
             reason: IsolationReason::RetentionBelowThreshold,
         };
-        let value = structured_notices(&[n.clone()]);
+        let value = structured_notices(std::slice::from_ref(&n));
         let rule = value[0]["params"]["rule"].as_str().unwrap();
         assert_eq!(rule, "<external>");
         assert!(!value.to_string().contains("/Users/"));

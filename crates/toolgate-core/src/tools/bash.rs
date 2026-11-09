@@ -77,7 +77,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| ToolError::Failed(format!("无法启动 {binary}：{e}")))?;
+        .map_err(|e| ToolError::failed(format!("无法启动 {binary}：{e}")))?;
 
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr piped");
@@ -98,12 +98,12 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     .await
     {
         Ok((out, err, status)) => {
-            let status = status.map_err(|e| ToolError::Failed(format!("等待进程失败：{e}")))?;
+            let status = status.map_err(|e| ToolError::failed(format!("等待进程失败：{e}")))?;
             (out, err, status)
         }
         Err(_) => {
             let _ = child.kill().await;
-            return Err(ToolError::Failed(format!(
+            return Err(ToolError::failed(format!(
                 "命令超时（{} 秒）已被终止：{binary} {}",
                 timeout.as_secs(),
                 argv.join(" ")
@@ -158,7 +158,7 @@ fn reject_shell(binary: &str) -> Result<(), ToolError> {
         .unwrap_or(binary);
     const SHELLS: &[&str] = &["sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh"];
     if SHELLS.contains(&base) {
-        return Err(ToolError::BadArgument(format!(
+        return Err(ToolError::bad_argument(format!(
             "不接受通过 {base} 执行命令字符串。请直接把要运行的程序名放进 binary，\
              参数放进 args 数组——这样没有 shell 解析层，也就没有注入面。"
         )));

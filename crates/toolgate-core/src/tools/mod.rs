@@ -156,7 +156,7 @@ pub async fn dispatch(
         "search" => search::run(args, ctx).await,
         "bash" => bash::run(args, ctx).await,
         "task" => task::run(args, ctx).await,
-        other => Err(crate::ToolError::UnknownTool(other.to_owned())),
+        other => Err(crate::ToolError::unknown_tool(other.to_owned())),
     }
 }
 
@@ -164,7 +164,7 @@ pub async fn dispatch(
 pub(crate) fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, crate::ToolError> {
     args.get(key)
         .and_then(Value::as_str)
-        .ok_or_else(|| crate::ToolError::BadArgument(format!("缺少字符串参数 {key}")))
+        .ok_or_else(|| crate::ToolError::bad_argument(format!("缺少字符串参数 {key}")))
 }
 
 /// 从入参对象里取可选字符串。

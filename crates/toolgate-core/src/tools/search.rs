@@ -58,7 +58,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "content" => search_content(&root, query, max_results)?,
         "files" => list_files(&root, query, max_results)?,
         other => {
-            return Err(ToolError::BadArgument(format!(
+            return Err(ToolError::bad_argument(format!(
                 "mode 只能是 content 或 files，收到 {other}"
             )));
         }
@@ -97,8 +97,8 @@ fn search_content(
     pattern: &str,
     max_results: usize,
 ) -> Result<(String, usize), ToolError> {
-    let re =
-        regex::Regex::new(pattern).map_err(|e| ToolError::BadArgument(format!("正则无效：{e}")))?;
+    let re = regex::Regex::new(pattern)
+        .map_err(|e| ToolError::bad_argument(format!("正则无效：{e}")))?;
 
     let mut out = String::new();
     let mut hits = 0usize;
@@ -140,8 +140,8 @@ fn list_files(
     max_results: usize,
 ) -> Result<(String, usize), ToolError> {
     let glob = glob_to_regex(pattern);
-    let re =
-        regex::Regex::new(&glob).map_err(|e| ToolError::BadArgument(format!("通配符无效：{e}")))?;
+    let re = regex::Regex::new(&glob)
+        .map_err(|e| ToolError::bad_argument(format!("通配符无效：{e}")))?;
 
     let mut out = String::new();
     let mut hits = 0usize;

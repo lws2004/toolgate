@@ -6,6 +6,7 @@
 pub mod decision;
 pub mod encoding;
 pub mod error;
+pub use error::ErrorCode;
 pub mod hashline;
 pub mod media;
 pub mod notice;
@@ -20,15 +21,34 @@ pub use truncate::{
     truncate_head, truncate_tail,
 };
 
-/// 工具层统一的错误类型。
+/// 工具层统一的错误类型（§1.4.5 第一层：四个变体都带 errorCode 与 next_steps）。
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
-    #[error("未知工具：{0}")]
-    UnknownTool(String),
-    #[error("参数错误：{0}")]
-    BadArgument(String),
-    #[error("文件系统错误：{0}")]
-    Io(#[from] std::io::Error),
-    #[error("工具执行失败：{0}")]
-    Failed(String),
+    #[error("未知工具：{name}")]
+    UnknownTool {
+        code: ErrorCode,
+        name: String,
+        available: Vec<String>,
+        next_steps: Vec<String>,
+    },
+    #[error("参数错误：{message}")]
+    BadArgument {
+        code: ErrorCode,
+        message: String,
+        next_steps: Vec<String>,
+    },
+    #[error("文件系统错误：{fact}")]
+    Io {
+        code: ErrorCode,
+        fact: String,
+        reason: String,
+        next_steps: Vec<String>,
+    },
+    #[error("工具执行失败：{fact}")]
+    Failed {
+        code: ErrorCode,
+        fact: String,
+        reason: String,
+        next_steps: Vec<String>,
+    },
 }

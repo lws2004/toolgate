@@ -58,15 +58,18 @@ pub fn spec() -> ToolSpec {
 
 pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolError> {
     let path = ctx.resolve(required_str(args, "path")?);
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|e| ToolError::Failed(format!("无法读取 {}：{e}", path.display())))?;
+    let bytes = tokio::fs::read(&path).await.map_err(|e| {
+        ToolError::failed_with(
+            crate::error::ErrorCode::PathNotFound,
+            format!("无法读取 {}：{e}", path.display()),
+        )
+    })?;
 
     // 读-改-写必须字节保真：按检测出的编码解码，改完再用同一编码写回。
     let encoding = crate::encoding::FileEncoding::detect(&bytes);
     let (original, had_decode_errors) = encoding.decode(&bytes);
     if had_decode_errors {
-        return Err(ToolError::Failed(format!(
+        return Err(ToolError::failed(format!(
             "{} 按 {} 解码时出现无法解释的字节。继续读写会破坏这些字节，\
              请先用 bash 确认编码或转码（例如 iconv -f GBK -t UTF-8）。",
             path.display(),
@@ -83,7 +86,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     } else if let Some(edits) = args.get("edits").and_then(Value::as_array) {
         apply_text_mode(&original, edits)?
     } else {
-        return Err(ToolError::BadArgument(
+        return Err(ToolError::bad_argument(
             "需要提供 edits 数组（文本匹配模式），或 anchor + newText（行锚点模式）".to_owned(),
         ));
     };
@@ -98,7 +101,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     // 按原编码写回。目标编码无法表示新内容时明确报错，不静默替换。
     let out_bytes = encoding
         .encode(&updated)
-        .map_err(|e| ToolError::Failed(format!("{} 写回失败：{e}", path.display())))?;
+        .map_err(|e| ToolError::failed(format!("{} 写回失败：{e}", path.display())))?;
     tokio::fs::write(&path, &out_bytes).await?;
 
     let diff = unified_diff(&original, &updated, &path.display().to_string());
@@ -180,11 +183,11 @@ fn apply_anchor_mode(
     anchor_raw: &str,
     new_text: &str,
 ) -> Result<String, ToolError> {
-    let anchor = parse_anchor(anchor_raw).map_err(|e| ToolError::BadArgument(e.to_string()))?;
+    let anchor = parse_anchor(anchor_raw).map_err(|e| ToolError::bad_argument(e.to_string()))?;
     let ending = LineEnding::detect(original);
     let mut lines = split_lines(original);
     if anchor.line > lines.len() {
-        return Err(ToolError::Failed(format!(
+        return Err(ToolError::failed(format!(
             "锚点行号 {} 超出文件行数 {}",
             anchor.line,
             lines.len()
@@ -193,7 +196,7 @@ fn apply_anchor_mode(
     let idx = anchor.line - 1;
     let current = lines[idx];
     if line_anchor(current) != anchor.hash {
-        return Err(ToolError::Failed(format!(
+        return Err(ToolError::failed(format!(
             "锚点失配：第 {} 行当前哈希为 {}，与传入的 {} 不符。\
              文件可能已被改动，请重新 read 后再编辑。",
             anchor.line,
@@ -213,7 +216,7 @@ fn apply_anchor_mode(
 /// 文本匹配模式：逐笔在原始文件上定位并替换。
 fn apply_text_mode(original: &str, edits: &[Value]) -> Result<String, ToolError> {
     if edits.is_empty() {
-        return Err(ToolError::BadArgument("edits 不能为空".to_owned()));
+        return Err(ToolError::bad_argument("edits 不能为空".to_owned()));
     }
 
     // 先收集所有替换区间，再统一应用，避免前一笔改动影响后一笔的匹配位置。
@@ -222,14 +225,14 @@ fn apply_text_mode(original: &str, edits: &[Value]) -> Result<String, ToolError>
         let old = e
             .get("oldText")
             .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::BadArgument(format!("edits[{i}] 缺少 oldText")))?;
+            .ok_or_else(|| ToolError::bad_argument(format!("edits[{i}] 缺少 oldText")))?;
         let new = e
             .get("newText")
             .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::BadArgument(format!("edits[{i}] 缺少 newText")))?;
+            .ok_or_else(|| ToolError::bad_argument(format!("edits[{i}] 缺少 newText")))?;
 
         let (start, len) =
-            locate(original, old).map_err(|msg| ToolError::Failed(format!("edits[{i}] {msg}")))?;
+            locate(original, old).map_err(|msg| ToolError::failed(format!("edits[{i}] {msg}")))?;
         spans.push((start, len, new.to_owned()));
     }
 
@@ -240,7 +243,7 @@ fn apply_text_mode(original: &str, edits: &[Value]) -> Result<String, ToolError>
         let (s1, l1, _) = &w[0];
         let (s2, _, _) = &w[1];
         if s1 + l1 > *s2 {
-            return Err(ToolError::BadArgument(
+            return Err(ToolError::bad_argument(
                 "edits 存在重叠区间，请合并成一笔编辑".to_owned(),
             ));
         }

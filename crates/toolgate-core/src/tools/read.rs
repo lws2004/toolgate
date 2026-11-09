@@ -48,12 +48,15 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     let raw_path = required_str(args, "path")?;
     let path = ctx.resolve(raw_path);
 
-    let meta = tokio::fs::metadata(&path)
-        .await
-        .map_err(|e| ToolError::Failed(format!("无法访问 {}：{e}", path.display())))?;
+    let meta = tokio::fs::metadata(&path).await.map_err(|e| {
+        ToolError::failed_with(
+            crate::error::ErrorCode::PathNotFound,
+            format!("无法访问 {}：{e}", path.display()),
+        )
+    })?;
 
     if meta.is_dir() {
-        return Err(ToolError::Failed(format!(
+        return Err(ToolError::failed(format!(
             "{} 是目录。用 search 的 files 模式列目录内容。",
             path.display()
         )));
@@ -70,7 +73,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     let encoding = crate::encoding::FileEncoding::detect(&bytes);
     let is_wide = encoding.name().starts_with("UTF-16");
     if !is_wide && media::looks_binary(&bytes) {
-        return Err(ToolError::Failed(format!(
+        return Err(ToolError::failed(format!(
             "{} 是二进制文件（{} 字节），不能按文本读取。若需处理请用 bash 调用专用工具。",
             path.display(),
             format_size(bytes.len())
