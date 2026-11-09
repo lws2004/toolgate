@@ -261,8 +261,15 @@ vision（多模态 chat 适配器）四条；classify 一条仍未落；§13.4 �
 - **search 的 rerank 已接入工具层**——命中 > 20 且槽位可用时真实调用 rerank 槽位，
   按 §5.2「rerank 接线的落地口径」重排命中后再截断；调用失败或槽位不可用时降级为
   `unavailable` + `SLOT_UNAVAILABLE` 告知，**不谎报 applied**（§4.6）。
-- **阶段 2 验收项仍未勾选**：read 图片尚未接入。
-  上面五条是当前进度记录，**不是架构决策的变更**——§5.1、§5.2、§5.4、§5.5、§7.2、§7.3 的契约
+- **read 图片的 vision 文本理解已接入**——`plan_image` 的 vision 可用性按绑定 +
+  §3.10 能力矩阵真实判定（不再硬编码 false）；上游不收图且 vision 可用时走
+  `TextUnderstanding`（压缩流水线 → vision 的 `describe`），上游收图时
+  `structured` / `summary` 也走本地理解；调用失败按上游能力降级（收图退压缩后
+  原图、不收图退元信息）并按 §4.4b 告知。**按 `image_kind` 分流与 `need_pixels`
+  三档仍未接**（依赖 decide 判定）：`auto` 在判定缺位时保守给原图并告知
+  `slot=decide`，`structured` 的任务档先退化 `describe`。
+- **阶段 2 验收项仍未勾选**：read 图片的 classify/decide 判定与按 kind 分流尚未接入。
+  上面六条是当前进度记录，**不是架构决策的变更**——§5.1、§5.2、§5.4、§5.5、§7.2、§7.3 的契约
   早已定案，本轮只是把实现状态写清楚。
 
 ### 阶段 3：协商层与 intent

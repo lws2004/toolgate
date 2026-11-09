@@ -17,9 +17,11 @@ use crate::locale::{tf, tformat};
 use crate::media;
 use crate::media::image_pipeline;
 use crate::notice::budgeted_notices;
+use crate::notice::Notice;
 use crate::read_path::{
     ImageOutcome, ImagePlan, display_path, metadata_facts, metadata_text, plan_image,
 };
+use crate::slots::{SlotKind, VisionInput, VisionTask};
 use crate::truncate::{TruncationOptions, format_size, truncate_head};
 
 pub fn spec() -> ToolSpec {
@@ -85,8 +87,18 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     if let Some(mime) = media::detect_image_mime(&path).await? {
         let intent =
             resolve_intent(args, &CompatConfig::default()).map_err(ToolError::bad_argument)?;
-        // vision 槽位当前不可用（可选层未接入，§3.3）。
-        let plan = plan_image(intent, ctx.upstream_vision, false);
+        // §3.10：vision 槽位可用性按绑定 + 能力矩阵真实判定，不硬编码（§7.3 状态要真实）。
+        let vision_available = ctx.slm.as_ref().is_some_and(|client| {
+            client.is_bound(SlotKind::Vision)
+                && client
+                    .source_for_slot(SlotKind::Vision)
+                    .map(|source| {
+                        crate::capability::source_slot_capability(source, SlotKind::Vision).grade
+                            != crate::capability::CapabilityGrade::Unavailable
+                    })
+                    .unwrap_or(true)
+        });
+        let plan = plan_image(intent, ctx.upstream_vision, vision_available);
         return image_response(&path, &mime, &meta, &plan, ctx).await;
     }
 
@@ -218,47 +230,175 @@ async fn image_response(
     plan: &ImagePlan,
     ctx: &ToolContext,
 ) -> Result<ToolResponse, ToolError> {
-    let display = display_path(path, &ctx.cwd);
-    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("image");
     let bytes = tokio::fs::read(path).await?;
-    let (width, height) = match image_pipeline::dimensions(&bytes) {
+    let dims = image_pipeline::dimensions(&bytes);
+    let (width, height) = match dims {
         Some((w, h)) => (Some(w), Some(h)),
         None => (None, None),
     };
 
-    // §4.4b：一次预算合并，两个分支共用同一份告知事实源。
-    let channels = budgeted_notices(plan.notices.clone());
     match plan.outcome {
         ImageOutcome::Original => {
             let mut resp = image_pipeline::prepare(&bytes, mime, path)?;
-            if !channels.notices.is_empty() {
-                resp.content.insert(0, Content::Text(channels.text));
-                resp.meta["notices"] = channels.structured;
-                resp.meta["noticeOverflow"] = json!(channels.overflow);
-            }
+            attach_notices(&mut resp, plan.notices.clone(), true);
             Ok(resp)
         }
-        // 槽位全空且上游不收图：返回元信息 + 原因 + 可选路径（§10.1:143-162）。
-        // TextUnderstanding 需要 vision 槽位的真实输出，本阶段同样退到元信息。
-        ImageOutcome::Metadata | ImageOutcome::TextUnderstanding => {
-            let facts = metadata_facts(mime, meta.len(), width, height, &display);
-            let text = metadata_text(
-                ctx.language,
-                &channels.notices,
-                file_name,
-                mime,
-                meta.len(),
-                width.zip(height),
-                &display,
-            );
-            let mut out_meta = facts;
+        ImageOutcome::Metadata => Ok(metadata_response(
+            path,
+            mime,
+            meta,
+            width,
+            height,
+            plan.notices.clone(),
+            ctx,
+        )),
+        ImageOutcome::TextUnderstanding => {
+            text_understanding_response(path, mime, meta, dims, plan, ctx, &bytes).await
+        }
+    }
+}
+
+/// §10.1:143-162 的元信息降级页；统一走一次预算合并（§4.4b 一个事实源）。
+fn metadata_response(
+    path: &Path,
+    mime: &str,
+    meta: &std::fs::Metadata,
+    width: Option<u32>,
+    height: Option<u32>,
+    notices: Vec<Notice>,
+    ctx: &ToolContext,
+) -> ToolResponse {
+    let display = display_path(path, &ctx.cwd);
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("image");
+    let channels = budgeted_notices(notices);
+    let facts = metadata_facts(mime, meta.len(), width, height, &display);
+    let text = metadata_text(
+        ctx.language,
+        &channels.notices,
+        file_name,
+        mime,
+        meta.len(),
+        width.zip(height),
+        &display,
+    );
+    let mut out_meta = facts;
+    if !channels.notices.is_empty() {
+        out_meta["notices"] = channels.structured;
+        out_meta["noticeOverflow"] = json!(channels.overflow);
+    }
+    ToolResponse::text(text).with_meta(out_meta)
+}
+
+/// §10.1:114-116 / §5.3：vision 槽位做本地文本理解。
+/// 图片先走压缩流水线（§10.2d），再把压缩后的 image part 交给 vision。
+/// 调用失败按上游是否收图降级：收图退压缩后原图，不收图退元信息（§3.8）。
+async fn text_understanding_response(
+    path: &Path,
+    mime: &str,
+    meta: &std::fs::Metadata,
+    dims: Option<(u32, u32)>,
+    plan: &ImagePlan,
+    ctx: &ToolContext,
+    bytes: &[u8],
+) -> Result<ToolResponse, ToolError> {
+    let display = display_path(path, &ctx.cwd);
+    let (width, height) = match dims {
+        Some((w, h)) => (Some(w), Some(h)),
+        None => (None, None),
+    };
+    let prepared = image_pipeline::prepare(bytes, mime, path)?;
+    let image_part = prepared.content.iter().find_map(|c| match c {
+        Content::Image {
+            mime_type,
+            data_base64,
+            ..
+        } => Some((mime_type.clone(), data_base64.clone())),
+        _ => None,
+    });
+    let Some((mime_type, data_base64)) = image_part else {
+        // 压缩熔断：返回压缩器的省略说明，并附上原有告知。
+        let mut resp = prepared;
+        attach_notices(&mut resp, plan.notices.clone(), true);
+        return Ok(resp);
+    };
+
+    let task = plan.task.unwrap_or(VisionTask::Describe);
+    let input = VisionInput {
+        image: json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:{mime_type};base64,{data_base64}") }
+        }),
+        task,
+        query: None,
+    };
+    let called = match ctx.slm.as_ref() {
+        Some(client) => client.vision(&input).await,
+        None => Err(crate::slm::SlotCallError::NotBound {
+            slot: SlotKind::Vision,
+        }),
+    };
+
+    match called {
+        Ok(outcome) => {
+            let text = match (&outcome.output.text, &outcome.output.boxes) {
+                (Some(text), _) => text.clone(),
+                (None, Some(boxes)) => serde_json::to_string(boxes).unwrap_or_default(),
+                (None, None) => String::new(),
+            };
+            let channels = budgeted_notices(plan.notices.clone());
+            let mut body = String::new();
+            if !channels.notices.is_empty() {
+                body.push_str(&channels.text);
+                body.push('\n');
+            }
+            body.push_str(&text);
+            let mut out_meta = metadata_facts(mime, meta.len(), width, height, &display);
+            out_meta["vision"] = json!({
+                "task": json!(task),
+                "latencyMs": outcome.latency_ms,
+                "compressedWidth": prepared.meta["width"],
+                "compressedHeight": prepared.meta["height"],
+                "originalWidth": prepared.meta["originalWidth"],
+                "originalHeight": prepared.meta["originalHeight"],
+            });
             if !channels.notices.is_empty() {
                 out_meta["notices"] = channels.structured;
                 out_meta["noticeOverflow"] = json!(channels.overflow);
             }
-            Ok(ToolResponse::text(text).with_meta(out_meta))
+            Ok(ToolResponse::text(body).with_meta(out_meta))
+        }
+        Err(_) => {
+            let mut notices = plan.notices.clone();
+            notices.push(Notice::SlotUnavailable {
+                slot: "vision".to_owned(),
+                fallback: if ctx.upstream_vision {
+                    crate::notice::SlotFallback::Mechanical
+                } else {
+                    crate::notice::SlotFallback::Metadata
+                },
+            });
+            if ctx.upstream_vision {
+                let mut resp = prepared;
+                attach_notices(&mut resp, notices, true);
+                Ok(resp)
+            } else {
+                Ok(metadata_response(path, mime, meta, width, height, notices, ctx))
+            }
         }
     }
+}
+
+/// 把告知合并进一次返回；prepend_text 为 true 时把告知文本插到 content 首位。
+fn attach_notices(resp: &mut ToolResponse, notices: Vec<Notice>, prepend_text: bool) {
+    let channels = budgeted_notices(notices);
+    if channels.notices.is_empty() {
+        return;
+    }
+    if prepend_text {
+        resp.content.insert(0, Content::Text(channels.text));
+    }
+    resp.meta["notices"] = channels.structured;
+    resp.meta["noticeOverflow"] = json!(channels.overflow);
 }
 
 /// 渲染成 行号│内容 的形式，行号右对齐到 6 位。
@@ -448,6 +588,99 @@ mod tests {
         };
         assert!(notice.contains("[SLOT_UNAVAILABLE]"));
         assert_eq!(resp.meta["notices"].as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(ctx.cwd);
+    }
+
+    /// 给上下文注入一个 vision 槽位客户端（默认构建没有 external-protocols，
+    /// 真实调用会返回 ClientUnavailable；这里只验证编排与降级）。
+    fn set_vision_client(ctx: &mut ToolContext, source: &str) {
+        let cfg = crate::config::parse_config(
+            &format!(
+                "models:\n  llm:\n    source: {source}\n    base_url: http://127.0.0.1:8090/v1\n    model: demo\n    path: /tmp/model\n    serves: [vision]\n"
+            ),
+            "test.yaml",
+        )
+        .expect("配置应当解析成功");
+        ctx.slm = Some(std::sync::Arc::new(crate::slm::SlotClient::new(cfg)));
+    }
+
+    fn text_blocks(resp: &ToolResponse) -> Vec<&str> {
+        resp.content
+            .iter()
+            .filter_map(|c| match c {
+                Content::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// §10.1:114-116：上游不收图 + vision 已绑定 → 尝试本地理解；
+    /// 调用失败按 §3.8 退元信息，并如实告知 vision 与 decide 两个缺口。
+    #[tokio::test]
+    async fn image_without_upstream_vision_and_vision_slot_falls_back_to_metadata() {
+        let (mut ctx, file) = ctx_with_png("meta-vision");
+        set_vision_client(&mut ctx, "openai");
+        let resp = run(&json!({ "path": file.to_str().unwrap() }), &ctx)
+            .await
+            .expect("read ok");
+        assert!(
+            resp.content.iter().all(|c| matches!(c, Content::Text(_))),
+            "上游不收图时不应返回 image block"
+        );
+        let body = text_blocks(&resp).join("\n");
+        assert!(body.contains("slot=vision"), "{body}");
+        assert!(body.contains("fallback=metadata"), "{body}");
+        assert!(body.contains("slot=decide"), "{body}");
+        let _ = std::fs::remove_dir_all(ctx.cwd);
+    }
+
+    /// §5.3 协商表：structured 请求 + 上游收图 + vision 已绑定 → 本地理解；
+    /// 调用失败退压缩后原图（不是元信息），并告知 vision 降级。
+    #[tokio::test]
+    async fn image_structured_with_upstream_vision_and_vision_slot_falls_back_to_original() {
+        let (mut ctx, file) = ctx_with_png("structured-fallback");
+        ctx.upstream_vision = true;
+        set_vision_client(&mut ctx, "openai");
+        let resp = run(
+            &json!({ "path": file.to_str().unwrap(), "intent": "structured" }),
+            &ctx,
+        )
+        .await
+        .expect("read ok");
+        assert!(
+            resp.content
+                .iter()
+                .any(|c| matches!(c, Content::Image { .. })),
+            "上游收图时 vision 失败应退回原图"
+        );
+        let body = text_blocks(&resp).join("\n");
+        assert!(body.contains("slot=vision"), "{body}");
+        assert!(body.contains("fallback=mechanical"), "{body}");
+        let _ = std::fs::remove_dir_all(ctx.cwd);
+    }
+
+    /// §10.1：auto 的 need_pixels 依赖 decide；decide 未接入时保守给原图，
+    /// 告知缺的是 decide，而不是谎报 vision 不可用。
+    #[tokio::test]
+    async fn image_auto_with_upstream_vision_and_vision_slot_keeps_original_with_decide_notice() {
+        let (mut ctx, file) = ctx_with_png("auto-decide");
+        ctx.upstream_vision = true;
+        set_vision_client(&mut ctx, "openai");
+        let resp = run(
+            &json!({ "path": file.to_str().unwrap(), "intent": "auto" }),
+            &ctx,
+        )
+        .await
+        .expect("read ok");
+        assert!(
+            resp.content
+                .iter()
+                .any(|c| matches!(c, Content::Image { .. })),
+            "auto 在 need_pixels 未判定时应给原图"
+        );
+        let body = text_blocks(&resp).join("\n");
+        assert!(body.contains("slot=decide"), "{body}");
+        assert!(body.contains("fallback=mechanical"), "{body}");
         let _ = std::fs::remove_dir_all(ctx.cwd);
     }
 }

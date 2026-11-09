@@ -1,8 +1,8 @@
 //! read 图片路径（§5.3 / §10.1 / §10.3 / §3.8）。
 //!
-//! 纯逻辑：前置判断（上游是否收 image block）→ 分流 → 槽位全空时的降级告知。
-//! 不含模型后端（可选层，§19.6）；decide / vision 槽位当前不可用，
-//! 因此按 §3.8 退到压缩后原图或文件元信息，并按 §7.3 显式告知。
+//! 纯逻辑：前置判断（上游是否收 image block）→ 意图分流 → 降级告知。
+//! 不含模型后端（可选层，§19.6）：vision 槽位真实可用性由调用方传入，
+//! 不可用时按 §3.8 退到压缩后原图或文件元信息，并按 §7.3 显式告知。
 
 use std::path::Path;
 
@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use crate::decision::Intent;
 use crate::notice::{Notice, SlotFallback, render_notices};
+use crate::slots::VisionTask;
 use crate::truncate::format_size;
 use crate::understanding::{ChainAction, ChainNode};
 
@@ -19,13 +20,16 @@ pub enum ImageOutcome {
     Original,
     /// 文件元信息 + 路径（槽位全空且上游不收图，§10.1:143）。
     Metadata,
-    /// 上游不收图但 vision 槽位可用：强制本地理解，只返回文本。
+    /// vision 槽位可用：强制本地理解，只返回文本。
     TextUnderstanding,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImagePlan {
     pub outcome: ImageOutcome,
+    /// TextUnderstanding 时交给 vision 槽位的任务档（§3.2 的 task）。
+    /// 按 image_kind 分流需要 decide 判定；decide 未接入时退化为 describe。
+    pub task: Option<VisionTask>,
     pub notices: Vec<Notice>,
 }
 
@@ -37,32 +41,64 @@ fn slot_unavailable(slot: &str, fallback: SlotFallback) -> Notice {
 }
 
 /// §10.1 前置判断与分流。upstream_vision 来自 _meta.toolgate/upstream.vision
-/// （§18.1b，缺省 false）；vision_slot_available 本阶段恒 false，但分支先落地。
+/// （§18.1b，缺省 false）；vision_slot_available 由调用方按绑定 + 能力矩阵真实判定
+/// （§3.10），不得硬编码。
 pub fn plan_image(intent: Intent, upstream_vision: bool, vision_slot_available: bool) -> ImagePlan {
+    // §10.1:114-116：上游不收图 → 有 vision 槽位就强制本地理解，只返回文本。
+    // decide 未接入时拿不到 image_kind / need_pixels，按 kind 分流退化为 describe，
+    // 用 SLOT_UNAVAILABLE(slot=decide, fallback=text) 如实告知。
     if !upstream_vision {
         return if vision_slot_available {
             ImagePlan {
                 outcome: ImageOutcome::TextUnderstanding,
+                task: Some(VisionTask::Describe),
                 notices: vec![slot_unavailable("decide", SlotFallback::Text)],
             }
         } else {
             ImagePlan {
                 outcome: ImageOutcome::Metadata,
+                task: None,
                 notices: vec![slot_unavailable("vision", SlotFallback::Metadata)],
             }
         };
     }
 
-    // 上游收图：decide / vision 槽位不可用 → 按 §3.8 走压缩后原图。
-    // structured / auto / summary 请求理解结果但槽位缺失，附 SLOT_UNAVAILABLE 告知。
+    // 上游收图。
     match intent {
+        // §5.3 协商表：raw / visual 要原图。
         Intent::Raw | Intent::Visual => ImagePlan {
             outcome: ImageOutcome::Original,
+            task: None,
             notices: vec![],
         },
-        Intent::Structured | Intent::Summary | Intent::Auto => ImagePlan {
+        // §5.3 协商表：structured / summary 要理解结果 → vision 可用时本地理解；
+        // 不可用时按 §3.8 退压缩后原图并告知。按 kind 分流仍缺 decide，
+        // 因此任务档先退化 describe，并如实告知 decide 不可用。
+        Intent::Structured | Intent::Summary => {
+            if vision_slot_available {
+                ImagePlan {
+                    outcome: ImageOutcome::TextUnderstanding,
+                    task: Some(VisionTask::Describe),
+                    notices: vec![slot_unavailable("decide", SlotFallback::Text)],
+                }
+            } else {
+                ImagePlan {
+                    outcome: ImageOutcome::Original,
+                    task: None,
+                    notices: vec![slot_unavailable("vision", SlotFallback::Mechanical)],
+                }
+            }
+        }
+        // §10.1 的 need_pixels 三档依赖 decide 判定。decide 未接入时无法判断
+        // 「要不要原图」，保守给原图（信息最全），并按实际情况告知缺的是哪个槽位。
+        Intent::Auto => ImagePlan {
             outcome: ImageOutcome::Original,
-            notices: vec![slot_unavailable("vision", SlotFallback::Mechanical)],
+            task: None,
+            notices: vec![if vision_slot_available {
+                slot_unavailable("decide", SlotFallback::Mechanical)
+            } else {
+                slot_unavailable("vision", SlotFallback::Mechanical)
+            }],
         },
     }
 }
@@ -199,6 +235,8 @@ mod tests {
     fn upstream_no_vision_with_slot_returns_text_understanding() {
         let plan = plan_image(Intent::Raw, false, true);
         assert_eq!(plan.outcome, ImageOutcome::TextUnderstanding);
+        assert_eq!(plan.task, Some(VisionTask::Describe));
+        assert!(render_notices(&plan.notices).contains("slot=decide"));
         assert!(render_notices(&plan.notices).contains("fallback=text"));
     }
 
@@ -217,6 +255,31 @@ mod tests {
         assert_eq!(plan.outcome, ImageOutcome::Original);
         assert_eq!(plan.notices.len(), 1);
         assert!(render_notices(&plan.notices).contains("slot=vision"));
+    }
+
+    /// §5.3 协商表：structured / summary 要理解结果，vision 可用时走本地理解；
+    /// 按 kind 分流缺 decide，任务档退化为 describe 并如实告知。
+    #[test]
+    fn upstream_vision_structured_with_slot_returns_text_understanding() {
+        for intent in [Intent::Structured, Intent::Summary] {
+            let plan = plan_image(intent, true, true);
+            assert_eq!(plan.outcome, ImageOutcome::TextUnderstanding);
+            assert_eq!(plan.task, Some(VisionTask::Describe));
+            let rendered = render_notices(&plan.notices);
+            assert!(rendered.contains("slot=decide"), "{rendered}");
+            assert!(rendered.contains("fallback=text"), "{rendered}");
+        }
+    }
+
+    /// §10.1：auto 的 need_pixels 判定依赖 decide；decide 不可用时保守给原图，
+    /// 并告知缺的是 decide（不是谎报 vision 不可用）。
+    #[test]
+    fn upstream_vision_auto_with_slot_reports_decide_unavailable() {
+        let plan = plan_image(Intent::Auto, true, true);
+        assert_eq!(plan.outcome, ImageOutcome::Original);
+        let rendered = render_notices(&plan.notices);
+        assert!(rendered.contains("slot=decide"), "{rendered}");
+        assert!(rendered.contains("fallback=mechanical"), "{rendered}");
     }
 
     #[test]
