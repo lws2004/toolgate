@@ -273,10 +273,10 @@ feature 默认关闭，默认构建下这条路径不可用（§19.6）。
   按 kind 分流（UI 截图 → ground / 文档与代码截图 → OCR / 图表与照片 → describe）。
   auto 的三档分别给原图 / 结构化 / 两者都给（结构化在前）；decide 不可用时保守给
   原图并告知。真实链路实测（2026-11-09 本机 StartLux systemone）：320x180 合成图
-  七问一次调用返回，needPixels=0.708 落中间区间、imageKind 判 unknown（合成图不是
-  真实 UI 截图）；另用真实截图（2346x1032）实测 imageKind=ui_screenshot、hasText=true、
-  need_pixels=0.91（OriginalOnly），判定形态正确——**真实场景多图复核与阶段 2 整体
-  验收仍待完成**。
+  七问一次调用返回，need_pixels 概率 0.708 落中间区间（对外 meta 给 `both`）、
+  imageKind 判 unknown（合成图不是真实 UI 截图）；另用真实截图（2346x1032）实测
+  imageKind=ui_screenshot、hasText=true、need_pixels 概率 0.91（对外 `original_only`），
+  判定形态正确——**真实场景多图复核与阶段 2 整体验收仍待完成**。
 - **write 的 §5.7 事实返回已补齐**——新建与覆盖都返回 `facts`：`changed`（diff
   增删行数与行号范围）、`file`（行数/字节/编码/行尾）、`nearby`（同目录构建描述
   文件清单）、`diff`（unified，超 200 行 / 40KB 截断并标 `diffTruncated`）；

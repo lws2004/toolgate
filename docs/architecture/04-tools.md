@@ -173,7 +173,7 @@ content 由固定模板渲染，structuredContent 原样携带同一份 `notices
 
 **格式约定**（渲染器统一实现，测试锁定）：
 
-- 浮点固定两位小数（`p=0.62`），百分比固定一位小数（`retention=99.4%`）；`p` 与 `retention` 内部均按 0–1 比例存储，`retention` 渲染时乘 100；
+- 浮点固定两位小数（`p=0.62`），百分比固定一位小数（`retention=99.4%`）；`p` 与 `retention` 内部均按 0–1 比例存储，`retention` 渲染时乘 100（两位小数的口径与 structuredContent 同源，见 §4.7 的数值精度）；
 - 整数不带千分位；枚举值用 snake_case（`retention_below_threshold`）；
 - 列表用 `,` 分隔，每项先 URL 编码（文件名含逗号不会破坏解析）；
 - 空值字段直接省略，不渲染 `key=`；
@@ -547,6 +547,10 @@ description:
 | 结构优先 | 能用 JSON 字段表达的不用散文；schema 在 outputSchema 声明 | 一段自然语言描述检索结果 |
 | 可核对 | 摘要附原文指针、结构化输出附行号范围、diff 附 hunk 头 | 只有摘要没有原文位置 |
 
+**数值精度**：概率类数值对外只保留两位小数——`0.7084448…` 与 `0.71` 对调用方是同一个信息，多出来的位数只是 token。这条覆盖两条通道：`structuredContent` 的 `confidence`（出口统一收敛）与 notice 文本里的 `p`（渲染口径见 §4.4b 的格式约定）。
+
+**决策已是有限档位时给档位，不给概率**：`need_pixels` 的判定结果是三档之一（§10.1），`structuredContent` 就写 `original_only` / `both` / `structured_only`，不写概率。理由不是省两位小数，而是**概率会诱使调用方自己重新切阈值**，与工具层的决策打架——档位是决策结果，概率只是决策输入，只给输入等于把判断推回去。判定缺位时省略字段，不写 `unknown`：那会让调用方以为存在第四种结果。
+
 **高效的两条要求**：
 
 - **token 效率**：截断、summary、落盘指针是默认路径（§9）；工具描述控制在一屏内，不写长文档（§4.6 的三段式要短）。
@@ -839,7 +843,7 @@ L0 嗅探 MIME、解码
 L1 decide 判定：
      image_kind?  UI 截图 / 文档照片 / 图表 / 照片 / 代码截图
      has_text?    是/否
-     need_pixels? 是/否（判断是否必须原图）
+     need_pixels? 概率 p（≥0.8 只给原图 / ≤0.2 只给结构化 / 中间两种都给，§10.1）
 L2/L3 按 image_kind 分流：
      UI 截图  → VL 做 grounding，返回元素列表 + 坐标
      文档照片 → VL 做 OCR，返回文字 + 布局
@@ -848,7 +852,7 @@ L2/L3 按 image_kind 分流：
 协商：
      visual     → 压缩后的原图（走 v1 的压缩流水线）
      structured → 元素列表 / OCR 文本 / 描述
-     auto       → need_pixels 为真给原图，否则给结构化结果
+     auto       → 按 need_pixels 三档：只给原图 / 只给结构化 / 两种都给（§10.1）
 ```
 
 **Web 路径（可选 provider，兜底）**
