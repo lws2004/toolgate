@@ -68,7 +68,11 @@ dsh-ledger-compact 的对照与六条借鉴见附件 E.5。
 
 ## 13. 现有实现与新架构的差距
 
-仓库里的代码（57 个测试通过）实现的是 **v1 骨架**，没有 SLM。
+本节是 **v2 定稿时**相对 v1 骨架的差距基线快照：当时仓库里的代码
+（57 个测试通过）实现的是 v1 骨架，没有 SLM。下表只记录「差什么」，
+**当前实现状态、逐项证据与验证基线一律以
+[implementation-status.md](../implementation-status.md) 为准**（实现状态的唯一事实源），
+本表不随实现进度更新。
 
 ### 13.1 可直接复用
 
@@ -80,7 +84,7 @@ dsh-ledger-compact 的对照与六条借鉴见附件 E.5。
 | 图片压缩流水线 | 完成 | v2 的降级路径，不变 |
 | 行锚点 | 完成 | v2 保留为可选模式 |
 | edit 归一化匹配 | 部分完成 | v1 已做行尾/空白归一化（含 CRLF、智能引号、破折号），第 4 级语义对齐未做；v2 扩到四级（§5.4） |
-| MCP 传输 | 完成 | 无握手请求 + 旧版 initialize 协商；per-request `_meta` 解析与版本校验在 `compat.rs` / `toolgate-mcp/src/lib.rs` |
+| MCP 传输 | 完成 | 无握手请求 + 标准 initialize 握手（接入主路径，见 §13.2 / §14 阶段 1.5）；per-request `_meta` 解析与版本校验在 `compat.rs` / `toolgate-mcp/src/lib.rs` |
 | 6 个工具的 L0 层 | 部分完成 | 路径根校验、search 超时、env 白名单已补（§17.2）；剩余 edit 模式 C 与 read 单行超长落盘（逐项状态见 [implementation-status.md](../implementation-status.md)） |
 
 ### 13.2 需要新增
@@ -196,7 +200,7 @@ PTC 里每次子调用仍是一个独立的 MCP 请求，工具层不做批量�
 
 **实现状态的唯一事实源是 [implementation-status.md](../implementation-status.md)**：本节只写阶段划分与验收口径，逐项做到哪、证据在哪、下一步做什么，一律查那张表。
 
-### 阶段 0：架构定稿（当前）
+### 阶段 0：架构定稿
 
 - [x] 前提修正
 - [x] 分工模型与三层结构
