@@ -38,6 +38,10 @@ const USAGE: &str = "\
   --state <文本>        decide 的待判定状态（必填）
   --question <问题>     decide 的判定问题，可重复（至少一个）
 
+说明:
+  serve / list / call 启动时按 --config 加载配置并注入槽位客户端；
+  配置文件不存在不算错误，槽位全空（§3.8）。
+
 示例:
   toolgate serve
   toolgate list --config ~/.toolgate/config.yaml
@@ -61,6 +65,10 @@ Options:
   --json                Print the config check and decide results as JSON
   --state <text>        State to judge for decide (required)
   --question <question> Decision question for decide; repeatable (at least one)
+
+Notes:
+  serve / list / call load the config at startup and inject the slot client;
+  a missing config file is not an error, all slots stay empty (§3.8).
 
 Examples:
   toolgate serve
@@ -149,8 +157,8 @@ async fn main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            let rows = match load_slots(lang, config_path.as_deref(), false) {
-                Ok(rows) => rows,
+            let (ctx, rows) = match build_context(lang, config_path.as_deref()) {
+                Ok(v) => v,
                 Err(code) => return code,
             };
             tracing::warn!(
@@ -161,7 +169,15 @@ async fn main() -> ExitCode {
                     &[("summary", slot_summary(lang, &rows))]
                 )
             );
-            match run_serve().await {
+            tracing::warn!(
+                "{}",
+                tf(
+                    lang,
+                    "判定能力：{state}",
+                    &[("state", decide_state(lang, &rows))]
+                )
+            );
+            match run_serve(ctx).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!(
@@ -177,8 +193,8 @@ async fn main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            let rows = match load_slots(lang, config_path.as_deref(), false) {
-                Ok(rows) => rows,
+            let (_ctx, rows) = match build_context(lang, config_path.as_deref()) {
+                Ok(v) => v,
                 Err(code) => return code,
             };
             for spec in all_specs() {
@@ -203,29 +219,15 @@ async fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "call" => {
-            let Some(tool) = args.get(1) else {
-                eprintln!(
-                    "{}",
-                    tf(
-                        lang,
-                        "call 需要工具名。\n\n{USAGE}",
-                        &[("USAGE", usage.to_owned())]
-                    )
-                );
-                return ExitCode::FAILURE;
-            };
-            let raw = args.get(2).map(String::as_str).unwrap_or("{}");
-            let parsed: serde_json::Value = match serde_json::from_str(raw) {
+            let call_args = match parse_call_args(lang, &args[1..]) {
                 Ok(v) => v,
-                Err(e) => {
-                    eprintln!(
-                        "{}",
-                        tf(lang, "参数不是合法 JSON：{e}", &[("e", e.to_string())])
-                    );
-                    return ExitCode::FAILURE;
-                }
+                Err(code) => return code,
             };
-            match run_call(tool, parsed, lang).await {
+            let (ctx, _rows) = match build_context(lang, call_args.config_path.as_deref()) {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
+            match run_call(&call_args.tool, call_args.args, ctx).await {
                 Ok(code) => code,
                 Err(e) => {
                     eprintln!("{e}");
@@ -627,6 +629,122 @@ fn gate_text(lang: Language, gate: ConfidenceGate) -> String {
     }
 }
 
+/// call 子命令的参数：工具名、JSON 入参、配置文件路径。
+struct CallArgs {
+    tool: String,
+    args: serde_json::Value,
+    config_path: Option<PathBuf>,
+}
+
+/// 解析 call 的位置参数与 --config。
+///
+/// 位置参数保持既有语义：第 1 个是工具名，第 2 个是 JSON 入参；
+/// --config 可放在任意位置。
+fn parse_call_args(lang: Language, args: &[String]) -> Result<CallArgs, ExitCode> {
+    let mut positional: Vec<&str> = Vec::new();
+    let mut config_path: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--config" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("{}", tf(lang, "--config 需要一个路径参数。", &[]));
+                    return Err(ExitCode::FAILURE);
+                };
+                config_path = Some(PathBuf::from(value));
+                i += 2;
+            }
+            other => {
+                positional.push(other);
+                i += 1;
+            }
+        }
+    }
+
+    let Some((tool, raw)) = positional.split_first() else {
+        eprintln!(
+            "{}",
+            tf(
+                lang,
+                "call 需要工具名。\n\n{USAGE}",
+                &[("USAGE", usage_text(lang))]
+            )
+        );
+        return Err(ExitCode::FAILURE);
+    };
+    let raw = raw.first().copied().unwrap_or("{}");
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                tf(lang, "参数不是合法 JSON：{e}", &[("e", e.to_string())])
+            );
+            return Err(ExitCode::FAILURE);
+        }
+    };
+
+    Ok(CallArgs {
+        tool: (*tool).to_owned(),
+        args: parsed,
+        config_path,
+    })
+}
+
+/// 按用户语言取用法文本。
+fn usage_text(lang: Language) -> String {
+    match lang {
+        Language::En => USAGE_EN.to_owned(),
+        Language::Zh => USAGE.to_owned(),
+    }
+}
+
+/// 构造工具上下文：按配置加载槽位客户端并注入（§18.1）。
+///
+/// 配置文件不存在不是错误：槽位全空（slm = None），工具照常降级（§3.8）。
+/// 配置有误是错误：沿用四段式报错格式并以非 0 退出。
+fn build_context(
+    lang: Language,
+    config_path: Option<&Path>,
+) -> Result<(ToolContext, Vec<SlotRow>), ExitCode> {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                tf(lang, "无法确定当前工作目录：{e}", &[("e", e.to_string())])
+            );
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    let mut ctx = match ToolContext::new(cwd) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                tf(lang, "无法创建工具上下文：{e}", &[("e", e.to_string())])
+            );
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    ctx.language = lang;
+
+    let (slm, rows) = match load_cli_config(lang, config_path) {
+        ConfigOutcome::Resolved(cfg) => {
+            let rows = SlotRow::from_config(&cfg);
+            (Some(std::sync::Arc::new(SlotClient::new(cfg))), rows)
+        }
+        ConfigOutcome::Missing => (None, SlotRow::empty()),
+        ConfigOutcome::Failed(errors) => {
+            report_errors(lang, &errors, false);
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    ctx.slm = slm;
+
+    Ok((ctx, rows))
+}
+
 /// 加载配置的四种结局：解析成功 / 文件缺失 / 校验失败。
 enum ConfigOutcome {
     Resolved(ResolvedConfig),
@@ -657,30 +775,6 @@ fn load_cli_config(lang: Language, config_path: Option<&Path>) -> ConfigOutcome 
         }),
         Ok(None) => ConfigOutcome::Missing,
         Err(errors) => ConfigOutcome::Failed(errors),
-    }
-}
-
-/// 加载配置并取出五个槽位的绑定视图（serve / list 用）。
-fn load_slots(
-    lang: Language,
-    config_path: Option<&Path>,
-    json_out: bool,
-) -> Result<Vec<SlotRow>, ExitCode> {
-    match load_cli_config(lang, config_path) {
-        ConfigOutcome::Resolved(cfg) => Ok(SlotRow::from_config(&cfg)),
-        ConfigOutcome::Missing => {
-            if !json_out {
-                eprintln!(
-                    "{}",
-                    tf(lang, "未找到配置文件，使用内置默认（五个槽位全空）", &[])
-                );
-            }
-            Ok(SlotRow::empty())
-        }
-        ConfigOutcome::Failed(errors) => {
-            report_errors(lang, &errors, json_out);
-            Err(ExitCode::FAILURE)
-        }
     }
 }
 
@@ -803,18 +897,28 @@ fn slot_summary(lang: Language, rows: &[SlotRow]) -> String {
         .join(", ")
 }
 
-async fn run_serve() -> anyhow::Result<()> {
-    let cwd = std::env::current_dir()?;
-    let mut ctx = ToolContext::new(cwd)?;
-    ctx.language = Language::from_env();
+/// 判定能力状态：decide 槽位是否绑定了模型（§18.1）。
+fn decide_state(lang: Language, rows: &[SlotRow]) -> String {
+    let bound = rows
+        .iter()
+        .find(|row| row.slot == SlotKind::Decide.as_str())
+        .and_then(|row| row.model_id.clone());
+    match bound {
+        Some(model) => tf(lang, "decide 已绑定模型 {model}", &[("model", model)]),
+        None => tf(lang, "decide 未绑定模型（工具按 §3.8 走机械路径）", &[]),
+    }
+}
+
+async fn run_serve(ctx: ToolContext) -> anyhow::Result<()> {
     let mut server = McpServer::new(ctx);
     server.serve_stdio().await
 }
 
-async fn run_call(tool: &str, args: serde_json::Value, lang: Language) -> anyhow::Result<ExitCode> {
-    let cwd = std::env::current_dir()?;
-    let mut ctx = ToolContext::new(cwd)?;
-    ctx.language = lang;
+async fn run_call(
+    tool: &str,
+    args: serde_json::Value,
+    ctx: ToolContext,
+) -> anyhow::Result<ExitCode> {
     let resp = dispatch(tool, &args, &ctx).await;
     match resp {
         Ok(r) => {

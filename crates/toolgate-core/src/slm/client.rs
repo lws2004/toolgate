@@ -79,6 +79,22 @@ pub struct SlotClient {
     http: Option<reqwest::Client>,
 }
 
+/// SlotClient 手写 Debug：内部有锁与 HTTP 客户端，只暴露可读摘要。
+/// Clone 语义由 Arc 提供（共享同一个客户端，§22.5 状态是进程内缓存）。
+impl std::fmt::Debug for SlotClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let health = self.health.lock().expect("健康状态锁中毒");
+        let slots: Vec<String> = SlotKind::ALL
+            .iter()
+            .map(|kind| {
+                let state = health.status(*kind).state;
+                format!("{}={}", kind.as_str(), state.as_str())
+            })
+            .collect();
+        f.debug_struct("SlotClient").field("slots", &slots).finish()
+    }
+}
+
 impl SlotClient {
     /// 用解析后的配置建立客户端；健康状态是进程内可丢弃缓存（§22.5）。
     pub fn new(cfg: ResolvedConfig) -> Self {
@@ -103,6 +119,25 @@ impl SlotClient {
     /// 五个槽位的健康状态，供 toolgate list 打印（§3.11）。
     pub fn health(&self) -> Vec<(SlotKind, SlotHealth)> {
         self.health.lock().expect("健康状态锁中毒").all()
+    }
+
+    /// 某槽位是否绑定了模型（配置层，§3.10）。
+    pub fn is_bound(&self, slot: SlotKind) -> bool {
+        self.cfg
+            .bindings
+            .iter()
+            .find(|binding| binding.slot == slot)
+            .and_then(|binding| binding.model_id.as_ref())
+            .is_some()
+    }
+
+    /// 某槽位的健康状态（§3.11）；未绑定的槽位是 declared。
+    pub fn slot_health(&self, slot: SlotKind) -> SlotHealth {
+        self.health
+            .lock()
+            .expect("健康状态锁中毒")
+            .status(slot)
+            .clone()
     }
 
     /// decide 槽位调用：绑定 → 构造 → 发送 → 解析 → 契约校验 → 门控。

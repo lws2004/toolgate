@@ -6,6 +6,7 @@
 //!
 //! 输出治理：尾部截断（错误栈与最终结果在尾部），完整输出落盘。
 
+use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -16,10 +17,12 @@ use tokio::process::Command;
 use super::{ToolContext, ToolResponse, ToolSpec, optional_str, optional_usize, required_str};
 use crate::ToolError;
 use crate::bash_path::{
-    BashMode, estimate_tokens, intent_tag, plan_bash, resolve_bash_intent, structured_facts,
+    BashDecision, BashMode, DecisionFacts, L1_QUESTION_KEYS, L1_QUESTIONS, estimate_tokens,
+    intent_tag, merge_decision, plan_bash, resolve_bash_intent, structured_facts,
 };
 use crate::locale::{t, tformat};
-use crate::notice::budgeted_notices;
+use crate::notice::{ConfidenceViews, Notice, SlotFallback, budgeted_notices};
+use crate::slots::{ConfidenceGate, DecideInput};
 use crate::truncate::{format_size, truncate_tail};
 
 /// 默认超时：5 分钟。
@@ -167,21 +170,119 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "spill": spill_meta,
         "intent": intent_tag(intent),
     });
+    // §5.1：L1 判定只在非 raw 形态跑（§7.1：raw 不介入）。
+    // 判定不可用（未绑定 / feature 未开 / 调用失败）只降级并告知，工具照常工作（§7.3）。
+    let mut notices = plan.notices.clone();
+    let mut decision_facts = DecisionFacts::default();
+    if plan.mode != BashMode::Raw {
+        match run_decide(ctx, &body).await {
+            Some(run) => {
+                notices.extend(gate_notices(run.gate, run.decision.confidence));
+                decision_facts = DecisionFacts {
+                    error_kind: Some(run.decision.error_kind.clone()),
+                    severity: Some(run.decision.severity.clone()),
+                    // failedItems 本轮留空：§5.1 的 failedItems 语义未定义，不编造。
+                    failed_items: Vec::new(),
+                    needs_full_context: Some(run.decision.needs_full_context),
+                    confidence: Some(run.decision.confidence),
+                };
+                meta["confidence"] = json!(run.decision.confidence);
+                meta["decision"] = json!({
+                    "hasError": run.decision.has_error,
+                    "errorKind": run.decision.error_kind,
+                    "severity": run.decision.severity,
+                    "needsFullContext": run.decision.needs_full_context,
+                });
+            }
+            None => {
+                notices.push(Notice::SlotUnavailable {
+                    slot: "decide".to_owned(),
+                    fallback: SlotFallback::Mechanical,
+                });
+            }
+        }
+    }
+
     let mut content = body;
-    if !plan.notices.is_empty() {
-        content.push('\n');
-        let ch = budgeted_notices(plan.notices.clone());
-        content.push_str(&ch.text);
+    if !notices.is_empty() {
+        let ch = budgeted_notices(notices);
+        // structured 形态的 content 是纯事实 JSON，告知只进 structuredContent（§4.4b 两个通道）。
+        if plan.mode != BashMode::Structured {
+            content.push('\n');
+            content.push_str(&ch.text);
+        }
         meta["notices"] = ch.structured;
         meta["noticeOverflow"] = json!(ch.overflow);
     }
     if plan.mode == BashMode::Structured {
         let spill_path = meta["spill"]["path"].as_str();
-        let facts = structured_facts(code, spill_path);
+        let facts = structured_facts(code, spill_path, &decision_facts);
         content = facts.to_string();
         meta["facts"] = facts;
     }
     Ok(ToolResponse::text(content).with_meta(meta))
+}
+
+/// 判定状态窗口：命令输出尾部 8000 字符（§6.4 prefill 预算，§5.1 有界候选）。
+const DECISION_STATE_CHARS: usize = 8000;
+
+/// 一次判定的结果：归并后的结论与 §7.2 门控档位。
+struct DecideRun {
+    decision: BashDecision,
+    gate: ConfidenceGate,
+}
+
+/// 跑一次 L1 判定；不可用（未绑定 / feature 未开 / 调用失败）时返回 None，由调用方降级（§7.3）。
+async fn run_decide(ctx: &ToolContext, body: &str) -> Option<DecideRun> {
+    let client = ctx.slm.as_ref()?;
+    // 状态文本取命令输出的尾部窗口（§6.4 有界候选）。
+    let state: String = body
+        .chars()
+        .rev()
+        .take(DECISION_STATE_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let input = DecideInput {
+        state: json!(state),
+        images: None,
+        questions: L1_QUESTIONS.iter().map(|q| (*q).to_owned()).collect(),
+    };
+    let outcome = client.decide(&input).await.ok()?;
+    // 按固定 key 归并：answers 的键是问题原文，先按顺序映射到稳定 key。
+    let probs: BTreeMap<String, f64> = L1_QUESTION_KEYS
+        .iter()
+        .zip(L1_QUESTIONS.iter())
+        .map(|(key, question)| {
+            let probability = outcome
+                .output
+                .answers
+                .get(*question)
+                .map(|answer| answer.probability)
+                .unwrap_or(0.0);
+            ((*key).to_owned(), probability)
+        })
+        .collect();
+    Some(DecideRun {
+        decision: merge_decision(&probs),
+        gate: outcome.gate,
+    })
+}
+
+/// §7.2 门控 → 告知：采用且足够确定时不告知；不够确定或两种视图时给 LOW_CONFIDENCE。
+fn gate_notices(gate: ConfidenceGate, confidence: f64) -> Vec<Notice> {
+    match gate {
+        ConfidenceGate::Adopt => vec![],
+        ConfidenceGate::AdoptWithLowConfidence => vec![Notice::LowConfidence {
+            p: confidence as f32,
+            views: ConfidenceViews::Local,
+        }],
+        ConfidenceGate::BothViews => vec![Notice::LowConfidence {
+            p: confidence as f32,
+            views: ConfidenceViews::Both,
+        }],
+    }
 }
 
 /// 拒绝把 shell 解释器当作命令入口。
@@ -340,9 +441,49 @@ mod tests {
         let facts: Value = serde_json::from_str(body).expect("content 应是 JSON");
         assert_eq!(facts["exitCode"], json!(0));
         assert_eq!(facts["errorKind"], json!("unknown"));
+        assert_eq!(facts["severity"], json!("unknown"));
         assert_eq!(facts["failedItems"], json!([]));
+        // 判定不可用：needsFullContext 与 confidence 都是 null，不编造（§3.8）。
+        assert!(facts["needsFullContext"].is_null());
+        assert!(facts["confidence"].is_null());
         assert_eq!(resp.meta["facts"]["errorKind"], json!("unknown"));
         assert_eq!(resp.meta["intent"], json!("structured"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §7.2：门控三档在 bash 路径上的告知行为。
+    #[test]
+    fn gate_notices_cover_three_tiers() {
+        assert!(gate_notices(ConfidenceGate::Adopt, 0.95).is_empty());
+        let low = gate_notices(ConfidenceGate::AdoptWithLowConfidence, 0.7);
+        assert_eq!(low.len(), 1);
+        assert_eq!(low[0].code(), "LOW_CONFIDENCE");
+        assert!(low[0].render().contains("views=local"));
+        let both = gate_notices(ConfidenceGate::BothViews, 0.3);
+        assert_eq!(both.len(), 1);
+        assert_eq!(both[0].code(), "LOW_CONFIDENCE");
+        assert!(both[0].render().contains("views=both"));
+    }
+
+    /// §7.3：判定不可用时降级并告知，工具照常成功（不因判定失败而失败）。
+    #[tokio::test]
+    async fn decide_unavailable_degrades_without_failing() {
+        let (ctx, dir) = bash_ctx("no-decide");
+        assert!(ctx.slm.is_none(), "默认构造应当没有槽位客户端");
+        let resp = run(
+            &json!({ "binary": "echo", "args": ["hello"], "intent": "summary" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("slot=decide"));
+        assert!(body.contains("slot=summarize"));
+        // 判定不可用：confidence 与 decision 都不写（§4.6 诚实，不填 0）。
+        assert!(resp.meta.get("confidence").is_none());
+        assert!(resp.meta.get("decision").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
