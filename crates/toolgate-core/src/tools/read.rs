@@ -100,10 +100,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
             client.is_bound(SlotKind::Vision)
                 && client
                     .source_for_slot(SlotKind::Vision)
-                    .map(|source| {
-                        crate::capability::source_slot_capability(source, SlotKind::Vision).grade
-                            != crate::capability::CapabilityGrade::Unavailable
-                    })
+                    .map(|source| crate::capability::source_slot_usable(source, SlotKind::Vision))
                     .unwrap_or(true)
         });
         let decide_available = ctx.slm.as_ref().is_some_and(|client| {
@@ -113,8 +110,11 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
                     .map(|source| {
                         // 图片判定需要多模态 decide：systemone 的 images 可用；
                         // 通用 LLM 的 json 适配器不接收 images（§3.10），不能用于这里。
-                        crate::capability::source_slot_capability(source, SlotKind::Decide).grade
-                            == crate::capability::CapabilityGrade::Available
+                        crate::capability::source_slot_at(
+                            source,
+                            SlotKind::Decide,
+                            crate::capability::CapabilityGrade::Available,
+                        )
                     })
                     .unwrap_or(true)
         });
@@ -126,12 +126,23 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         } else {
             None
         };
-        let plan = plan_image(
+        let mut plan = plan_image(
             intent,
             ctx.upstream_vision,
             vision_available,
             ruling.as_ref().map(|r| &r.facts),
         );
+        // §7.3：绑定了 decide 却拿不到判定（构建未含协议客户端或调用失败）时如实告知；
+        // 「判定缺失」与「判定为 unknown」是两回事，调用方需要能区分（§4.6 诚实）。
+        if ruling.is_none()
+            && !decide_available
+            && matches!(intent, Intent::Auto | Intent::Structured | Intent::Summary)
+        {
+            plan.notices.push(Notice::SlotUnavailable {
+                slot: "decide".to_owned(),
+                fallback: crate::notice::SlotFallback::Mechanical,
+            });
+        }
         return image_response(&path, &mime, &meta, &plan, ctx, ruling.as_ref()).await;
     }
 
@@ -187,10 +198,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         client.is_bound(SlotKind::Summarize)
             && client
                 .source_for_slot(SlotKind::Summarize)
-                .map(|source| {
-                    crate::capability::source_slot_capability(source, SlotKind::Summarize).grade
-                        != crate::capability::CapabilityGrade::Unavailable
-                })
+                .map(|source| crate::capability::source_slot_usable(source, SlotKind::Summarize))
                 .unwrap_or(true)
     });
     // 文本判定不要求多模态：systemone 的 native 与通用 LLM 的 json 适配器都可用。
@@ -198,10 +206,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         client.is_bound(SlotKind::Decide)
             && client
                 .source_for_slot(SlotKind::Decide)
-                .map(|source| {
-                    crate::capability::source_slot_capability(source, SlotKind::Decide).grade
-                        != crate::capability::CapabilityGrade::Unavailable
-                })
+                .map(|source| crate::capability::source_slot_usable(source, SlotKind::Decide))
                 .unwrap_or(true)
     });
     let text_ruling = if matches!(intent, Intent::Auto | Intent::Summary | Intent::Structured)
@@ -909,7 +914,11 @@ mod tests {
             panic!("首块应为告知文本")
         };
         assert!(notice.contains("[SLOT_UNAVAILABLE]"));
-        assert_eq!(resp.meta["notices"].as_array().unwrap().len(), 1);
+        // §7.3：structured 需要理解结果，vision 与 decide 都不可用 → 两个缺口都如实告知。
+        assert_eq!(resp.meta["notices"].as_array().unwrap().len(), 2);
+        let structured_notices = resp.meta["notices"].to_string();
+        assert!(structured_notices.contains("vision"), "{structured_notices}");
+        assert!(structured_notices.contains("decide"), "{structured_notices}");
         let _ = std::fs::remove_dir_all(ctx.cwd);
     }
 
@@ -928,6 +937,7 @@ mod tests {
 
     /// 同时绑定 decide（systemone）与 vision（openai）的上下文；
     /// 默认构建下两次真实调用都会降级，用于验证编排与保守路径。
+    #[cfg(not(feature = "external-protocols"))]
     fn set_decide_and_vision_slots(ctx: &mut ToolContext) {
         let cfg = crate::config::parse_config(
             "models:\n  llm:\n    source: openai\n    base_url: http://127.0.0.1:8090/v1\n    model: demo\n    path: /tmp/model\n    serves: [vision]\n  jev:\n    source: systemone\n    base_url: http://127.0.0.1:8090/v1\n    model: demo\n    serves: [decide]\n",
@@ -948,7 +958,8 @@ mod tests {
     }
 
     /// §10.1:114-116：上游不收图 + vision 已绑定 → 尝试本地理解；
-    /// 调用失败按 §3.8 退元信息，并如实告知 vision 与 decide 两个缺口。
+    /// 调用失败按 §3.8 退元信息，并如实告知 vision 缺口。
+    /// （raw 不触发判定，decide 不参与，因此这里不要求 decide 告知。）
     #[tokio::test]
     async fn image_without_upstream_vision_and_vision_slot_falls_back_to_metadata() {
         let (mut ctx, file) = ctx_with_png("meta-vision");
@@ -963,7 +974,6 @@ mod tests {
         let body = text_blocks(&resp).join("\n");
         assert!(body.contains("slot=vision"), "{body}");
         assert!(body.contains("fallback=metadata"), "{body}");
-        assert!(body.contains("slot=decide"), "{body}");
         let _ = std::fs::remove_dir_all(ctx.cwd);
     }
 
@@ -1019,6 +1029,10 @@ mod tests {
 
     /// 同时绑定 decide 与 vision：默认构建下两次外部调用都不可用，
     /// auto 必须优雅降级为原图，且不伪造 imageKind / confidence。
+    ///
+    /// 启用 `external-protocols` 后这条路径会真实发起 HTTP 调用，单测不再覆盖
+    /// （真实链路见 §14 的实测记录）。
+    #[cfg(not(feature = "external-protocols"))]
     #[tokio::test]
     async fn image_auto_with_decide_and_vision_slots_degrades_to_original() {
         let (mut ctx, file) = ctx_with_png("auto-both-slots");

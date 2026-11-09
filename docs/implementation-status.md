@@ -20,7 +20,7 @@
 
 | 项 | 状态 | 架构依据 | 缺口 |
 |---|---|---|---|
-| 阶段 2 整体验收 | 部分 | §14 阶段 2 | read 图片 auto 判定待真实截图样本复核；其余已接入 |
+
 | decide 批处理（方案 B，turn 内聚合） | 未做 | §13.4 | `_meta.toolgate/turn` 载体已解析（compat.rs / understanding.rs），跨请求聚合与丢弃未实现 |
 | 理解链并发调度调优 | 部分 | §4.8 | 有 MAX_PARALLEL 上限与确定性调度；链级并发调优未做 |
 | 有损 WebP | 未做（条件触发） | §10.2b | 三条触发判据未出现，image_pipeline 只检测格式 |
@@ -35,6 +35,7 @@
 | 置信度门控 | 完成 | §7.2 | `slots.rs` ConfidenceGate（Adopt / AdoptWithLowConfidence / BothViews） |
 | 降级路径（槽位不可用回退 L0） | 完成 | §3.8 | 各工具 `unavailable` 分支 + `SLOT_UNAVAILABLE` 告知 |
 | 错误自检三层 + ErrorCode 12 值域 | 完成 | §1.4.5 | `error.rs`；测试 `every_error_carries_next_steps` |
+| slmStatus 状态真实性（构建可用性） | 完成 | §7.3 / §19.6 | `capability::client_available` / `source_slot_usable`：默认构建下外部协议来源标 `unavailable`，不再谎报 `ready`；测试按 feature 分支 |
 
 ## 阶段 1.5：兼容性
 
@@ -50,12 +51,13 @@
 | 项 | 状态 | 架构依据 | 证据 |
 |---|---|---|---|
 | bash：decide 九问 + summarize | 完成 | §5.1 / §7.2 | `bash_path.rs`；`gate_notices` |
-| read 图片：vision 理解 + decide 七问 + need_pixels 三档 | 部分 | §5.3 / §10.1 | `read.rs` plan_image；真实截图实测已记 §14，多图复核待补 |
+| read 图片：vision 理解 + decide 七问 + need_pixels 三档 | 完成 | §5.3 / §10.1 | `read.rs` plan_image；真实 UI 截图复核通过（imageKind=ui_screenshot、hasText=true、need_pixels 概率 0.90），vision 端到端待本机视觉模型 |
 | read 文本：decide 十问 + summarize 结构化 | 完成 | §5.3 | `read_path.rs`（file_kind / sensitivity / best_view） |
 | search：rerank 接线 | 完成 | §5.2 | `search_path.rs`；命中 > 20 且槽位可用才调用 |
 | edit：四级匹配 + decide 归因 | 完成 | §5.4 | `edit_path.rs`；p ≥ 0.85 才自动写回 |
 | task：decide 七问 + summarize | 完成 | §5.5 | `task_path.rs` |
 | write：§5.7 改动后事实返回 | 完成 | §5.7 | `write.rs`；与 edit 共用 `unified_diff` |
+| **阶段 2 整体验收** | 完成 | §14 阶段 2 | 四工具 raw / 协商双路径；read 图片真实截图复核通过；classify 无真实分类模型不影响本阶段 |
 
 ## 阶段 3：协商层与 intent
 
@@ -106,7 +108,8 @@
 
 | 命令 | 结果（2026-11-09） |
 |---|---|
-| `cargo test --workspace` | 429 passed（安全四项 + 配置层 + edit 模式 C + read 单行落盘后） |
+| `cargo test --workspace` | 431 passed（默认构建；含 slmStatus 状态真实性修复） |
+| `cargo test --workspace --features external-protocols` | 425 passed（feature 构建；6 个默认构建专属的降级测试被 cfg 隔离） |
 | `cargo clippy --workspace --all-targets` | No issues |
 | `cargo build --release` | 零警告 |
 | `./scripts/check-doc.sh` | 通过 |

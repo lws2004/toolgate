@@ -317,12 +317,10 @@ pub fn negotiation_meta(intent: Intent, slots: &SlotSet, client: Option<&SlotCli
             Some(client) => {
                 // §3.10 准入：能力矩阵判「不可用」的来源，即使绑定了也不能标 ready
                 // （信息不充分 / 输出形状不可转换；§3.11「serves 是声明不是承诺」）。
+                // §19.6：能力矩阵可用但构建未含协议客户端时同样不可用。
                 let usable = client
                     .source_for_slot(kind)
-                    .map(|source| {
-                        crate::capability::source_slot_capability(source, kind).grade
-                            != crate::capability::CapabilityGrade::Unavailable
-                    })
+                    .map(|source| crate::capability::source_slot_usable(source, kind))
                     .unwrap_or(true);
                 if !usable {
                     "unavailable"
@@ -610,6 +608,15 @@ mod tests {
         assert_eq!(slot_state(true, true), json!("degraded"));
     }
 
+    /// §19.6：外部协议来源在默认构建里没有客户端，绑定也不等于可用。
+    fn external_bound_state() -> &'static str {
+        if cfg!(feature = "external-protocols") {
+            "ready"
+        } else {
+            "unavailable"
+        }
+    }
+
     /// §7.3 / §13.3：注入路径按真实绑定给状态，不再恒为全 unavailable。
     #[test]
     fn negotiation_meta_reflects_real_binding() {
@@ -626,7 +633,7 @@ mod tests {
         .expect("配置应当解析成功");
         let client = SlotClient::new(bound);
         let meta = negotiation_meta(Intent::Raw, &SlotSet::none(), Some(&client));
-        assert_eq!(meta["slmStatus"]["decide"], json!("ready"));
+        assert_eq!(meta["slmStatus"]["decide"], json!(external_bound_state()));
         assert_eq!(meta["slmStatus"]["summarize"], json!("unavailable"));
         assert!(meta["confidence"].is_null());
     }
@@ -647,7 +654,7 @@ mod tests {
         .expect("配置应当解析成功");
         let client = SlotClient::new(cfg);
         let meta = negotiation_meta(Intent::Raw, &SlotSet::none(), Some(&client));
-        assert_eq!(meta["slmStatus"]["decide"], json!("ready"));
+        assert_eq!(meta["slmStatus"]["decide"], json!(external_bound_state()));
         assert_eq!(meta["slmStatus"]["summarize"], json!("unavailable"));
         // 未绑定的槽位仍按绑定状态，不受能力矩阵影响。
         assert_eq!(meta["slmStatus"]["rerank"], json!("unavailable"));
@@ -669,8 +676,8 @@ mod tests {
         .expect("配置应当解析成功");
         let client = SlotClient::new(cfg);
         let meta = negotiation_meta(Intent::Raw, &SlotSet::none(), Some(&client));
-        assert_eq!(meta["slmStatus"]["classify"], json!("ready"));
-        assert_eq!(meta["slmStatus"]["decide"], json!("ready"));
+        assert_eq!(meta["slmStatus"]["classify"], json!(external_bound_state()));
+        assert_eq!(meta["slmStatus"]["decide"], json!(external_bound_state()));
     }
 
     /// §13.3 / §4.6：六个工具的规格声明必须齐全且一致。

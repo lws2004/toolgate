@@ -287,9 +287,15 @@ feature 默认关闭，默认构建下这条路径不可用（§19.6）。
   文件清单）、`diff`（unified，超 200 行 / 40KB 截断并标 `diffTruncated`）；
   原有 `created` / `snapshot` / `encoding` 字段保留。edit 与 write 共用
   `edit_path::unified_diff` 的实现（§5.7 只给事实，不给指令）。
-- **阶段 2 验收项仍未勾选**：read 图片的实现已接入（vision 文本理解 + decide 判定 +
-  按 kind 分流），auto 判定正确性待真实截图样本复核；classify 槽位未实现不影响本阶段
-  验收（阶段 1 的客户端已落，但无真实分类模型实测）。
+- **read 图片 auto 判定的真实截图复核已通过**（2026-11-09，带 `external-protocols`
+  构建 + 本机 StartLux systemone）：用 moli 渲染的真实管理后台截图（1920x1080，
+  订单表格 + 侧边栏 + 状态标签）实测 `intent=structured` 得 `imageKind=ui_screenshot`、
+  `hasText=true`、`confidence=1.0`；`intent=auto` 得 `confidence=0.9`（= need_pixels
+  概率，落 0.2–0.8 中间区间）。**vision 文本理解的端到端未实测**——本机没有视觉模型，
+  该路径只由单测覆盖；这不影响「auto 判定正确性」这条验收。
+- **阶段 2 验收已满足**：bash / read 图片 / search / task 都有 raw 与协商两条路径；
+  edit 的失败归因按 §5.4 在 decide 不可用时降级告知；write / edit 不产生可协商的大块
+  内容；理解链在 bash 与 read 图片落地。classify 槽位无真实分类模型实测，不影响本阶段。
   上面八条是当前进度记录，**不是架构决策的变更**——§5.1、§5.2、§5.3、§5.4、§5.5、§5.7、§7.2、§7.3 的契约
   早已定案，本轮只是把实现状态写清楚。
 

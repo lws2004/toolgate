@@ -99,6 +99,35 @@ fn llm_protocol(slot: SlotKind) -> Capability {
     }
 }
 
+/// §19.6 / §3.11：当前构建是否包含该来源所需的协议客户端。
+///
+/// 外部协议来源（openai / anthropic / responses / systemone）走 HTTP 客户端，
+/// 属可选层——默认构建关闭 `external-protocols`，此时即使配置绑定了也**不可用**。
+/// 已绑定不等于能用：状态不能谎报 `ready`（§7.3）。
+pub fn client_available(source: ModelSource) -> bool {
+    match source {
+        ModelSource::Openai
+        | ModelSource::Anthropic
+        | ModelSource::Responses
+        | ModelSource::SystemOne => cfg!(feature = "external-protocols"),
+        ModelSource::Auto | ModelSource::Local => true,
+    }
+}
+
+/// §3.10 准入 + §19.6 构建可用性：一个来源此刻能否真正服务某槽位。
+///
+/// 两个条件缺一不可：能力矩阵不是 `Unavailable`，且构建含该来源的协议客户端。
+/// 各工具的可用性判定统一走这里，避免各自拼装出不一致的结论（§7.3 一份事实源）。
+pub fn source_slot_usable(source: ModelSource, slot: SlotKind) -> bool {
+    source_slot_capability(source, slot).grade != CapabilityGrade::Unavailable
+        && client_available(source)
+}
+
+/// 能力矩阵达到指定档位**且**构建可用（如图片判定要求 decide 恰好 `Available`）。
+pub fn source_slot_at(source: ModelSource, slot: SlotKind, grade: CapabilityGrade) -> bool {
+    source_slot_usable(source, slot) && source_slot_capability(source, slot).grade == grade
+}
+
 /// §18.1 的 source × slot 能力矩阵（唯一可执行落点）。
 pub fn source_slot_capability(source: ModelSource, slot: SlotKind) -> Capability {
     match source {
@@ -123,6 +152,55 @@ mod tests {
         ModelSource::Responses,
         ModelSource::SystemOne,
     ];
+
+    /// §19.6：外部协议来源的可用性随构建 feature 变化；local / auto 恒可用。
+    #[test]
+    fn client_availability_follows_build_feature() {
+        let expected_external = cfg!(feature = "external-protocols");
+        for source in [
+            ModelSource::Openai,
+            ModelSource::Anthropic,
+            ModelSource::Responses,
+            ModelSource::SystemOne,
+        ] {
+            assert_eq!(client_available(source), expected_external, "{source:?}");
+            let matrix_usable = source_slot_capability(source, SlotKind::Decide).grade
+                != CapabilityGrade::Unavailable;
+            assert_eq!(
+                source_slot_usable(source, SlotKind::Decide),
+                matrix_usable && expected_external,
+                "{source:?}"
+            );
+        }
+        assert!(client_available(ModelSource::Local));
+        assert!(client_available(ModelSource::Auto));
+    }
+
+    /// §7.3：systemone × decide 在能力矩阵里是 Available，但默认构建没有客户端
+    /// → 已绑定也不能标 ready；图片判定要求「恰好 Available + 构建可用」同理。
+    #[test]
+    fn bound_but_unbuilt_source_is_not_usable() {
+        assert_eq!(
+            source_slot_capability(ModelSource::SystemOne, SlotKind::Decide).grade,
+            CapabilityGrade::Available,
+            "能力矩阵本身仍是 Available"
+        );
+        let built = cfg!(feature = "external-protocols");
+        assert_eq!(
+            source_slot_usable(ModelSource::SystemOne, SlotKind::Decide),
+            built
+        );
+        assert_eq!(
+            source_slot_at(
+                ModelSource::SystemOne,
+                SlotKind::Decide,
+                CapabilityGrade::Available
+            ),
+            built
+        );
+        // 能力矩阵判不可用的组合，构建可用也仍然不可用。
+        assert!(!source_slot_usable(ModelSource::SystemOne, SlotKind::Summarize));
+    }
 
     /// §18.1 表 6 来源 × 5 槽位全覆盖，且每条都带理由。
     #[test]

@@ -96,10 +96,7 @@ async fn run_with_limits(
         client.is_bound(SlotKind::Rerank)
             && client
                 .source_for_slot(SlotKind::Rerank)
-                .map(|source| {
-                    crate::capability::source_slot_capability(source, SlotKind::Rerank).grade
-                        != crate::capability::CapabilityGrade::Unavailable
-                })
+                .map(|source| crate::capability::source_slot_usable(source, SlotKind::Rerank))
                 .unwrap_or(true)
     });
     let mut plan =
