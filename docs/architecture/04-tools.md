@@ -231,7 +231,8 @@ ISOLATION_FALLBACK → REDACTED → TRUNCATED → SLOT_UNAVAILABLE
    （`TRUNCATED`）> 可用性（`SLOT_UNAVAILABLE`、`DEGRADED`）> 认知
    （`LOW_CONFIDENCE`、`UNCALIBRATED`、`SNIFFED`、`NORMALIZED`、`LOSSY_DECODE`）。
 3. **超 6 条时**：从认知类最低优先级开始整条省略；省略数量记入
-   `meta.noticeOverflow`（usize，程序字段，不进 content）。安全类与
+   `meta.noticeOverflow`（usize，程序字段，不进 content；只在有省略时出现，
+   0 值省略）。安全类与
    完整性类永不省略。
 4. **仍超 400 字节时**：先缩短 `reason` / `pointer` 等字符串字段（取规则 ID、内容
    哈希前缀），不删 code。

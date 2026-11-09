@@ -270,6 +270,10 @@ fn inject_negotiation_meta(resp: &mut ToolResponse, intent: Intent, client: Opti
     {
         *confidence = json!(round2(value));
     }
+    // §4.4b：noticeOverflow 只在真的发生省略时才有信息量，0 值省略。
+    if target.get("noticeOverflow").and_then(Value::as_u64) == Some(0) {
+        target.remove("noticeOverflow");
+    }
 }
 
 /// 全部工具的规格表。顺序即 MCP tools/list 的顺序。

@@ -291,6 +291,7 @@ decide / summarize / vision），取值是封闭四态：`ready`（可用）/ `l
 | bash | min(`has_error` 的概率, 被选中的 kind 类别概率)；判定为「无错」时取 `has_error` 概率本身 |
 | edit | min(被选中的 `failure_kind` 概率, `fixable` 概率) |
 | task | min(被选中的 `state` 类别概率, 被选中的 `progress` 类别概率) |
+| read 图片 | auto 取 `need_pixels` 概率；structured / summary 取被选中的 `image_kind` 类别概率 |
 
 **为什么不是「所有问题的最小值」**：多选问题的**非答案概率天然极低**——非答案本来
 就该是低概率（问「是不是格式差异」而答案不是它，概率就该接近 0）。用「全部问题

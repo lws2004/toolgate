@@ -66,6 +66,8 @@ impl ImageKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImageFacts {
     pub kind: ImageKind,
+    /// 被选中的 kind 类别概率（unknown 时是五个候选中的最大值）。
+    pub kind_confidence: f32,
     pub has_text: bool,
     /// need_pixels 的原始概率 p；三档门控见 need_pixels_gate（§10.1 / §10.3）。
     pub need_pixels: f32,
@@ -119,6 +121,7 @@ pub fn merge_image_answers(
     let need_pixels = answers.get(NEED_PIXELS_QUESTION)?.probability as f32;
     Some(ImageFacts {
         kind,
+        kind_confidence: max_p as f32,
         has_text,
         need_pixels,
     })
@@ -494,6 +497,7 @@ mod tests {
         );
         let facts = merge_image_answers(&answers).expect("答案覆盖全部问题");
         assert_eq!(facts.kind, ImageKind::UiScreenshot);
+        assert!((facts.kind_confidence - 0.91).abs() < 1e-6);
         assert!(facts.has_text);
         assert_eq!(
             need_pixels_gate(facts.need_pixels),
@@ -516,6 +520,7 @@ mod tests {
         );
         let facts = merge_image_answers(&answers).expect("答案覆盖全部问题");
         assert_eq!(facts.kind, ImageKind::Unknown);
+        assert!((facts.kind_confidence - 0.44).abs() < 1e-6);
         assert!(!facts.has_text);
         assert_eq!(need_pixels_gate(facts.need_pixels), NeedPixels::Both);
     }
@@ -536,6 +541,7 @@ mod tests {
     fn auto_need_pixels_three_bands_pick_outcomes() {
         let ui = ImageFacts {
             kind: ImageKind::UiScreenshot,
+            kind_confidence: 0.9,
             has_text: true,
             need_pixels: 0.9,
         };
@@ -545,6 +551,7 @@ mod tests {
 
         let doc = ImageFacts {
             kind: ImageKind::Document,
+            kind_confidence: 0.85,
             has_text: true,
             need_pixels: 0.1,
         };
@@ -555,6 +562,7 @@ mod tests {
 
         let chart = ImageFacts {
             kind: ImageKind::Chart,
+            kind_confidence: 0.8,
             has_text: true,
             need_pixels: 0.5,
         };
@@ -569,6 +577,7 @@ mod tests {
     fn upstream_no_vision_and_original_only_degrades_with_degraded_notice() {
         let facts = ImageFacts {
             kind: ImageKind::Document,
+            kind_confidence: 0.85,
             has_text: true,
             need_pixels: 0.95,
         };
@@ -585,6 +594,7 @@ mod tests {
     fn structured_with_facts_uses_kind_task_without_decide_notice() {
         let facts = ImageFacts {
             kind: ImageKind::CodeScreenshot,
+            kind_confidence: 0.88,
             has_text: true,
             need_pixels: 0.1,
         };

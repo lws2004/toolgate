@@ -115,7 +115,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         let ruling = if decide_available
             && matches!(intent, Intent::Auto | Intent::Structured | Intent::Summary)
         {
-            image_ruling(&path, &mime, &meta, ctx).await
+            image_ruling(&path, &mime, &meta, ctx, intent).await
         } else {
             None
         };
@@ -251,9 +251,8 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
 /// decide 对图片的 L1 判定结果（§5.3 / §7.3）。
 struct ImageRuling {
     facts: ImageFacts,
-    /// 多问题取各问题概率的最小值（§7.3 的口径）。
+    /// 本次被采纳结论所依赖的问题概率（§7.3）。
     confidence: f64,
-    latency_ms: u64,
     /// systemone 的 noul 是校准概率；外部 JSON 适配器为自报值（§3.10）。
     calibrated: bool,
 }
@@ -264,6 +263,7 @@ async fn image_ruling(
     mime: &str,
     meta: &std::fs::Metadata,
     ctx: &ToolContext,
+    intent: Intent,
 ) -> Option<ImageRuling> {
     let client = ctx.slm.as_ref()?;
     let bytes = tokio::fs::read(path).await.ok()?;
@@ -295,16 +295,16 @@ async fn image_ruling(
     };
     let outcome = client.decide(&input).await.ok()?;
     let facts = merge_image_answers(&outcome.output.answers)?;
-    let confidence = outcome
-        .output
-        .answers
-        .values()
-        .map(|answer| answer.probability)
-        .fold(f64::INFINITY, f64::min);
+    // §7.3：confidence = 本次被采纳结论所依赖的问题概率的最小值，不是全部问题的最小值。
+    // auto 的结论由 need_pixels 决定；structured / summary 的结论由 image_kind 决定。
+    let confidence = match intent {
+        Intent::Auto => facts.need_pixels as f64,
+        Intent::Structured | Intent::Summary => facts.kind_confidence as f64,
+        Intent::Raw | Intent::Visual => return None,
+    };
     Some(ImageRuling {
         facts,
         confidence,
-        latency_ms: outcome.latency_ms,
         calibrated: outcome.calibrated,
     })
 }
@@ -371,7 +371,6 @@ async fn image_response(
         resp.meta["hasText"] = json!(ruling.facts.has_text);
         resp.meta["needPixels"] = json!(round2(ruling.facts.need_pixels as f64));
         resp.meta["confidence"] = json!(round2(ruling.confidence));
-        resp.meta["decideLatencyMs"] = json!(ruling.latency_ms);
     }
     Ok(resp)
 }
@@ -473,7 +472,6 @@ async fn text_understanding_response(
             let mut out_meta = metadata_facts(mime, meta.len(), width, height, &display);
             out_meta["vision"] = json!({
                 "task": json!(task),
-                "latencyMs": outcome.latency_ms,
                 "compressedWidth": prepared.meta["width"],
                 "compressedHeight": prepared.meta["height"],
                 "originalWidth": prepared.meta["originalWidth"],
@@ -852,6 +850,7 @@ mod tests {
         set_vision_client(&mut ctx, "openai");
         let facts = ImageFacts {
             kind: crate::read_path::ImageKind::Chart,
+            kind_confidence: 0.8,
             has_text: true,
             need_pixels: 0.7084,
         };
@@ -860,7 +859,6 @@ mod tests {
         let ruling = ImageRuling {
             facts,
             confidence: 0.7769,
-            latency_ms: 4,
             calibrated: true,
         };
         let meta = std::fs::metadata(&file).expect("meta");
