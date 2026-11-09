@@ -131,7 +131,10 @@ read/edit 又无处落地。
 notices: [{ code, params }]
 ```
 
-content 由固定模板渲染，structuredContent 原样携带同一份 `notices`。
+content 由固定模板渲染，structuredContent 原样携带同一份 `notices`——
+「原样」指不另写一份文案，不是绕过脱敏：`rule` 的脱敏发生在 notice 构造时
+（见本节「敏感信息」），两个通道拿到的是同一份已脱敏的 notices，
+不存在「结构化通道给原始绝对路径」的例外。
 **文案是视图，不是事实源**——两处各写一份文案迟早漂移。
 
 **生成分两段，合并成一个数组**：
@@ -235,7 +238,7 @@ ISOLATION_FALLBACK → REDACTED → TRUNCATED → SLOT_UNAVAILABLE
 - `rule` 渲染脱敏后的 glob：绝对路径转工作区相对或 `<external>`；无法安全渲染时用规则 ID（`rule=rule-07`）；
 - `reason` 只允许有限枚举：`retention_below_threshold` / `no_redactable_pattern` / `redact_optimal` / `capability_missing` / `upstream_no_vision` / `lossy_compression` / `compression_exceeded`；
 - `REDACTED.count` 只给数量，不给类型与内容；
-- 测试：配置绝对路径规则时，notice 渲染不得出现用户名与绝对路径前缀。
+- 测试：配置绝对路径规则时，content 渲染与 structuredContent.notices 都不得出现用户名与绝对路径前缀。
 
 **不套 notice 的三类**：
 
@@ -357,17 +360,74 @@ params → 完整期望字节，另加多 notice 组合用例）、告知完备�
 
 v2 把它们收敛成一个纯函数，各章只引用它：
 
-```text
-decide_output(
-  intent,              // raw / summary / structured / visual / auto
-  isolation_default,   // §8.5 的 default
-  max_exposure,        // §8.5 的硬顶
-  path_rule,           // 命中的路径规则（可空）
-  content_rules,       // §8.11 的输出内容级规则（可空）
-  upstream_capability, // vision 是否可用（§18.1b）
-  slot_available       // 该输出依赖的槽位是否可用（§3.8）
-) -> (output_shape, fallback, decision_notices, meta)
+```rust
+/// 五档 intent（§4.2）。v2 首版默认 raw，auto 需显式开启。
+pub enum Intent { Raw, Summary, Structured, Visual, Auto }
+
+/// 四档隔离强度（§8.1），按「暴露量」递增：None 最严、Raw 最宽。
+/// 数值越小暴露越少，min() 即取更严的一档。
+pub enum ExposureLevel { None, Understand, Summary, Raw }
+
+/// 四级回退动作（§8.6），信息量从多到少。
+pub enum FallbackStep { Redact, Structure, Summarize, Refuse }
+
+pub struct PathRule { pub glob: String, pub level: ExposureLevel }
+
+pub struct ContentRule { pub kind: ContentRuleKind, pub level: FallbackStep }
+pub enum ContentRuleKind {
+    SecretPattern, SensitivePathMention, PathUsername, HostMetadata, HighEntropy,
+}
+
+/// 上游能力（§18.1b）：每次调用传入，不是启动声明。
+pub struct UpstreamCapability { pub vision: bool }
+
+pub struct DecisionInput {
+    pub intent: Intent,
+    pub isolation_default: ExposureLevel,
+    pub max_exposure: ExposureLevel,
+    /// §8.5 的 fallback_chain；原文字签名漏列，导致 §4.5:414/420 无输入可依。
+    pub fallback_chain: Vec<FallbackStep>,
+    /// §8.5 的 redact_min_retention，只用于决定是否跳过 redact 级。
+    pub redact_min_retention: f32,
+    pub path_rule: Option<PathRule>,
+    pub content_rules: Vec<ContentRule>,
+    pub upstream_capability: UpstreamCapability,
+    /// 该输出依赖的槽位是否可用（§3.8）。
+    pub slot_available: bool,
+}
+
+pub struct DecisionOutput {
+    pub output_shape: OutputShape,
+    /// 需依次尝试的回退动作，是 input.fallback_chain 的保序子序列；空表示不回退。
+    pub fallback_steps: Vec<FallbackStep>,
+    /// 只含 ISOLATION_FALLBACK / DEGRADED（能力·上游）/ SLOT_UNAVAILABLE 三类。
+    pub decision_notices: Vec<Notice>,
+    /// 程序字段：requested_level / effective_level / isolation_refused。
+    pub meta: serde_json::Value,
+}
+
+pub fn decide_output(input: &DecisionInput) -> DecisionOutput
 ```
+
+**输入补齐说明**：原文字签名只列 7 项，但 §4.5:414 的决策规则、§4.5:420 的属性测试、
+§8.5/§8.6 的四级回退都依赖 `fallback_chain` 与 `redact_min_retention`。二者显式纳入
+`DecisionInput`；`redact_min_retention` 只参与决策层「是否跳过 redact 级」，保留率的
+实际观测值由执行层按 §8.6 判定，决策函数不读执行结果（§4.4b:144）。
+
+**三段决策判据**（前一段是硬约束，顺序固定）：
+
+1. **能力**：`intent=visual`（或输出含 image block）且 `upstream_capability.vision=false`
+   → 降级为文本、产 `DEGRADED`（requested=visual、actual=none、reason=upstream_no_vision、slot=vision）。
+2. **隔离**：意图档位按 §4.2 映射（raw/visual→Raw、summary→Summary、structured→Understand、
+   auto→isolation_default）；有效上限 = min(max_exposure, path_rule.level)；`content_rules`
+   非空或意图档位 > 有效上限 → 按 `fallback_chain` 依次尝试，产 `ISOLATION_FALLBACK`；
+   有效上限为 None → `meta.isolation_refused=true`，由调用方返回 `IsolationRefused` 错误（§8.11）。
+3. **意图**：在允许范围内取 output_shape；`slot_available=false` → 产 `SLOT_UNAVAILABLE`
+   并退回机械路径（§3.8）。`output_shape` 对应档位不得超过 `max_exposure`。
+
+**属性测试**（§15.7）：随机 `DecisionInput`，断言 ① output_shape 不超出 max_exposure；
+② `fallback_steps` 每一步都在 `fallback_chain` 中且保序；③ decision_notices 只含三类；
+④ 同输入两次调用字节一致（§16.3）。
 
 `decision_notices` 只含本阶段能决定的形态类告知（`ISOLATION_FALLBACK` / `DEGRADED`
 （能力/上游）/ `SLOT_UNAVAILABLE`，**不含压缩熔断**）；执行后由

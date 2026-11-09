@@ -222,19 +222,29 @@ ToolError 的每个变体都必须携带可执行的下一步，并且带一个�
 
 ```rust
 pub enum ToolError {
-    UnknownTool { name: String, available: Vec<String> },
+    UnknownTool { code: ErrorCode, name: String, available: Vec<String>, next_steps: Vec<String> },
     BadArgument { code: ErrorCode, message: String, next_steps: Vec<String> },
     Io { code: ErrorCode, fact: String, reason: String, next_steps: Vec<String> },
     Failed { code: ErrorCode, fact: String, reason: String, next_steps: Vec<String> },
 }
 
 pub enum ErrorCode {
+    // 特定场景码：客户端按它做精确分支
     PathNotFound, EncodingInvalid, AnchorMismatch, EditAmbiguous,
     Timeout, OutputLimit, SlotUnavailable, IsolationRefused,
+    // 通用兜底码：不落在上述场景的错误
+    UnknownTool, BadArgument, IoError, Failed,
 }
 ```
 
 `errorCode` 是稳定契约，客户端可以按它分支；`fact/reason/next_steps` 是给模型读的三段。BadArgument 也要有 next_steps——「缺少参数」的下一步是「补哪个参数」，不是一句错误。
+
+**ErrorCode 值域是封闭的 12 个**：前 8 个是特定场景码，后 4 个是通用兜底码
+（`UNKNOWN_TOOL` / `BAD_ARGUMENT` / `IO_ERROR` / `FAILED`）。v1 骨架的错误构造点
+必须归入这 12 个之一，不得退回「一句 Failed 兜底一切」（§4.6 错误归因准确）。
+`UnknownTool` 同样带 `code` 与 `next_steps`，`available` 是它的下一步候选——
+§2 红线 7「每个错误必须带 errorCode + 可执行下一步」对四个变体一律成立。
+序列化用 SCREAMING_SNAKE_CASE；与 §4.4b 的 notice code 分属两个命名空间，不互相映射。
 
 **第二层：返回层**
 
