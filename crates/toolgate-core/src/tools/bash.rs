@@ -170,11 +170,12 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "spill": spill_meta,
         "intent": intent_tag(intent),
     });
-    // §5.1：L1 判定只在非 raw 形态跑（§7.1：raw 不介入）。
-    // 判定不可用（未绑定 / feature 未开 / 调用失败）只降级并告知，工具照常工作（§7.3）。
+    // §5.1/§9.2：L1 判定只在协商层判定要判时跑（raw 不介入；输出 < 500 token
+    // 由 exitCode 机械判断）。判定不可用（未绑定 / feature 未开 / 调用失败）
+    // 只降级并告知，工具照常工作（§7.3）。
     let mut notices = plan.notices.clone();
     let mut decision_facts = DecisionFacts::default();
-    if plan.mode != BashMode::Raw {
+    if plan.should_decide {
         match run_decide(ctx, &body).await {
             Some(run) => {
                 notices.extend(gate_notices(run.gate, run.decision.confidence));
@@ -373,8 +374,10 @@ mod tests {
     #[tokio::test]
     async fn summary_intent_degrades_with_slot_unavailable() {
         let (ctx, dir) = bash_ctx("summary");
+        // 到达 500 token 门槛才进理解链；低门槛走机械路径（见 summary_small_output_stays_raw）。
+        let long = "x".repeat(2400);
         let resp = run(
-            &json!({ "binary": "echo", "args": ["hello"], "intent": "summary" }),
+            &json!({ "binary": "echo", "args": [long], "intent": "summary" }),
             &ctx,
         )
         .await
@@ -447,6 +450,8 @@ mod tests {
         assert!(facts["needsFullContext"].is_null());
         assert!(facts["confidence"].is_null());
         assert_eq!(resp.meta["facts"]["errorKind"], json!("unknown"));
+        // 低于门槛不触发判定，因此没有 decide 降级告知（§5.1/§9.2）。
+        assert!(resp.meta.get("notices").is_none());
         assert_eq!(resp.meta["intent"], json!("structured"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -470,8 +475,10 @@ mod tests {
     async fn decide_unavailable_degrades_without_failing() {
         let (ctx, dir) = bash_ctx("no-decide");
         assert!(ctx.slm.is_none(), "默认构造应当没有槽位客户端");
+        // 到达门槛才进理解链，否则本测试验证不到「判定不可用」的分支。
+        let long = "x".repeat(2400);
         let resp = run(
-            &json!({ "binary": "echo", "args": ["hello"], "intent": "summary" }),
+            &json!({ "binary": "echo", "args": [long], "intent": "summary" }),
             &ctx,
         )
         .await
@@ -484,6 +491,27 @@ mod tests {
         // 判定不可用：confidence 与 decision 都不写（§4.6 诚实，不填 0）。
         assert!(resp.meta.get("confidence").is_none());
         assert!(resp.meta.get("decision").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.1/§9.2：低于 500 token 不进理解链，给原文且无降级告知。
+    #[tokio::test]
+    async fn summary_small_output_stays_raw() {
+        let (ctx, dir) = bash_ctx("summary-small");
+        let resp = run(
+            &json!({ "binary": "echo", "args": ["hello"], "intent": "summary" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("hello"));
+        assert!(!body.contains("[SLOT_UNAVAILABLE]"));
+        assert!(resp.meta.get("notices").is_none());
+        assert!(resp.meta.get("confidence").is_none());
+        assert_eq!(resp.meta["intent"], json!("summary"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

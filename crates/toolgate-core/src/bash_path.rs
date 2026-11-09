@@ -86,6 +86,9 @@ pub struct BashPlan {
     pub mode: BashMode,
     /// 需同时进 content 文本与 structuredContent 的告知（§4.4b 两个通道）。
     pub notices: Vec<Notice>,
+    /// §5.1/§9.2：输出 ≥ 500 token 才触发 L1 判定；低于门槛由 exitCode 机械判断。
+    /// 由协商层单点产出，运行时不再另算一次门槛（避免双源）。
+    pub should_decide: bool,
 }
 
 /// summarize 槽位不可用时的告知（§7.3）。decide 的告知由 bash.rs 运行时按
@@ -98,32 +101,33 @@ fn summarize_unavailable_notice() -> Vec<Notice> {
 }
 
 /// 协商层：按 intent 与输出体量决定返回形态。纯函数，同输入同输出。
+/// §5.1/§9.2：summary / structured / auto 都只在输出 ≥ 500 token 时触发判定；
+/// 低于门槛给机械结果（原文或由 exitCode 支撑的结构化事实），不发降级告知。
 pub fn plan_bash(intent: Intent, tokens: usize) -> Result<BashPlan, String> {
-    let plan = match intent {
-        Intent::Raw => BashPlan {
-            mode: BashMode::Raw,
-            notices: vec![],
-        },
+    let should_decide = matches!(intent, Intent::Summary | Intent::Structured | Intent::Auto)
+        && tokens >= AUTO_SUMMARY_TOKENS;
+    let (mode, notices) = match intent {
+        Intent::Raw => (BashMode::Raw, vec![]),
         Intent::Visual => {
             return Err(
                 "bash 不返回图片，intent=visual 不适用；要精确看图请用 read 工具，或改用 intent=raw"
                     .to_owned(),
             );
         }
-        Intent::Structured => BashPlan {
-            mode: BashMode::Structured,
-            notices: vec![],
-        },
-        Intent::Auto if tokens < AUTO_SUMMARY_TOKENS => BashPlan {
-            mode: BashMode::Raw,
-            notices: vec![],
-        },
-        Intent::Summary | Intent::Auto => BashPlan {
-            mode: BashMode::SummaryDegraded,
-            notices: summarize_unavailable_notice(),
-        },
+        Intent::Structured => (BashMode::Structured, vec![]),
+        Intent::Auto | Intent::Summary if tokens < AUTO_SUMMARY_TOKENS => {
+            (BashMode::Raw, vec![])
+        }
+        Intent::Summary | Intent::Auto => (
+            BashMode::SummaryDegraded,
+            summarize_unavailable_notice(),
+        ),
     };
-    Ok(plan)
+    Ok(BashPlan {
+        mode,
+        notices,
+        should_decide,
+    })
 }
 
 // ---------- §5.1 L1 判定（decide 槽位） ----------
@@ -304,8 +308,10 @@ mod tests {
 
     #[test]
     fn summary_degrades_with_summarize_notice_only() {
-        let plan = plan_bash(Intent::Summary, 10).unwrap();
+        // 到达门槛才进理解链；低门槛的行为由下面的 below_threshold 测试覆盖。
+        let plan = plan_bash(Intent::Summary, AUTO_SUMMARY_TOKENS).unwrap();
         assert_eq!(plan.mode, BashMode::SummaryDegraded);
+        assert!(plan.should_decide);
         // decide 的告知由 bash.rs 运行时按实际判定结果追加，纯计划里只留 summarize。
         assert_eq!(plan.notices.len(), 1);
         let rendered = render_notices(&plan.notices);
@@ -313,6 +319,33 @@ mod tests {
         assert!(rendered.contains("slot=summarize"));
         assert!(rendered.contains("fallback=mechanical"));
         assert_eq!(rendered.lines().count(), 1);
+    }
+
+    /// §5.1/§9.2：summary 低于 500 token 给机械结果（原文），不判定、不告知。
+    #[test]
+    fn summary_below_threshold_stays_raw() {
+        let plan = plan_bash(Intent::Summary, AUTO_SUMMARY_TOKENS - 1).unwrap();
+        assert_eq!(plan.mode, BashMode::Raw);
+        assert!(plan.notices.is_empty());
+        assert!(!plan.should_decide);
+    }
+
+    /// §5.1：三种 intent 都到 500 token 门槛才触发判定；raw 永不判定。
+    #[test]
+    fn decision_triggered_at_threshold_for_all_intents() {
+        for intent in [Intent::Summary, Intent::Structured, Intent::Auto] {
+            assert!(
+                !plan_bash(intent, AUTO_SUMMARY_TOKENS - 1)
+                    .unwrap()
+                    .should_decide
+            );
+            assert!(
+                plan_bash(intent, AUTO_SUMMARY_TOKENS)
+                    .unwrap()
+                    .should_decide
+            );
+        }
+        assert!(!plan_bash(Intent::Raw, 10_000).unwrap().should_decide);
     }
 
     #[test]
@@ -334,6 +367,7 @@ mod tests {
         let plan = plan_bash(Intent::Structured, 10).unwrap();
         assert_eq!(plan.mode, BashMode::Structured);
         assert!(plan.notices.is_empty());
+        assert!(!plan.should_decide);
     }
 
     #[test]

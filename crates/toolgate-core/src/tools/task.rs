@@ -413,7 +413,8 @@ mod tests {
     #[tokio::test]
     async fn summary_intent_degrades_with_two_notices() {
         let (ctx, dir) = task_ctx("summary");
-        let id = seed_output(&ctx, 16).await;
+        // 到达 500 token 门槛才进理解链；低门槛走机械路径（见 summary_small_output_stays_raw）。
+        let id = seed_output(&ctx, 9001).await;
         let resp = run(
             &json!({ "action": "read", "task_id": id, "intent": "summary" }),
             &ctx,
@@ -426,6 +427,26 @@ mod tests {
         assert!(body.contains("slot=summarize"));
         assert!(body.contains("[状态]"));
         assert_eq!(resp.meta["notices"].as_array().unwrap().len(), 2);
+        assert_eq!(resp.meta["intent"], json!("summary"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.1/§9.2：低于 500 token 不进理解链，给原文且无降级告知 / 无状态行。
+    #[tokio::test]
+    async fn summary_small_output_stays_raw() {
+        let (ctx, dir) = task_ctx("summary-small");
+        let id = seed_output(&ctx, 16).await;
+        let resp = run(
+            &json!({ "action": "read", "task_id": id, "intent": "summary" }),
+            &ctx,
+        )
+        .await
+        .expect("read ok");
+        let body = body_of(&resp);
+        assert!(body.contains("xxxx"));
+        assert!(!body.contains("[SLOT_UNAVAILABLE]"));
+        assert!(!body.contains("[状态]"));
+        assert!(resp.meta.get("notices").is_none());
         assert_eq!(resp.meta["intent"], json!("summary"));
         let _ = std::fs::remove_dir_all(&dir);
     }

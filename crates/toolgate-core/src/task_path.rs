@@ -133,7 +133,9 @@ pub fn plan_task(intent: Intent, tokens: usize) -> Result<TaskPlan, String> {
             mode: TaskMode::Structured,
             notices: vec![],
         },
-        Intent::Auto if !needs_chain(tokens) => TaskPlan {
+        // §5.1/§9.2：summary 与 auto 都只在输出 ≥ 500 token 时进理解链；
+        // 低于门槛给机械结果（原文），不发 decide / summarize 降级告知。
+        Intent::Summary | Intent::Auto if !needs_chain(tokens) => TaskPlan {
             mode: TaskMode::Raw,
             notices: vec![],
         },
@@ -218,7 +220,8 @@ mod tests {
 
     #[test]
     fn summary_degrades_with_two_slot_notices() {
-        let plan = plan_task(Intent::Summary, 10).unwrap();
+        // 到达门槛才进理解链；低门槛由 summary_below_threshold_stays_raw 覆盖。
+        let plan = plan_task(Intent::Summary, AUTO_CHAIN_TOKENS).unwrap();
         assert_eq!(plan.mode, TaskMode::SummaryDegraded);
         assert_eq!(plan.notices.len(), 2);
         let rendered = render_notices(&plan.notices);
@@ -226,6 +229,14 @@ mod tests {
         assert!(rendered.contains("slot=summarize"));
         assert!(rendered.contains("fallback=mechanical"));
         assert_eq!(rendered.lines().count(), 2);
+    }
+
+    /// §5.1/§9.2：summary 低于 500 token 给机械结果，不进理解链、不发降级告知。
+    #[test]
+    fn summary_below_threshold_stays_raw() {
+        let plan = plan_task(Intent::Summary, AUTO_CHAIN_TOKENS - 1).unwrap();
+        assert_eq!(plan.mode, TaskMode::Raw);
+        assert!(plan.notices.is_empty());
     }
 
     #[test]
