@@ -165,6 +165,20 @@ systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，�
 前置准入的唯一可执行落点——文档表是权威，代码判定与它逐格一致。不因配置里写了
 `serves` 就认为能力成立（§3.11）。
 
+#### text 适配器：通用 chat 端点的协议形状
+
+`summarize` 走 §3.10 的 `text` 适配器。请求是 OpenAI 兼容 chat 端点的通用形状
+（`POST {base_url}/chat/completions`，`base_url` 为含 `/v1` 的 API 根）：
+
+| 方向 | 形状 |
+|---|---|
+| 槽位 → 协议 | `model` 取配置的上游模型名；`temperature = 0`（§3.2 同输入同输出）；`messages` 为 system + user 两条，user 放 `text`；`max_tokens` 透传 |
+| 协议 → 槽位 | 取 `choices[0].message.content`；无 `schema` 时作为 `SummarizeOutput.text`，有 `schema` 时解析成 JSON 给 `data` |
+
+响应形状不符（缺 `choices[0]`、空 content、有 schema 却不是合法 JSON）按 §3.11
+形状不符处理：该次降级、连续失败后禁用并告警。**不假设统一包装**（§18.1「响应
+解包」）。`schema` 的 JSON Schema 校验需要校验器，属可选层，本轮只做 JSON 形状解析。
+
 **openai / anthropic / responses 是通用 LLM 的协议形态，jev 类判定模型不按 chat
 协议工作。** §3.4 的参考判定实现（StartLux / d3-nano）属 systemone 协议族，
 对它们只能走 `systemone`；上表 openai 列的 decide 标「受限」，对这类模型是

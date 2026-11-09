@@ -1,10 +1,12 @@
 //! toolgate 命令行入口。
 //!
-//! 四个子命令：
+//! 子命令：
 //!   serve              以 MCP stdio server 方式运行（供 agent 接入）
 //!   list               列出工具及其入参 schema
 //!   call <tool> [json] 直接调用一次工具（调试用）
 //!   config check       校验配置文件并打印五个槽位的最终绑定（§18.9）
+//!   decide             调用 decide 槽位判定一次（调试用）
+//!   summarize          调用 summarize 槽位摘要一段文本（调试用）
 //!
 //! 配置解析与槽位绑定推导在 toolgate-core 的 config 模块（§3.10 / §18.9），
 //! CLI 只做参数解析、文案本地化与退出码。
@@ -17,8 +19,10 @@ use toolgate_core::config::{
     ConfigError, ConfigErrors, ResolvedConfig, default_config_path, load_config,
 };
 use toolgate_core::locale::{Language, localize_value, tf};
-use toolgate_core::slm::{DecideOutcome, SlotCallError, SlotClient};
-use toolgate_core::slots::{ConfidenceGate, DecideInput, SlotKind, confidence_gate};
+use toolgate_core::slm::{DecideOutcome, SlotCallError, SlotClient, SummarizeOutcome};
+use toolgate_core::slots::{
+    ConfidenceGate, DecideInput, SlotKind, SummarizeInput, confidence_gate,
+};
 use toolgate_core::tools::{ToolContext, all_specs, dispatch};
 use toolgate_mcp::McpServer;
 
@@ -31,12 +35,14 @@ const USAGE: &str = "\
   call <工具名> [JSON]   直接调用一次工具，参数是 JSON 对象（调试用）
   config check          校验配置文件并打印五个槽位的最终绑定（§18.9）
   decide                调用 decide 槽位判定一次并打印概率与门控结论（调试用）
+  summarize             调用 summarize 槽位摘要一段文本（调试用）
 
 选项:
   --config <路径>       指定配置文件路径（默认 ~/.toolgate/config.yaml）
-  --json                config check 与 decide 以 JSON 输出结果
+  --json                config check / decide / summarize 以 JSON 输出结果
   --state <文本>        decide 的待判定状态（必填）
   --question <问题>     decide 的判定问题，可重复（至少一个）
+  --text <文本>        summarize 的待摘要文本（必填）
 
 说明:
   serve / list / call 启动时按 --config 加载配置并注入槽位客户端；
@@ -59,12 +65,14 @@ Subcommands:
   call <tool> [JSON]     Invoke one tool directly (debug only)
   config check          Validate the config file and print the five slot bindings (§18.9)
   decide                Run one decide-slot judgment and print probabilities and the gate
+  summarize             Summarize a text with the summarize slot (debug only)
 
 Options:
   --config <path>       Config file path (default ~/.toolgate/config.yaml)
-  --json                Print the config check and decide results as JSON
+  --json                Print the config check, decide and summarize results as JSON
   --state <text>        State to judge for decide (required)
   --question <question> Decision question for decide; repeatable (at least one)
+  --text <text>         Text to summarize for the summarize subcommand (required)
 
 Notes:
   serve / list / call load the config at startup and inject the slot client;
@@ -242,6 +250,13 @@ async fn main() -> ExitCode {
             };
             run_decide(lang, decide_args).await
         }
+        "summarize" => {
+            let summarize_args = match parse_summarize_args(lang, &args[1..]) {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
+            run_summarize(lang, summarize_args).await
+        }
         "config" => match args.get(1).map(String::as_str) {
             Some("check") => {
                 let (config_path, json_out) = match parse_config_check_args(lang, &args[2..]) {
@@ -342,6 +357,50 @@ fn parse_config_check_args(
         }
     }
     Ok((path, json_out))
+}
+
+/// summarize 子命令的参数。
+struct SummarizeArgs {
+    config_path: Option<PathBuf>,
+    text: Option<String>,
+    json_out: bool,
+}
+
+/// 解析 summarize 的 --config / --text / --json 参数。
+fn parse_summarize_args(lang: Language, args: &[String]) -> Result<SummarizeArgs, ExitCode> {
+    let mut config_path: Option<PathBuf> = None;
+    let mut text: Option<String> = None;
+    let mut json_out = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--config" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("{}", tf(lang, "--config 需要一个路径参数。", &[]));
+                    return Err(ExitCode::FAILURE);
+                };
+                config_path = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--text" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("{}", tf(lang, "--text 需要一个文本参数。", &[]));
+                    return Err(ExitCode::FAILURE);
+                };
+                text = Some(value.clone());
+                i += 2;
+            }
+            "--json" => {
+                json_out = true;
+                i += 1;
+            }
+            other => {
+                eprintln!("{}", tf(lang, "未知参数：{other}", &[("other", other.to_owned())]));
+                return Err(ExitCode::FAILURE);
+            }
+        }
+    }
+    Ok(SummarizeArgs { config_path, text, json_out })
 }
 
 /// decide 子命令的参数。
@@ -465,7 +524,7 @@ async fn run_decide(lang: Language, args: DecideArgs) -> ExitCode {
     let outcome = match client.decide(&input).await {
         Ok(outcome) => outcome,
         Err(err) => {
-            report_decide_error(lang, &err);
+            report_slot_error(lang, &err);
             return ExitCode::FAILURE;
         }
     };
@@ -473,8 +532,80 @@ async fn run_decide(lang: Language, args: DecideArgs) -> ExitCode {
     print_decide_outcome(lang, &outcome, args.json_out)
 }
 
+/// summarize：读配置 → 调 summarize 槽位 → 打印摘要文本。
+async fn run_summarize(lang: Language, args: SummarizeArgs) -> ExitCode {
+    let Some(text) = args.text else {
+        eprintln!("{}", tf(lang, "summarize 需要 --text。", &[]));
+        return ExitCode::FAILURE;
+    };
+
+    let cfg = match load_cli_config(lang, args.config_path.as_deref()) {
+        ConfigOutcome::Resolved(cfg) => cfg,
+        ConfigOutcome::Missing => {
+            report_errors(
+                lang,
+                &ConfigErrors {
+                    items: vec![ConfigError {
+                        code: "CONFIG_FILE_NOT_FOUND".to_owned(),
+                        field: default_config_path().to_string_lossy().into_owned(),
+                        value: None,
+                        expected: tf(lang, "存在的配置文件路径", &[]),
+                        fix: tf(lang, "检查路径或先创建文件", &[]),
+                    }],
+                },
+                args.json_out,
+            );
+            return ExitCode::FAILURE;
+        }
+        ConfigOutcome::Failed(errors) => {
+            report_errors(lang, &errors, args.json_out);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let bound = cfg
+        .bindings
+        .iter()
+        .find(|b| b.slot == SlotKind::Summarize && b.model_id.is_some());
+    if bound.is_none() {
+        eprintln!("{}", tf(lang, "summarize 槽位未绑定模型。", &[]));
+        eprintln!("{}", tf(lang, "在配置的 models 里让某个模型的 serves 含 summarize", &[]));
+        return ExitCode::FAILURE;
+    }
+
+    let input = SummarizeInput {
+        text,
+        schema: None,
+        max_tokens: None,
+    };
+    let client = SlotClient::new(cfg);
+    match client.summarize(&input).await {
+        Ok(outcome) => print_summarize_outcome(lang, &outcome, args.json_out),
+        Err(err) => {
+            report_slot_error(lang, &err);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_summarize_outcome(lang: Language, outcome: &SummarizeOutcome, json_out: bool) -> ExitCode {
+    let text = outcome.output.text.clone().unwrap_or_default();
+    if json_out {
+        let payload = json!({
+            "ok": true,
+            "text": text,
+            "latencyMs": outcome.latency_ms,
+        });
+        println!("{}", pretty_json(lang, &payload));
+        return ExitCode::SUCCESS;
+    }
+    println!("{text}");
+    println!("{}", tf(lang, "摘要耗时 {ms} ms", &[("ms", outcome.latency_ms.to_string())]));
+    ExitCode::SUCCESS
+}
+
 /// 打印判定调用失败：事实 + 可执行的下一步（§1.4.5）。
-fn report_decide_error(lang: Language, err: &SlotCallError) {
+fn report_slot_error(lang: Language, err: &SlotCallError) {
     match err {
         SlotCallError::NotBound { slot } => {
             eprintln!(
@@ -520,7 +651,7 @@ fn report_decide_error(lang: Language, err: &SlotCallError) {
                 "{}",
                 tf(
                     lang,
-                    "判定调用失败：{slot} {reason}",
+                    "槽位调用失败：{slot} {reason}",
                     &[
                         ("slot", slot.as_str().to_owned()),
                         ("reason", reason.clone())
@@ -541,7 +672,7 @@ fn report_decide_error(lang: Language, err: &SlotCallError) {
                 "{}",
                 tf(
                     lang,
-                    "判定结果形状不符合槽位契约：{slot} {reason}",
+                    "结果形状不符合槽位契约：{slot} {reason}",
                     &[
                         ("slot", slot.as_str().to_owned()),
                         ("reason", reason.clone())
@@ -550,7 +681,7 @@ fn report_decide_error(lang: Language, err: &SlotCallError) {
             );
             eprintln!(
                 "{}",
-                tf(lang, "确认上游返回的答案是 noul 类型且概率在 [0,1]", &[])
+                tf(lang, "确认上游形状符合槽位契约（decide 为 noul 概率，summarize 为 chat content）", &[])
             );
         }
     }

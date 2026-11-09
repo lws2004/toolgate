@@ -9,8 +9,9 @@
 
 pub mod client;
 pub mod systemone;
+pub mod text_protocol;
 
-pub use client::{DecideOutcome, SlotCallError, SlotClient};
+pub use client::{DecideOutcome, SlotCallError, SlotClient, SummarizeOutcome};
 pub use systemone::{
     SystemOneQuestion, SystemOneRequest, SystemOneResponse, build_request, endpoint,
     parse_decide_output,
