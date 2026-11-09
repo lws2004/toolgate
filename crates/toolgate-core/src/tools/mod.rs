@@ -267,8 +267,9 @@ fn slot_state(bound: bool, disabled: bool) -> &'static str {
     }
 }
 
-/// 概率类数值只保留两位小数：超过两位的精度对调用方没有信息量（§4.7 输出密度）。
-pub(crate) fn round2(value: f64) -> f64 {
+/// 概率类数值只保留两位小数：超过两位的精度对调用方没有信息量（§4.7 数值精度）。
+/// MCP 返回与 CLI 调试输出共用这一份实现，同一事实不因通道不同而精度不同。
+pub fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 

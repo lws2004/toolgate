@@ -23,7 +23,7 @@ use toolgate_core::slm::{DecideOutcome, SlotCallError, SlotClient, SummarizeOutc
 use toolgate_core::slots::{
     ConfidenceGate, DecideInput, SlotKind, SummarizeInput, confidence_gate,
 };
-use toolgate_core::tools::{ToolContext, all_specs, dispatch};
+use toolgate_core::tools::{ToolContext, all_specs, dispatch, round2};
 use toolgate_mcp::McpServer;
 
 const USAGE: &str = "\
@@ -690,11 +690,12 @@ fn report_slot_error(lang: Language, err: &SlotCallError) {
 /// 打印判定结果：每问一行概率与门控结论，最后一行给整体门控结论。
 fn print_decide_outcome(lang: Language, outcome: &DecideOutcome, json_out: bool) -> ExitCode {
     // answers 的键是问题原文（core 解析时已从 qN 回映），值带概率。
+    // §4.7 数值精度：概率只保留两位小数，CLI 与 MCP 返回同一口径。
     let mut answers: Vec<(String, f64)> = outcome
         .output
         .answers
         .iter()
-        .map(|(question, answer)| (question.clone(), answer.probability))
+        .map(|(question, answer)| (question.clone(), round2(answer.probability)))
         .collect();
     answers.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -723,7 +724,7 @@ fn print_decide_outcome(lang: Language, outcome: &DecideOutcome, json_out: bool)
         );
         println!(
             "  {}",
-            tf(lang, "概率：{p}", &[("p", format!("{probability:.4}"))])
+            tf(lang, "概率：{p}", &[("p", format!("{probability:.2}"))])
         );
         println!("  {}", gate_text(lang, confidence_gate(*probability)));
     }
