@@ -254,19 +254,261 @@ fn en(zh: &str) -> Option<&'static str> {
         "{} 写入失败：{e}" => "Failed to write {}: {e}",
         "{} 写回失败：{e}" => "Failed to write back {}: {e}",
         "图片解码失败（{mime}）：{e}" => "Image decode failed ({mime}): {e}",
+        // 契约校验 / 理解链 / 失败归因（§3.11 / §4.8 / §5.4）
+        "answers 未覆盖全部 questions" => "answers do not cover all questions",
+        "index {} 越界或重复" => "index {} is out of range or duplicated",
+        "labels 长度 {} 不在 2-50 内" => "labels length {} is outside 2-50",
+        "results 未按 score 降序排列" => "results are not sorted by score descending",
+        "results 长度 {} 与 documents 长度 {n} 不一致" => {
+            "results length {} does not match documents length {n}"
+        }
+        "score 不是有限数" => "score is not finite",
+        "scores 的 key 集合与 labels 不一致" => "score keys do not match labels",
+        "task=ground 时 boxes 必填且不能为空" => "task=ground requires non-empty boxes",
+        "无 schema 时不应给 data" => "data must not be given without a schema",
+        "无 schema 时输出缺 text" => "output is missing text without a schema",
+        "有 schema 时不应同时给 text" => "text must not be given alongside a schema",
+        "有 schema 时输出缺 data" => "output is missing data with a schema",
+        "标签 {label} 的分数 {score} 不在 [0,1]" => {
+            "label {label} score {score} is outside [0,1]"
+        }
+        "问题 {question} 的 probability {} 不在 [0,1]" => {
+            "question {question} probability {} is outside [0,1]"
+        }
+        "换用 native 适配器或原生支持该槽位契约的模型" => {
+            "Use a native adapter or a model with native support for this slot contract"
+        }
+        "把 adapter 改为 json / text / ordered 后重试" => {
+            "Set adapter to json / text / ordered and retry"
+        }
+        "从该模型的 serves 里移除此槽位，让它按 §3.8 降级" => {
+            "Remove this slot from the model's serves and let it degrade per §3.8"
+        }
+        "依赖图存在环，无法完成拓扑分层" => {
+            "The dependency graph has a cycle; topological scheduling failed"
+        }
+        "节点 {} 的依赖 {dep} 不存在或尚未定义" => {
+            "node {} depends on {dep}, which does not exist or is not defined yet"
+        }
+        "链有 {} 步，超过上限 {MAX_STEPS}" => {
+            "chain has {} steps, exceeding the limit {MAX_STEPS}"
+        }
+        "把链步数压到 5 步以内，或去掉无依赖的重复节点" => {
+            "Keep the chain within 5 steps or remove duplicate dependency-free nodes"
+        }
+        "检查 depends_on 是否指向已存在的节点且无环" => {
+            "Check that depends_on points to existing nodes and has no cycle"
+        }
+        "降低链级并发上限后重试" => "Lower the chain-level concurrency limit and retry",
+        "上下文不足" => "insufficient context",
+        "格式差异" => "format difference",
+        "根本不存在" => "does not exist",
+        "未检测到构建描述文件" => "no build manifest detected",
+        // 入参 / 协议 / 传输层
+        "intent 必须是字符串（raw / summary / structured / visual / auto）" => {
+            "intent must be a string (raw / summary / structured / visual / auto)"
+        }
+        "未知 intent {other}；允许：raw / summary / structured / visual / auto" => {
+            "unknown intent {other}; allowed: raw / summary / structured / visual / auto"
+        }
+        "缺少字符串参数 {key}" => "missing string argument {key}",
+        "不支持的协议版本 {v}；支持：{}。请改用受支持版本，或去掉请求里的版本字段按旧版无元数据方式调用" => {
+            "unsupported protocol version {v}; supported: {}. Use a supported version, or drop the version field to call as a legacy client without metadata"
+        }
+        "请求的工具 {name} 不在工具表内" => {
+            "requested tool {name} is not in the tool table"
+        }
+        "可用工具：{}" => "available tools: {}",
+        "事实：{}\n原因：{}\n可选下一步：{}" => "Fact: {}\nReason: {}\nNext steps: {}",
+        "文件系统调用失败：{e}" => "filesystem call failed: {e}",
+        "哈希应为 {ANCHOR_HASH_LEN} 位十六进制字符，收到：{s}" => {
+            "hash should be {ANCHOR_HASH_LEN} hex characters, got: {s}"
+        }
+        "行号必须是正整数，收到：{s}" => {
+            "line number must be a positive integer, got: {s}"
+        }
+        "锚点格式应为 行号#哈希，例如 12#f8a2" => {
+            "anchor must be line#hash, e.g. 12#f8a2"
+        }
+        "call 需要工具名。\n\n{USAGE}" => "call requires a tool name.\n\n{USAGE}",
+        "未知子命令：{other}\n\n{USAGE}" => "unknown subcommand: {other}\n\n{USAGE}",
+        // plan_* 的 visual 拒绝
+        "bash 不返回图片，intent=visual 不适用；要精确看图请用 read 工具，或改用 intent=raw" => {
+            "bash does not return images; intent=visual does not apply. Use read for precise image viewing, or switch to intent=raw"
+        }
+        "search 不返回图片，intent=visual 不适用；要看图请用 read 工具，或改用 intent=raw" => {
+            "search does not return images; intent=visual does not apply. Use read to view images, or switch to intent=raw"
+        }
+        "task 不返回图片，intent=visual 不适用；要看图请用 read 工具，或改用 intent=raw" => {
+            "task does not return images; intent=visual does not apply. Use read to view images, or switch to intent=raw"
+        }
+        // schema / outputSchema 描述
+        "协商层输出形态：raw 截断原文加落盘指针（默认）/ summary 失败摘要 / structured 结构化事实 JSON / visual 不适用（看图请用 read）/ auto 输出小于 500 token 给原文，否则走 summary" => {
+            "Output shape: raw truncated output with spill pointer (default) / summary / structured facts JSON / visual not applicable (use read for images) / auto gives raw under 500 tokens, otherwise summary"
+        }
+        "structuredContent 是程序可读通道（§4.4）；notices 之外的键为各工具特有的程序事实（路径、行数、退出码等）" => {
+            "structuredContent is the program-readable channel (§4.4); keys other than notices are tool-specific facts (path, line count, exit code, ...)"
+        }
+        "§4.4b 告知数组；无告知时省略该字段。与 content 文本同源" => {
+            "§4.4b notices array; omitted when empty. Same source as the content text"
+        }
+        "标签 {} 的 bbox 含非法像素坐标" => {
+            "label {} bbox contains invalid pixel coordinates"
+        }
+        "内容中有字符无法用 {} 表示。请改用 UTF-8 保存，或删除这些字符。" => {
+            "content contains characters not representable in {}. Save as UTF-8 or remove them."
+        }
+        "节点 id {} 重复" => "duplicate node id {}",
+        "节点 {} 依赖自身" => "node {} depends on itself",
         _ => return None,
     })
 }
 
-/// 按语言取文案；未登记的 msgid 回退源语言中文。
-pub fn t<'a>(lang: Language, zh: &'a str) -> Cow<'a, str> {
-    match lang {
-        Language::Zh => Cow::Borrowed(zh),
-        Language::En => match en(zh) {
-            Some(s) => Cow::Borrowed(s),
-            None => Cow::Borrowed(zh),
-        },
+/// 含占位符的中文模板（§18.1b）：精确 msgid 匹配不上时按模板反查。
+/// 每条都必须在 en() 里有译文；匿名 {} 与命名 {name} 可混用。
+const TEMPLATES: &[&str] = &[
+    "参数错误：{message}",
+    "未知工具：{name}",
+    "工具执行失败：{fact}",
+    "文件系统错误：{fact}",
+    "事实：{fact}\n原因：{reason}\n可选下一步：{next}",
+    "事实：{}\n原因：{}\n可选下一步：{}",
+    "JSON 解析失败：{e}",
+    "不支持的方法：{other}",
+    "参数不是合法 JSON：{e}",
+    "MCP server 异常退出：{e}",
+    "无法启动 {binary}：{e}",
+    "等待进程失败：{e}",
+    "终止失败：{e}",
+    "正则无效：{e}",
+    "通配符无效：{e}",
+    "图片解码失败（{mime}）：{e}",
+    "没有这个任务：{task_id}",
+    "已请求终止任务 {task_id}。",
+    "已启动后台任务 {task_id}：{label}（pid {pid}）。用 action=read 查看输出，action=kill 终止。",
+    "已退出（{code}）",
+    "action 只能是 start / read / kill / list，收到 {other}",
+    "mode 只能是 content 或 files，收到 {other}",
+    "未知 intent {other}；允许：raw / summary / structured / visual / auto",
+    "缺少字符串参数 {key}",
+    "请求的工具 {name} 不在工具表内",
+    "可用工具：{}",
+    "文件系统调用失败：{e}",
+    "标签 {label} 的分数 {score} 不在 [0,1]",
+    "问题 {question} 的 probability {} 不在 [0,1]",
+    "标签 {} 的 bbox 含非法像素坐标",
+    "哈希应为 {ANCHOR_HASH_LEN} 位十六进制字符，收到：{s}",
+    "行号必须是正整数，收到：{s}",
+    "call 需要工具名。\n\n{USAGE}",
+    "未知子命令：{other}\n\n{USAGE}",
+    "锚点行号 {} 超出文件行数 {}",
+    "在文件中匹配到 {n} 处，无法确定改哪一处。请扩大 oldText 的上下文使其唯一。",
+    "归一化匹配到 {n} 处，请扩大 oldText 上下文使其唯一。",
+    "未找到 oldText（机械归因：{}）。原文片段：{}\n请重新 read 确认当前内容。",
+    "edits[{i}] 缺少 oldText",
+    "edits[{i}] 缺少 newText",
+    "不支持的协议版本 {v}；支持：{}。请改用受支持版本，或去掉请求里的版本字段按旧版无元数据方式调用",
+    "内容中有字符无法用 {} 表示。请改用 UTF-8 保存，或删除这些字符。",
+    "节点 {} 的依赖 {dep} 不存在或尚未定义",
+    "results 长度 {} 与 documents 长度 {n} 不一致",
+    "index {} 越界或重复",
+    "labels 长度 {} 不在 2-50 内",
+    "节点 id {} 重复",
+    "节点 {} 依赖自身",
+    "链有 {} 步，超过上限 {MAX_STEPS}",
+    "命令超时（{} 秒）已被终止：{binary} {}",
+    "无法访问 {}：{e}",
+    "无法读取 {}：{e}",
+    "{} 写入失败：{e}",
+    "{} 写回失败：{e}",
+    "起始行 {offset} 超过文件总行数 {total_lines}。",
+    "\n[{reason}。用 offset={next} 继续读取，文件共 {total_lines} 行。]",
+    "[状态] processState={state} exitCode={code} elapsedSecs={elapsed} outputBytes={bytes} truncated={truncated}",
+    "{id}  pid={pid}  {state}  {label} 已运行 {secs}s\n",
+];
+
+/// 把模板拆成字面片段与占位符名（匿名 {} 的名字为空串）。
+fn template_parts(tmpl: &str) -> (Vec<&str>, Vec<&str>) {
+    let mut lits = Vec::new();
+    let mut names = Vec::new();
+    let mut rest = tmpl;
+    while let Some(i) = rest.find('{') {
+        lits.push(&rest[..i]);
+        let Some(j) = rest[i..].find('}') else {
+            lits.push(&rest[i..]);
+            return (lits, names);
+        };
+        names.push(&rest[i + 1..i + j]);
+        rest = &rest[i + j + 1..];
     }
+    lits.push(rest);
+    (lits, names)
+}
+
+/// 在已格式化的字符串里按模板字面片段顺序定位，反查各占位符的值。
+fn match_template(tmpl: &str, input: &str) -> Option<Vec<(String, String)>> {
+    let (lits, names) = template_parts(tmpl);
+    if names.is_empty() || !input.starts_with(lits[0]) {
+        return None;
+    }
+    let mut pos = lits[0].len();
+    let mut args = Vec::new();
+    let mut anon = 0usize;
+    for (k, name) in names.iter().enumerate() {
+        let next = lits[k + 1];
+        let end = if next.is_empty() {
+            input.len()
+        } else {
+            input[pos..].find(next)? + pos
+        };
+        let key = if name.is_empty() {
+            anon += 1;
+            format!("__anon{anon}")
+        } else {
+            (*name).to_owned()
+        };
+        args.push((key, input[pos..end].to_owned()));
+        pos = end + next.len();
+    }
+    if pos != input.len() {
+        return None;
+    }
+    Some(args)
+}
+
+/// 用反查出的参数回填英文模板：命名占位符按名，匿名 {} 按序。
+fn fill_template(en_tmpl: &str, args: &[(String, String)]) -> String {
+    let mut s = en_tmpl.to_owned();
+    for (name, value) in args {
+        if !name.starts_with("__anon") {
+            s = s.replace(&format!("{{{name}}}"), value);
+        }
+    }
+    for (name, value) in args {
+        if name.starts_with("__anon") && s.contains("{}") {
+            s = s.replacen("{}", value, 1);
+        }
+    }
+    s
+}
+
+/// 按语言取文案；未登记的 msgid 回退源语言中文。
+/// 含插值的 msgid 先试模板反查，故已格式化的 fact / message 也能翻译。
+pub fn t<'a>(lang: Language, zh: &'a str) -> Cow<'a, str> {
+    if lang == Language::Zh {
+        return Cow::Borrowed(zh);
+    }
+    if let Some(s) = en(zh) {
+        return Cow::Borrowed(s);
+    }
+    for tmpl in TEMPLATES {
+        if let Some(args) = match_template(tmpl, zh)
+            && let Some(en_tmpl) = en(tmpl)
+        {
+            return Cow::Owned(fill_template(en_tmpl, &args));
+        }
+    }
+    Cow::Borrowed(zh)
 }
 
 /// 命名占位符模板：英文译文保留同名占位符，顺序无关。
@@ -333,6 +575,30 @@ mod tests {
             tf(Language::Zh, "JSON 解析失败：{e}", &args),
             "JSON 解析失败：boom"
         );
+    }
+
+    #[test]
+    fn t_matches_interpolated_error_messages() {
+        assert_eq!(
+            t(Language::En, "无法启动 git：boom"),
+            "Cannot start git: boom"
+        );
+        assert_eq!(
+            t(
+                Language::En,
+                "未知 intent bogus；允许：raw / summary / structured / visual / auto"
+            ),
+            "unknown intent bogus; allowed: raw / summary / structured / visual / auto"
+        );
+        assert_eq!(t(Language::Zh, "无法启动 git：boom"), "无法启动 git：boom");
+        assert_eq!(t(Language::En, "完全无关的消息"), "完全无关的消息");
+    }
+
+    #[test]
+    fn template_parts_and_en_entries_stay_in_sync() {
+        for tmpl in TEMPLATES {
+            assert!(en(tmpl).is_some(), "模板缺少英文译文: {tmpl}");
+        }
     }
 
     #[test]

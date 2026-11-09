@@ -7,7 +7,7 @@
 
 use std::process::ExitCode;
 
-use toolgate_core::locale::{Language, localize_value};
+use toolgate_core::locale::{Language, localize_value, tf};
 use toolgate_core::tools::{ToolContext, all_specs, dispatch};
 use toolgate_mcp::McpServer;
 
@@ -24,6 +24,19 @@ const USAGE: &str = "\
   toolgate call read '{\"path\":\"Cargo.toml\"}'
 ";
 
+const USAGE_EN: &str = "\
+Usage: toolgate <subcommand> [args]
+
+Subcommands:
+  serve                 Run as an MCP stdio server for agent clients
+  list                  List all tools and their input schemas
+  call <tool> [JSON]     Invoke one tool directly (debug only)
+
+Examples:
+  toolgate serve
+  toolgate call read '{\"path\":\"Cargo.toml\"}'
+";
+
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -34,9 +47,14 @@ async fn main() -> ExitCode {
         )
         .init();
 
+    let lang = Language::from_env();
+    let usage = match lang {
+        Language::En => USAGE_EN,
+        Language::Zh => USAGE,
+    };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else {
-        eprintln!("{USAGE}");
+        eprintln!("{usage}");
         return ExitCode::FAILURE;
     };
 
@@ -44,12 +62,14 @@ async fn main() -> ExitCode {
         "serve" => match run_serve().await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("MCP server 异常退出：{e}");
+                eprintln!(
+                    "{}",
+                    tf(lang, "MCP server 异常退出：{e}", &[("e", e.to_string())])
+                );
                 ExitCode::FAILURE
             }
         },
         "list" => {
-            let lang = Language::from_env();
             for spec in all_specs() {
                 let description = match lang {
                     Language::En => spec.description_en,
@@ -63,7 +83,8 @@ async fn main() -> ExitCode {
                 );
                 println!(
                     "  output: {}",
-                    serde_json::to_string(&spec.output_schema()).unwrap_or_default()
+                    serde_json::to_string(&localize_value(lang, &spec.output_schema()))
+                        .unwrap_or_default()
                 );
                 println!();
             }
@@ -71,14 +92,24 @@ async fn main() -> ExitCode {
         }
         "call" => {
             let Some(tool) = args.get(1) else {
-                eprintln!("call 需要工具名。\n\n{USAGE}");
+                eprintln!(
+                    "{}",
+                    tf(
+                        lang,
+                        "call 需要工具名。\n\n{USAGE}",
+                        &[("USAGE", usage.to_owned())]
+                    )
+                );
                 return ExitCode::FAILURE;
             };
             let raw = args.get(2).map(String::as_str).unwrap_or("{}");
             let parsed: serde_json::Value = match serde_json::from_str(raw) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("参数不是合法 JSON：{e}");
+                    eprintln!(
+                        "{}",
+                        tf(lang, "参数不是合法 JSON：{e}", &[("e", e.to_string())])
+                    );
                     return ExitCode::FAILURE;
                 }
             };
@@ -91,11 +122,18 @@ async fn main() -> ExitCode {
             }
         }
         "-h" | "--help" | "help" => {
-            println!("{USAGE}");
+            println!("{usage}");
             ExitCode::SUCCESS
         }
         other => {
-            eprintln!("未知子命令：{other}\n\n{USAGE}");
+            eprintln!(
+                "{}",
+                tf(
+                    lang,
+                    "未知子命令：{other}\n\n{USAGE}",
+                    &[("other", other.to_owned()), ("USAGE", usage.to_owned())]
+                )
+            );
             ExitCode::FAILURE
         }
     }

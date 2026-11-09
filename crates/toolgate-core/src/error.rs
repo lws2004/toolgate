@@ -267,19 +267,34 @@ pub fn govern_error(e: &crate::ToolError) -> ErrorView {
 /// 构造一条完整的错误响应，让传输层的 Ok / Err 两条路径共用同一套序列化。
 /// 带用户语言的错误响应：content 标签与分隔符同样按语言取（§18.1b）。
 pub fn error_response_with_lang(view: &ErrorView, lang: Language) -> ToolResponse {
+    // govern_error 的 fact / reason 是在 ToolError::localized 之后才拼出来的，
+    // 因此返回层再本地化一次，保证 content 与 structuredContent 同源。
+    let fact = t(lang, &view.fact).into_owned();
+    let reason = t(lang, &view.reason).into_owned();
+    let next: Vec<String> = view
+        .next_steps
+        .iter()
+        .map(|s| t(lang, s).into_owned())
+        .collect();
+    let localized = ErrorView {
+        code: view.code.clone(),
+        fact: fact.clone(),
+        reason: reason.clone(),
+        next_steps: next.clone(),
+    };
     let text = tf(
         lang,
         "事实：{fact}\n原因：{reason}\n可选下一步：{next}",
         &[
-            ("fact", view.fact.clone()),
-            ("reason", view.reason.clone()),
-            ("next", view.next_steps.join(t(lang, "；").as_ref())),
+            ("fact", fact),
+            ("reason", reason),
+            ("next", next.join(t(lang, "；").as_ref())),
         ],
     );
     ToolResponse {
         content: vec![Content::Text(text)],
         is_error: true,
-        meta: json!({ "error": view.to_structured() }),
+        meta: json!({ "error": localized.to_structured() }),
     }
 }
 

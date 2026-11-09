@@ -14,7 +14,7 @@ use toolgate_core::compat::{
 };
 use toolgate_core::decision::{Intent, decide_output};
 use toolgate_core::error::{error_response_with_lang, govern_error};
-use toolgate_core::locale::{Language, localize_value};
+use toolgate_core::locale::{Language, localize_value, t};
 use toolgate_core::notice::budgeted_notices;
 use toolgate_core::tools::{ToolContext, all_specs, dispatch};
 
@@ -54,7 +54,11 @@ impl McpServer {
             let request: Value = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
                 Err(e) => {
-                    let resp = error_response(Value::Null, -32700, &format!("JSON 解析失败：{e}"));
+                    let resp = error_response(
+                        Value::Null,
+                        -32700,
+                        &t(Language::from_env(), &format!("JSON 解析失败：{e}")),
+                    );
                     write_line(&mut stdout, &resp).await?;
                     continue;
                 }
@@ -76,7 +80,7 @@ impl McpServer {
 
         // 2026-07-28 无握手：每个请求独立校验版本；initialize 走旧版协商。
         if let Err(message) = check_protocol_version(method, request) {
-            return error_response(id, -32600, &message);
+            return error_response(id, -32600, &t(Language::from_env(), &message));
         }
         let params = request.get("params").cloned().unwrap_or(Value::Null);
         let meta = parse_request_meta(&params);
@@ -138,7 +142,7 @@ impl McpServer {
                 // 阶段 1.5：intent 缺省 raw，v1 客户端不改参数行为不变。
                 let intent = match resolve_intent(&args, &self.compat) {
                     Ok(intent) => intent,
-                    Err(message) => return error_response(id, -32602, &message),
+                    Err(message) => return error_response(id, -32602, &t(lang, &message)),
                 };
 
                 // 工具级错误走 isError，而不是 JSON-RPC 错误——模型据此自行修正。
@@ -182,7 +186,7 @@ impl McpServer {
                 }
                 result
             }
-            other => error_response(id, -32601, &format!("不支持的方法：{other}")),
+            other => error_response(id, -32601, &t(lang, &format!("不支持的方法：{other}"))),
         }
     }
 }
@@ -410,6 +414,30 @@ mod tests {
         assert!(
             text.starts_with("Created"),
             "工具 content 未按用户语言切换: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_language_controls_interpolated_errors() {
+        let mut s = test_server();
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+                "params": {
+                    "name": "bash",
+                    "arguments": { "binary": "definitely-not-a-real-binary", "intent": "raw" },
+                    "_meta": { "toolgate/language": "en" }
+                }
+            }),
+        )
+        .await;
+        let fact = resp["result"]["structuredContent"]["error"]["fact"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            fact.starts_with("Cannot start"),
+            "含插值 fact 未按用户语言翻译: {fact}"
         );
     }
 
