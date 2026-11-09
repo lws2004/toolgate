@@ -622,3 +622,12 @@ toolgate 上一轮已接它（§18.1）。
 **口径**：上表只用于说明端点形状，不作延迟 / 质量基准。`jina-reranker-v3.5-mlx-merged`
 的 listwise 块大小 125 出自 §3.5 的参考实现选型记录（**引用**，非本机实测），
 不在本表内。OpenViking 已在消费该端点（用户 2026-11-10 告知）。
+
+**toolgate 端到端实测（2026-11-10）**：`cargo build --release --features external-protocols`
+后，用只配 `rerank` 槽位的配置（`source: rerank` / `base_url: http://127.0.0.1:10020` /
+`model: /Users/lanws/.models/jina-reranker-v3.5-mlx-merged` / `serves: [rerank]`）对
+25 个含 `needle` 的样本跑
+`toolgate call search '{"mode":"content","query":"needle","intent":"auto","path":"target/e2e-hits"}' --config <配置>`，
+返回 `meta.rerank="applied"`、`slmStatus.rerank="ready"`、`hits=25`，命中顺序由字典序
+变为相关度序（`f1,f8,f9,f10,f2,...`），stderr 无降级告警。**实测**，命令与样本数如上；
+该次调用前 8090 的 decide 服务已停，不参与本验证。
