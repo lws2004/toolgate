@@ -10,6 +10,10 @@ description = "Command line entry point for toolgate"
 name = "toolgate"
 path = "src/main.rs"
 
+[features]
+# 外部协议客户端属可选层（§19.6）：默认构建不含 HTTP 客户端。
+external-protocols = ["toolgate-core/external-protocols"]
+
 [dependencies]
 toolgate-core = { path = "../toolgate-core" }
 toolgate-mcp = { path = "../toolgate-mcp" }

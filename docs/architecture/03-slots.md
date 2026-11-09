@@ -125,6 +125,16 @@ Apple Silicon 列来自 2026-11-07 本机实测（Apple M2 Max / 96 GiB，附件
 不是架构的一部分，完整清单与口径见附件 E.2。架构只约束：每个槽位按 §3.3 的
 四条判据选实现，参考实现可替换。
 
+**参考判定模型属 systemone 协议族，不按 chat 协议工作**（2026-11-09 本机实测）：
+StartLux / d3-nano 是 jev 类判定模型，走 `/v1/systemone`（命名问题 → 校准概率，
+§18.1）才是正确形态。**用通用 chat 协议调用它们会得到退化输出**——实测 d3-nano
+经 llama-server 的 `/v1/chat/completions` 返回 `finish_reason=length` 且内容是重复
+token 序列（形如 `IAHO-YA-IH` 循环，无语义）。
+
+**遇到这种输出不要误判成「模型坏了」**：判据是 `finish_reason=length` + 重复
+token 序列——这是「用错协议」的特征，不是「模型加载失败」或「权重损坏」。
+正确处理是改用 systemone 协议（§18.1 的 `source: systemone`），不是去换模型。
+
 ### 3.5 为什么 rerank 必须独立成槽位
 
 用 classify/decide 类模型做 rerank 在原理上可行，但成本结构不对：
@@ -380,6 +390,7 @@ slots:
 | 条件 | adapter |
 |---|---|
 | `source: local` | `native` |
+| `source: systemone` → 槽位 `decide` | `native` |
 | 外部协议（`openai` / `anthropic` / `responses`）→ 槽位 `classify` / `decide` | `json` |
 | 外部协议 → 槽位 `summarize` / `vision` | `text` |
 | 外部协议 → 槽位 `rerank` | `ordered` |
@@ -387,6 +398,28 @@ slots:
 
 `source: auto` 先按 §18.1 的判定顺序推断成具体来源，再套用本表（推断出 `local`
 走 `native`）；推断不出来按最后一行处理。
+
+#### systemone 适配器：槽位形状 ↔ 命名问题
+
+systemone 的原生形状最接近 §3.2 的 decide 契约，因此走 `native`（不是 `json`）——
+它直接给校准概率，不需要「要求模型输出 JSON schema 再解析」这一层转换。映射规则：
+
+| 方向 | 映射 |
+|---|---|
+| 槽位 decide → 协议 | 槽位的 `questions`（字符串数组）按序编号成命名问题 `q0` / `q1` / …；每个问题的 `type` 固定 `noul`，`instructions` 写问题原文；`state` 写槽位输入的文本 / 对象 |
+| 协议 → 槽位 | 每个 `noul` 答案的数值 → 对应问题的 `probability`；问题名 `q0` / `q1` 按序还原回槽位问题的顺序 |
+| 概率语义 | `noul` 是「该问题的肯定回答为真的概率」，与 §7.2 门控同向：`p ≥ 0.85` 采用、`0.60 ≤ p < 0.85` 标 LOW_CONFIDENCE、`p < 0.60` 两视图都给 |
+
+**只接受 `noul` 类型**。协议另有 `choice` 与 `score` 两种类型，但 §3.2 的槽位契约
+**没有类型维度**——槽位只问「这个问题的概率是多少」，不表达「从哪几个选项里选」。
+所以：上游返回 `choice` / `score` 时，按 §3.11 的「形状不符」处理（该次降级、
+连续失败后禁用该槽位并告警），**不做静默转换**——把 `choice` 的 `confidence` 当成
+`probability` 会把「选项间的相对置信」与「二元肯定概率」混为一谈，两者不是同一个量。
+
+**与 `adapter: json` 的差别在概率性质**：systemone 走 `native`，产出的是校准
+概率，按 §3.10 的「非校准概率必须标注」不适用（不标 `UNCALIBRATED`）；`json`
+适配器产出的 probability 是模型自报值，必须标 `calibrated: false` 与
+`UNCALIBRATED`（§4.4b）。高风险判定优先用 systemone 这样的原生实现（§7.2）。
 
 **为什么不再写「模型在参考实现清单」**：参考实现清单（附件 E.2）是文档里的模型族
 名单，配置层读不到「这个模型是不是 jev」——它只知道 `source` 与 `serves`。按

@@ -105,6 +105,8 @@ pub enum ModelSource {
     Anthropic,
     /// OpenAI Responses。
     Responses,
+    /// TypeSafe /v1/systemone（jev 类判定模型的原生协议，§18.1）。
+    SystemOne,
 }
 
 impl ModelSource {
@@ -116,6 +118,7 @@ impl ModelSource {
             ModelSource::Openai => "openai",
             ModelSource::Anthropic => "anthropic",
             ModelSource::Responses => "responses",
+            ModelSource::SystemOne => "systemone",
         }
     }
 
@@ -123,7 +126,10 @@ impl ModelSource {
     fn is_external(&self) -> bool {
         matches!(
             self,
-            ModelSource::Openai | ModelSource::Anthropic | ModelSource::Responses
+            ModelSource::Openai
+                | ModelSource::Anthropic
+                | ModelSource::Responses
+                | ModelSource::SystemOne
         )
     }
 }
@@ -318,7 +324,7 @@ const HTTP_FIELDS: &str = "base_url";
 /// 五个槽位名。
 const SLOT_NAMES: &str = "classify / rerank / decide / summarize / vision";
 /// source 枚举的合法值。
-const SOURCE_VALUES: &str = "auto / local / openai / anthropic / responses";
+const SOURCE_VALUES: &str = "auto / local / openai / anthropic / responses / systemone";
 /// mode 枚举的合法值。
 const MODE_VALUES: &str = "auto / embedded / http";
 /// adapter 枚举的合法值。
@@ -422,7 +428,7 @@ const EN_CONFIG_TEXT: &[(&str, &str)] = &[
     ),
     (
         "显式写 source（local / openai / anthropic / responses）",
-        "Set source explicitly (local / openai / anthropic / responses)",
+        "Set source explicitly (local / openai / anthropic / responses / systemone)",
     ),
 ];
 
@@ -594,28 +600,29 @@ pub fn parse_config(text: &str, origin: &str) -> Result<ResolvedConfig, ConfigEr
                 None
             }
         };
-        if let (Some(source), Some(mode)) = (source, mode) {
-            if mode == SlmMode::Embedded && source.is_external() {
-                errors.push(ConfigError {
-                    code: "CONFIG_MODE_CONFLICT".to_owned(),
-                    field: format!("{prefix}.mode"),
-                    value: Some(source.as_str().to_owned()),
-                    expected: "mode: http（外部协议只能走 http）".to_owned(),
-                    fix: "embedded 只适用于 source: local；外部协议改用 mode: http".to_owned(),
-                });
-            }
+        if let (Some(source), Some(mode)) = (source, mode)
+            && mode == SlmMode::Embedded
+            && source.is_external()
+        {
+            errors.push(ConfigError {
+                code: "CONFIG_MODE_CONFLICT".to_owned(),
+                field: format!("{prefix}.mode"),
+                value: Some(source.as_str().to_owned()),
+                expected: "mode: http（外部协议只能走 http）".to_owned(),
+                fix: "embedded 只适用于 source: local；外部协议改用 mode: http".to_owned(),
+            });
         }
 
-        if let Some(var_name) = &entry.config.api_key_env {
-            if std::env::var(var_name.as_str()).is_err() {
-                errors.push(ConfigError {
-                    code: "CONFIG_MISSING_ENV".to_owned(),
-                    field: format!("{prefix}.api_key_env"),
-                    value: Some(var_name.clone()),
-                    expected: "已在启动环境中设置的环境变量".to_owned(),
-                    fix: "导出该环境变量后再启动，或删除 api_key_env 配置".to_owned(),
-                });
-            }
+        if let Some(var_name) = &entry.config.api_key_env
+            && std::env::var(var_name.as_str()).is_err()
+        {
+            errors.push(ConfigError {
+                code: "CONFIG_MISSING_ENV".to_owned(),
+                field: format!("{prefix}.api_key_env"),
+                value: Some(var_name.clone()),
+                expected: "已在启动环境中设置的环境变量".to_owned(),
+                fix: "导出该环境变量后再启动，或删除 api_key_env 配置".to_owned(),
+            });
         }
     }
 
@@ -656,25 +663,25 @@ pub fn load_config(path: &Path) -> Result<Option<ResolvedConfig>, ConfigErrors> 
 ///
 /// 推断不出来就是配置错误（CONFIG_SOURCE_UNRESOLVED），不做启动探测。
 pub fn resolve_source(model: &ModelConfig) -> Result<ModelSource, ConfigError> {
-    if let Some(source) = model.source {
-        if source != ModelSource::Auto {
-            return Ok(source);
-        }
+    if let Some(source) = model.source
+        && source != ModelSource::Auto
+    {
+        return Ok(source);
     }
     if model.path.is_some() {
         return Ok(ModelSource::Local);
     }
-    if let Some(url) = model.base_url.as_deref() {
-        if let Some(source) = infer_source_from_url(url) {
-            return Ok(source);
-        }
+    if let Some(url) = model.base_url.as_deref()
+        && let Some(source) = infer_source_from_url(url)
+    {
+        return Ok(source);
     }
     Err(ConfigError {
         code: "CONFIG_SOURCE_UNRESOLVED".to_owned(),
         field: "models.<id>.source".to_owned(),
         value: model.base_url.clone(),
         expected: SOURCE_VALUES.to_owned(),
-        fix: "显式写 source（local / openai / anthropic / responses）".to_owned(),
+        fix: "显式写 source（local / openai / anthropic / responses / systemone）".to_owned(),
     })
 }
 
@@ -722,13 +729,13 @@ pub fn resolve_mode(model: &ModelConfig, slm: &SlmConfig) -> Result<SlmMode, Con
 
 /// 解析形状适配器（§3.10）：显式 adapter 优先；auto 时按来源与槽位推断。
 pub fn resolve_adapter(model: &ModelConfig, slot: SlotKind, source: ModelSource) -> Adapter {
-    if let Some(adapter) = model.adapter {
-        if adapter != Adapter::Auto {
-            return adapter;
-        }
+    if let Some(adapter) = model.adapter
+        && adapter != Adapter::Auto
+    {
+        return adapter;
     }
     match source {
-        ModelSource::Local => Adapter::Native,
+        ModelSource::Local | ModelSource::SystemOne => Adapter::Native,
         ModelSource::Auto => Adapter::Json,
         ModelSource::Openai | ModelSource::Anthropic | ModelSource::Responses => match slot {
             SlotKind::Classify | SlotKind::Decide => Adapter::Json,
@@ -1243,6 +1250,7 @@ fn parse_source_value(text: &str) -> Option<ModelSource> {
         "openai" => Some(ModelSource::Openai),
         "anthropic" => Some(ModelSource::Anthropic),
         "responses" => Some(ModelSource::Responses),
+        "systemone" => Some(ModelSource::SystemOne),
         _ => None,
     }
 }
@@ -1416,7 +1424,7 @@ mod tests {
         assert_eq!(errors[0].value.as_deref(), Some("gpt"));
         assert_eq!(
             errors[0].expected,
-            "auto / local / openai / anthropic / responses"
+            "auto / local / openai / anthropic / responses / systemone"
         );
     }
 
@@ -1483,7 +1491,7 @@ mod tests {
         assert_eq!(errors[0].code, "CONFIG_SOURCE_UNRESOLVED");
         assert_eq!(
             errors[0].fix,
-            "显式写 source（local / openai / anthropic / responses）"
+            "显式写 source（local / openai / anthropic / responses / systemone）"
         );
     }
 

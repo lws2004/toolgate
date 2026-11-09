@@ -194,48 +194,47 @@ pub fn prepare_with(
         let (w, h) = scaled.dimensions();
 
         // 有透明通道：先试 PNG（无损，保透明）。
-        if has_alpha {
-            if let Some(encoded) = encode_png(&scaled) {
-                if B64.encode(&encoded).len() <= cfg.max_base64_bytes {
-                    return Ok(ok_response(
-                        Prepared {
-                            mime_type: "image/png".to_owned(),
-                            base64: B64.encode(&encoded),
-                            sha256: crate::spill::sha256_short(&encoded),
-                            width: w,
-                            height: h,
-                            original_width: ow,
-                            original_height: oh,
-                            quality: None,
-                            resized: round > 0 || w != ow || h != oh,
-                        },
-                        path,
-                    ));
-                }
-            }
+        if has_alpha
+            && let Some(encoded) = encode_png(&scaled)
+            && B64.encode(&encoded).len() <= cfg.max_base64_bytes
+        {
+            return Ok(ok_response(
+                Prepared {
+                    mime_type: "image/png".to_owned(),
+                    base64: B64.encode(&encoded),
+                    sha256: crate::spill::sha256_short(&encoded),
+                    width: w,
+                    height: h,
+                    original_width: ow,
+                    original_height: oh,
+                    quality: None,
+                    resized: round > 0 || w != ow || h != oh,
+                },
+                path,
+            ));
         }
 
         // 有损 JPEG：按内容类型选标定后的阶梯，逐档下降（§10.2b）。
         let rgb = scaled.to_rgb8();
         let ladder = ladder_for(classify_content(&rgb), cfg);
         for &q in ladder {
-            if let Some(encoded) = encode_jpeg(&rgb, q) {
-                if B64.encode(&encoded).len() <= cfg.max_base64_bytes {
-                    return Ok(ok_response(
-                        Prepared {
-                            mime_type: "image/jpeg".to_owned(),
-                            base64: B64.encode(&encoded),
-                            sha256: crate::spill::sha256_short(&encoded),
-                            width: w,
-                            height: h,
-                            original_width: ow,
-                            original_height: oh,
-                            quality: Some(q),
-                            resized: round > 0 || w != ow || h != oh,
-                        },
-                        path,
-                    ));
-                }
+            if let Some(encoded) = encode_jpeg(&rgb, q)
+                && B64.encode(&encoded).len() <= cfg.max_base64_bytes
+            {
+                return Ok(ok_response(
+                    Prepared {
+                        mime_type: "image/jpeg".to_owned(),
+                        base64: B64.encode(&encoded),
+                        sha256: crate::spill::sha256_short(&encoded),
+                        width: w,
+                        height: h,
+                        original_width: ow,
+                        original_height: oh,
+                        quality: Some(q),
+                        resized: round > 0 || w != ow || h != oh,
+                    },
+                    path,
+                ));
             }
         }
 

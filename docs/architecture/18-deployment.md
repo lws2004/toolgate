@@ -111,6 +111,7 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
 | `openai` | OpenAI Chat Completions | `base_url` + `model`（+ `api_key_env`） | 按协议调用 HTTP 接口；第一期只允许 loopback | llama-server / vLLM / 兼容服务 |
 | `anthropic` | Anthropic Messages | 同上 | 同上 | Anthropic 兼容服务 |
 | `responses` | OpenAI Responses | 同上 | 同上 | OpenAI Responses 兼容服务 |
+| `systemone` | TypeSafe SystemOne（`/v1/systemone`） | 同上 | 同上 | StartLux-Decision 等类型化判定服务 |
 | `auto` | 按 URL 推断 | `path` 或 `base_url` + `model` | 推断为上面某一种，规则见下 | 地址已含协议信息时 |
 
 ```yaml
@@ -120,7 +121,7 @@ models:
     path: ~/.toolgate/models/jev
     serves: [classify, decide]
   lfm3-vl:
-    source: auto              # auto（默认）| local | openai | anthropic | responses
+    source: auto              # auto（默认）| local | openai | anthropic | responses | systemone
     base_url: http://127.0.0.1:8080/v1
     model: lfm3-vl
     api_key_env: TOOLGATE_MODEL_KEY   # 可选；密钥从环境变量读，不落配置
@@ -136,23 +137,92 @@ models:
 5. host 是 `api.openai.com` → `openai`；`api.anthropic.com` → `anthropic`；
 6. 都不命中 → **启动失败**，要求显式写 `source`。
 
+**这六条顺序不变，`systemone` 不进自动推断。** `base_url` 写的是服务根地址
+（如 `http://127.0.0.1:8090`）时，根地址里没有任何协议特征可据此判断后端是
+systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，也能挂 systemone
+端点。按本节的保守推断原则（猜错协议比报错更糟，§1.4.4 的可行动失败），
+**`systemone` 必须显式写 `source: systemone`**。
+
+显式写 `source: systemone` 时，`base_url` 指向服务根地址，客户端自行拼
+`/v1/systemone` 路径。
+
 不做启动探测：探测要发真实请求，且错误响应形状不可靠；猜错协议比报错更糟（§1.4.4 的可行动失败）。
 
-**协议能力不是能力等价**：三类接口是「传输形态」，各槽位能否用要看接口能力（适配器见 §3.10）：
+**协议能力不是能力等价**：四类接口是「传输形态」，各槽位能否用要看接口能力（适配器见 §3.10）：
 
-| 槽位 | openai | anthropic | responses | 说明 |
+| 槽位 | openai | anthropic | responses | systemone | 说明 |
+|---|---|---|---|---|---|
+| summarize | 可用 | 可用 | 可用 | **不可用** | systemone 只做判定，不生成文本 |
+| vision | 可用 | 可用 | 可用 | 可用 | systemone 的 `images` 需后端模型带 vision tower（本机 4B MLX 构建带） |
+| classify | 可用（JSON schema） | 可用（JSON / tool use） | 可用（structured outputs） | **受限** | systemone 的 `choice` 类型返回逐选项 `probabilities`，但 §3.10 的 systemone 适配器本轮只映射 `noul`；走 `choice` 的 classify 映射未落 |
+| decide | **受限** | **受限** | **受限** | **可用（给校准概率）** | systemone 的 `noul` = P(yes)，直接满足 §3.2 decide 契约与 §7.2 门控 |
+| rerank | **受限** | **受限** | **受限** | **不可用** | systemone 无排序接口 |
+
+**openai / anthropic / responses 是通用 LLM 的协议形态，jev 类判定模型不按 chat
+协议工作。** §3.4 的参考判定实现（StartLux / d3-nano）属 systemone 协议族，
+对它们只能走 `systemone`；上表 openai 列的 decide 标「受限」，对这类模型是
+**不可用**（不是「精度差一点」，是协议层就不对）。判据见 §3.4。
+
+#### systemone：TypeSafe 判定协议
+
+**协议形状**（`POST /v1/systemone`，别名 `/v1/decisions`；官方定义见附件 E.10）：
+
+```text
+请求: { state: string | object,
+        questions: { "<name>": { type: "noul" | "choice" | "score",
+                                   instructions: string,
+                                   criteria?: object } },
+        images?: [base64 / data URI] }        # 每请求至多 8 张
+响应: { answers: { "<name>": { type: "noul",  noul: number }
+                          | { type: "choice", choice: string, confidence: number,
+                              probabilities: { <option>: number }, none_probability: number }
+                          | { type: "score",  ... } },
+        usage: { input_tokens, output_tokens },
+        model: string }
+```
+
+**三种问题类型的官方语义**：`noul` 是「yes 的概率」；`score` 是量表上的等级期望值；
+`none_probability` 是「没有选项合适」的告警分（官方建议阈值 0.2）。
+
+**为什么值得单列，而不是硬套 openai**：它直接提供「命名问题 → 校准概率」，
+这正是 §3.2 的 decide 契约（每个问题一个 probability）与 §7.2 的置信度门控需要的
+形状。openai 协议的 decide 在上表里标「受限」——实测 llama.cpp 的
+`/v1/chat/completions` 虽带 `logprobs`（token 级概率），但那是「下一个 token 的
+分布」，要映射到「每个问题一个概率」还需要额外约定（多 token 答案如何聚合、
+答案在序列中的位置如何定位），本轮不落。systemone 把这层约定做进了协议本身。
+
+**更根本的一条：systemone 是 jev 类判定模型的原生协议。** §3.4 的参考判定实现
+（StartLux / d3-nano）按 systemone 工作，对它们走 chat 协议不是「精度差一点」，
+是协议层就不对（§3.4 的实测判据）。所以 systemone 值得单列一个 `source`，
+而不是硬套进 openai 那一列。
+
+**它就是 §13.4 所说的 d1 形态的原生实现**：「一个 state + 任意数量命名问题 →
+带概率的答案集合」逐字对应。§13.4 讨论的方案 A / B（每工具单独调 / turn 级
+批处理）因此可以直接作用在 systemone 上，不需要为它再设计一套调用形态。
+
+**本机实测**（2026-11-09，127.0.0.1:8090 的 StartLux-Decision-v1.1-4B-AutoThink）：
+
+| # | state | 问题（措辞） | noul | 含义 |
 |---|---|---|---|---|
-| summarize | 可用 | 可用 | 可用 | 文本 / JSON |
-| vision | 可用 | 可用 | 可用 | 多模态 content |
-| classify | 可用（JSON schema） | 可用（JSON / tool use） | 可用（structured outputs） | 概率需 `logprobs`，不支持时只能低风险 |
-| decide | **受限** | **受限** | **受限** | 无校准概率 → §7.2 置信度门控不可用；需实测各协议 logprobs 能力 |
-| rerank | **受限** | **受限** | **受限** | 无标准接口，需 provider 扩展 |
+| 1 | `这段 Python 代码有语法错误：def f(: pass` | 这段代码**有语法错误**吗？ | 0.960 | P(有错) |
+| 2 | 同一句 | 这段代码**语法正确**吗？ | 0.017 | P(正确) |
+| 3 | `订单号 A-123 已被标记为已发货，运费 0 元。` | 这个订单是**已发货**状态吗？ | 0.997 | P(是) |
+| 4 | `今天天气不错，适合散步。` | 这个订单**已经发货**了吗？ | 0.126 | P(是)，state 未提及 |
 
-**部署约束**：外部来源（`openai` / `anthropic` / `responses` / `auto` 解析为外部协议时）`mode` 只能是 `http`；`embedded` 只适用于 `source: local`。非法组合启动即失败（fail loud）。`base_url` 不写时用 `slm.http.base_url`。
+**第 1、2 行是同一句 state 的互补两面**：0.960 与 0.017 合起来接近 1，因为 `noul`
+的语义是 **P(肯定回答为真)**（官方定义「noul is the probability of yes」）。
+概率相对 state 成立、方向明确——所以门控按 P(是) 走，与 §7.2 同向：
+`p ≥ 0.85` 采用、`0.60 ≤ p < 0.85` 标 LOW_CONFIDENCE、`p < 0.60` 两视图都给。
+
+第 4 行尤其关键：state 里没有订单信息，模型给的是「低概率但非零」而不是编造。
+`choice` 类型实测也返回逐选项 `probabilities` 与 `none_probability`（本机一次 choice
+实测 `none_probability` = 0.505）。
+
+**部署约束**：外部来源（`openai` / `anthropic` / `responses` / `systemone` / `auto` 解析为外部协议时）`mode` 只能是 `http`；`embedded` 只适用于 `source: local`。非法组合启动即失败（fail loud）。`base_url` 不写时用 `slm.http.base_url`。
 
 **数据边界**：外部协议默认只接受 loopback（127.0.0.1 / localhost）。远程 endpoint 会让数据出机器，违背 §8 的隔离目标——必须显式配置 `allow_remote: true` 并在启动时告警；第一期不实现远程来源。
 
-**依赖**：外部协议客户端（HTTP 客户端）属于可选层（Cargo feature `external-protocols`），默认构建不含；纯本地路径不需要它（§19.6）。
+**依赖**：外部协议客户端（HTTP 客户端）属于可选层（Cargo feature `external-protocols`），默认构建不含；纯本地路径不需要它（§19.6）。**默认构建不含该 feature 时，配置了外部 `source` 的槽位按 §3.8 降级**（资源层失败，不是配置错误）：配置本身合法，后端能力缺失属运行期资源问题（§18.9 四层校验的第四层）。
 
 **实例去重**：本地来源按模型文件路径去重；外部来源按 `base_url + source + model` 去重（§18.1 的实例管理）。
 
@@ -755,8 +825,11 @@ cargo build --release    # 产出一个可执行文件，无运行时依赖
   重新声明是这条原则的正常应用：CLI 接入配置层后要写启动日志（§18.9），
   `tracing::warn!` 这类宏需要直接依赖 `tracing`（它是 `tracing-subscriber` 的传递
   依赖，但宏调用必须显式声明才能编译）。
-- **禁止版本通配**：用主版本约束（`"1"`），精确版本交给 `Cargo.lock`；
-  `cargo update` 单独提交，不与功能改动混在一起。
+- **禁止版本通配，用主版本约束（`"1"`），精确版本交给 `Cargo.lock`；
+  版本取注册表当前最新版，不沿用陈旧版本**。新增依赖直接取注册表当前最新版；
+  若因 MSRV 约束被 cargo 的感知解析挡在旧版，**应抬 MSRV 而不是将就旧版**——
+  2026-11-09 即如此：`noyalib` 原被解析到 0.0.15（仓库 `rust-version` 1.85 的
+  上限），抬到 1.89 后升到 0.0.58。**版本更新单独提交，不与功能改动混在一起。**
 - **配置解析与协议编解码同类，归默认层**：解析 `~/.toolgate/config.yaml`
   的 YAML 库与解析 MCP 的 JSON 库是同一类需求（外部格式的编解码），不因「只读
   一个配置文件」而降级为可选层；否则纯 L0 版要么不带配置能力，要么让配置解析
@@ -767,7 +840,7 @@ cargo build --release    # 产出一个可执行文件，无运行时依赖
 | 能力 | 形态 | 隔离方式 | 为什么不做进默认层 |
 |---|---|---|---|
 | 本地模型推理（embedded） | llama.cpp / MLX 的 Rust 绑定或动态库 | Cargo feature `slm-embedded`（待实现） | C++ / Apple 框架绑定破坏单二进制，native 崩溃会带走整个进程（§18.1） |
-| 外部模型协议客户端（openai / anthropic / responses） | HTTP 客户端库（Cargo feature `external-protocols`） | 默认关闭；配置外部 `source`（openai / anthropic / responses / auto）时启用 | 默认层不引入 HTTP 客户端；纯本地路径不需要（§18.1） |
+| 外部模型协议客户端（openai / anthropic / responses / systemone） | HTTP 客户端库 `reqwest`（Cargo feature `external-protocols`） | 默认关闭；配置外部 `source`（openai / anthropic / responses / systemone / auto）时启用 | 默认层不引入 HTTP 客户端；纯本地路径不需要（§18.1） |
 | WebP 编码 | ffmpeg / cwebp 子进程 | 运行时检测命令是否存在（§10.2b） | 为约 3.5% 的体积收益引入 C 依赖不值得（§10.2b 的三条判据） |
 | fetch provider | 外部子进程（dsh-web-fetch / pi / opencli / moli / command） | `fetch.provider` 配置，默认 `none` | 取数能力由客户端生态提供，不内建网络栈 |
 
@@ -775,8 +848,25 @@ cargo build --release    # 产出一个可执行文件，无运行时依赖
 GC 运行时、日志聚合客户端。它们会把「本地常驻小工具」变成「需要运维的服务」，
 与分发目标冲突。
 
+**可选层的 HTTP 客户端选型**：`reqwest`（异步、纯 Rust 默认后端 `rustls`、
+支持 `json` / `multipart` / `stream` / `gzip` feature）。选它的理由是本项目的形态
+匹配：模型服务调用是低并发、长等待的 HTTP 请求，`reqwest` 的异步接口能直接接进
+§18.5 的 tokio 运行时，且不引入 OpenSSL 之类的系统级 C 依赖——纯 L0 版仍是
+单二进制（§19.3）。默认关闭该 feature 时，`reqwest` 完全不进默认构建。
+
+**默认构建不含 HTTP 客户端时的行为**：配置了外部 `source`（`openai` /
+`anthropic` / `responses` / `systemone`）的槽位**按 §3.8 降级并告警**，归类为
+资源层失败（§18.9 四层校验的第四层），**不是配置错误**——配置本身合法，缺的是
+这个构建里的后端能力。判定发生在启动时发现「该 feature 未编入」，不是配置解析
+阶段。
+
 **审计**：发布前跑 `cargo tree --duplicates` 与附件 E.8 对账；默认层出现新的
 直接依赖而本表未登记，视为架构变更而不是实现细节。
+
+**仓库 MSRV**：以 workspace `Cargo.toml` 的 `rust-version` 声明为准（当前 1.89，
+为默认层依赖实际需要的下限，不抬到本机工具链版本）。抬 MSRV 会改变依赖可解析的
+版本范围（cargo 的 MSRV 感知解析会据此选版本），属架构层取舍，改动单独提交，
+不与功能改动混在一起（§19.6 的「`cargo update` 单独提交」）。
 
 ### 19.7 平台支持：第一期只实现 macOS
 

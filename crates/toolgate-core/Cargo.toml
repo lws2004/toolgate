@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 description = "Tool implementations and output governance for toolgate"
 
+[features]
+# 外部协议客户端（HTTP 传输）属可选层，默认构建不含（§19.6）。
+external-protocols = ["dep:reqwest"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
@@ -21,3 +25,4 @@ ignore.workspace = true
 regex.workspace = true
 image.workspace = true
 noyalib.workspace = true
+reqwest = { workspace = true, optional = true }

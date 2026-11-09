@@ -502,10 +502,10 @@ pub fn decide_output(input: &DecisionInput) -> DecisionOutput {
     meta.insert("requestedLevel".to_owned(), json!(level_str(requested)));
 
     let mut effective_cap = input.max_exposure;
-    if let Some(rule) = &input.path_rule {
-        if rule.level < effective_cap {
-            effective_cap = rule.level;
-        }
+    if let Some(rule) = &input.path_rule
+        && rule.level < effective_cap
+    {
+        effective_cap = rule.level;
     }
     meta.insert("effectiveLevel".to_owned(), json!(level_str(effective_cap)));
 

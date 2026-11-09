@@ -357,29 +357,40 @@ DSH 生态里的 **dsh-ledger-compact** 是会话层压缩插件：它不碰工�
 > 正文 §19.6 的台账依据。数字随依赖版本变化，只作量级参考；审计时以现场
 > `cargo tree` 输出为准。
 
-**基线（2026-11-09，配置层接入 `noyalib` + CLI 重新声明 `tracing` 后）**：
-`Cargo.lock` 共 98 个包（含 3 个 workspace crate），`[workspace.dependencies]`
-直接依赖 17 个；默认构建依赖规模（`cargo tree --prefix none | sort -u | wc -l`）
-为 109 行。
+**基线（2026-11-09，配置层接入 `noyalib` + CLI 重新声明 `tracing` + 抬 MSRV
+至 1.89 + 全量 `cargo update` 后）**：`Cargo.lock` 共 164 个包（含 3 个 workspace
+crate），`[workspace.dependencies]` 直接依赖 18 个；默认构建依赖规模
+（`cargo tree --prefix none | sort -u | wc -l`）为 114 行。
 
-**两个数字不同源，别混用**：96 是 `Cargo.lock` 的包条目数；106 是上面那条
+**`reqwest` 不在默认构建里**：它是 `toolgate-core` 的 optional 依赖，由
+`external-protocols` feature 控制（§19.6 可选层）。默认构建的 `cargo tree` 输出
+里 `reqwest` 为 0 条；开全部 feature 后规模为 185 行。
+
+**两个数字不同源，别混用**：164 是 `Cargo.lock` 的包条目数；114 是上面那条
 `cargo tree` 命令的去重行数——`cargo tree` 会给重复展开的子树打 `(*)` 标记，
-这些标记行也占行数，所以 106 与 96 不是同一个口径的两个版本，比较时不要拿
+这些标记行也占行数，所以 114 与 164 不是同一个口径的两个版本，比较时不要拿
 它们互相验证。
 
 **各直接依赖的传递依赖数**（`cargo tree -p <crate> --prefix none | sort -u | wc -l`，含自身）：
 
+> **`reqwest` 一行的口径说明**：`reqwest` 是 `toolgate-core` 的 optional 依赖，
+> `cargo tree -p reqwest` 对它不适用（package ID 匹配不到——它不是 workspace
+> 成员且默认未启用）。上表的 79 是从 `cargo tree --features external-protocols`
+> 的带缩进输出里解析出的 **reqwest 子树唯一包数**（含自身），与左列的
+> `sort -u | wc -l` 是同一口径（唯一包名计数）。该数含跨目标包（本机不编译的
+> `icu_*` / windows 相关包），因此偏大。
+
 | 依赖 | 数目 | 依赖 | 数目 |
 |---|---|---|---|
 | serde | 9 | base64 | 1 |
-| serde_json | 5 | encoding_rs | 2 |
-| tokio | 14 | chardetng | 4 |
+| serde_json | 5 | encoding_rs | 6 |
+| tokio | 14 | chardetng | 8 |
 | anyhow | 1 | similar | 1 |
 | thiserror | 8 | ignore | 15 |
-| tracing-subscriber | 20 | regex | 6 |
-| sha2 | 11 | image | 23 |
-| hex | 1 | noyalib | 19 |
-| — | — | tracing | 11 |
+| tracing-subscriber | 27 | regex | 6 |
+| tracing | 11 | image | 23 |
+| sha2 | 11 | noyalib | 12 |
+| hex | 1 | reqwest | **79**（可选层） |
 
 **审计命令**：
 
@@ -394,20 +405,26 @@ cargo tree -p <crate> --prefix none | sort -u | wc -l   # 单个依赖的子树
 | 组 | 版本 | 来源 |
 |---|---|---|
 | `miniz_oxide` | 0.8.9 / 0.9.1 | png 解码链的内部选择，不在直接控制范围；2026-11-08 基线即存在，未新增 |
-| `syn` | 2.0.119 / 3.0.9 | 2.0.119 由 `tracing-attributes`（`tracing` 的 proc-macro 依赖）引入；3.0.9 由 `serde_derive` / `thiserror-impl` / `tokio-macros` 引入 |
+| `syn` | 2.0.119 / 3.0.10 | 2.0.119 由 `tracing-attributes`（`tracing` 的 proc-macro 依赖）引入；3.0.10 由 `serde_derive` / `thiserror-impl` / `tokio-macros` 引入 |
 
 `syn` 这组是 2026-11-09 新增的：CLI 重新声明 `tracing` 后，`tracing-attributes`
 首次进入锁文件并拉入 `syn` 2.x，而既有的 serde / thiserror / tokio 宏链用的是
 `syn` 3.x。两条链的 proc-macro 依赖不兼容，`cargo` 不做版本合并——这是「重新
 声明一个传递依赖」的代价，如实记录在此。
 
-**结论**：`image`（23）与 `tracing-subscriber`（20）是两棵最大的子树——前者是
-图片能力的必要成本，后者只允许出现在 CLI crate；`ignore`（15）是搜索语义的
-必要成本；`noyalib`（19）是配置解析的必要成本，与 `ignore` 同量级；`tracing`（11）
-是日志调用门面，其子树与 `tracing-subscriber` 的子树高度重叠（两者共享
-`proc-macro2` / `quote` / `unicode-ident`），不是一棵独立的新成本。其余直接依赖
-的子树均 ≤ 14，没有可轻易替换的大依赖。若未来默认层出现新的超过 10 个子依赖
-的直接依赖，应按 §1.5 准入四问重新论证。
+**结论**：`image`（23）与 `tracing-subscriber`（27）是两棵最大的**默认层**子树——
+前者是图片能力的必要成本，后者只允许出现在 CLI crate；`ignore`（15）是搜索语义
+的必要成本；`noyalib`（12）是配置解析的必要成本；`tracing`（11）是日志调用门面，
+其子树与 `tracing-subscriber` 的子树高度重叠（两者共享 `proc-macro2` / `quote` /
+`unicode-ident`），不是一棵独立的新成本。其余默认层直接依赖的子树均 ≤ 14，
+没有可轻易替换的大依赖。
+
+**`reqwest`（79）是唯一一棵超过 10 的子树，且它不在默认层**——它是
+`external-protocols` feature 下的可选层依赖，默认构建的 `cargo tree` 里为 0 条。
+这个数字正是 §1.5 准入四问第 3 问要的答案：「说明为什么不能做成可选层」在这里
+反过来了——**它已经被做成可选层**，所以 79 棵子树不进纯 L0 版单二进制（§19.3）。
+若将来有人提议把 HTTP 客户端转进默认层，79 这个数字就是必须重新论证的依据
+（§19.6 的「默认层出现新的直接依赖而本表未登记，视为架构变更」）。
 
 ### YAML 解析库的选型证据
 
@@ -431,12 +448,20 @@ crates.io 元数据（2026-11-09 查 crates.io API 与 `cargo info`）：
 proc-macro 系）已是默认层既有依赖，新增成本集中在 YAML 解析器自身与
 `indexmap` / `smallvec` / `itoa` / `ryu` 这几个小工具库。
 
-**版本口径**：`Cargo.lock` 当前锁 `noyalib` 0.0.15，crates.io 最新为 0.0.58。
-**不是漏升级，是 MSRV 约束**：0.0.58 的 `rust-version` 是 1.89.0，0.0.15 的是
-1.85.0，而本仓库 `rust-version = "1.85"`（§19.6 的「禁止版本通配」按主版本
-约束，精确版本交给 `Cargo.lock`）。cargo 的 MSRV 感知解析因此选到 0.0.15。
-升级路径是抬 `rust-version` 后单独提交 `cargo update`，按 §19.6 的「`cargo update`
-单独提交，不与功能改动混在一起」纪律走。
+**版本口径**：`Cargo.lock` 当前锁 `noyalib` 0.0.58（crates.io 最新版），新增传递
+依赖 `libm` 0.2.16。
+
+**此前锁的是 0.0.15，不是漏升级，是 MSRV 约束**：0.0.58 的 `rust-version` 是
+1.89.0，0.0.15 的是 1.85.0，而当时仓库 `rust-version = "1.85"`，cargo 的 MSRV
+感知解析按仓库声明选到 0.0.15。**2026-11-09 按用户要求抬 MSRV 至 1.89**
+（noyalib 0.0.58 的 MSRV；不抬到本机工具链版本，避免无谓抬高门槛），并按
+§19.6 的「`cargo update` 单独提交，不与功能改动混在一起」纪律升版到 0.0.58。
+
+**抬 MSRV 的连带影响**：noyalib 0.0.58 的子树从 19 降到 12（实现换了），
+`tracing-subscriber` 的子树从 20 升到 27。**随后的全量 `cargo update`**（把 21 个
+包升到 Rust 1.89 兼容的最高版本，含 `image` 0.25.9→0.25.10、`encoding_rs`
+0.8.35→0.8.44、`ignore` 0.4.30→0.4.34）让默认构建规模从 109 升到 114 行。
+仓库 MSRV 的口径说明见 §19.6。
 
 **选型落点**：§19.6 默认层台账的一行，准入四问逐条回答见
 [architecture-review-2026-11-09-config-layer.md](../architecture-review-2026-11-09-config-layer.md)。
@@ -472,3 +497,67 @@ proc-macro 系）已是默认层既有依赖，新增成本集中在 YAML 解析
 2. 机制下沉（指纹复核 / 行锚点 / 字节快照 / 原子写）在设计上更可靠，但成立前提是「所有写都经由受控工具层」。DSH 不满足该前提，故不能照搬。
 3. 本次修订据此把边界写成决策：§18.6 明确 sidecar 不覆盖客户端内置工具的写，§20.4 补两行覆盖不到的场景；客户端侧「先读」约束不因接入 toolgate 而放宽。
 
+---
+
+## E.10 systemone 协议的来源与本机实测（2026-11-09）
+
+> 本节是**协议来源与实测记录**，不是架构约束；协议决策落在 §18.1，形状映射落在
+> §3.10，验收形态落在 §14 阶段 1。
+
+### 协议来源
+
+- **官方文档（一手）**：StartLuxLabs/StartLux-Decision 的 `docs/api.md` 与 README，
+  2026-11-09 取。定义了 `POST /v1/systemone`（别名 `/v1/decisions`）的请求与
+  响应形状、`noul` / `choice` / `score` 三种问题类型，以及 `none_probability`
+  的告警语义（官方建议阈值 0.2）。
+- **官方定义（一手）**：`noul` 是 yes 的概率；`score` 是量表上的等级期望值。
+
+### 本机实测
+
+本机 127.0.0.1:8090 运行 `startlux-decide serve`，模型
+StartLux-Decision-v1.1-4B-AutoThink。端点 `POST /v1/systemone` 实跑记录：
+
+| # | state | 问题（措辞） | 类型 | 实测值 |
+|---|---|---|---|---|
+| 1 | `这段 Python 代码有语法错误：def f(: pass` | 这段代码**有语法错误**吗？ | noul | 0.960（P(有错)） |
+| 2 | 同一句 | 这段代码**语法正确**吗？ | noul | 0.017（P(正确)） |
+| 3 | `订单号 A-123 已被标记为已发货，运费 0 元。` | 这个订单是**已发货**状态吗？ | noul | 0.997（P(是)） |
+| 4 | `今天天气不错，适合散步。` | 这个订单**已经发货**了吗？ | noul | 0.126（P(是)，state 未提及） |
+| 5 | `这是一段 Python 代码：def f(: pass` | 这段代码的问题是什么？（criteria：语法错误 / 运行时错误 / 逻辑错误） | choice | `probabilities` = 0.637 / 0.120 / 0.243，`confidence` = 0.455，`none_probability` = 0.505 |
+
+**怎么读第 1、2 行**：同一句 state，把问题方向反过来，概率从 0.960 掉到 0.017，
+两者互补接近 1——因为 `noul` 的语义是 **P(肯定回答为真)**（官方定义「noul is the
+probability of yes」）。**概率相对 state 成立、方向明确**，所以门控可以直接按
+P(是) 走，与 §7.2 同向（≥0.85 采用 / 0.60–0.85 标 LOW_CONFIDENCE / <0.60
+两视图都给）。
+
+第 4 行尤其关键：state 里没有订单信息，模型给的是「低概率但非零」（0.126）而不是
+编造——概率的连续性正是门控可用的前提。
+
+第 5 行的 `none_probability` = 0.505 说明模型自认「三个选项都不够合适」——这正是
+该字段存在的理由（告警而非硬选）。但本轮 §3.10 的 systemone 适配器只映射
+`noul`，classify 走 `choice` 的映射未落（§18.1 能力表标「受限」）。
+
+### 对照：jev 类判定模型走 chat 协议会退化
+
+同机实测（2026-11-09）：d3-nano 经 llama-server 的 `/v1/chat/completions` 调用，
+返回 `finish_reason=length`，内容是重复 token 序列（形如 `IAHO-YA-IH` 循环，无语义），
+`usage.completion_tokens` = 40（撞上限）。**这不是「模型坏了」**，是
+「用错协议」的特征——d3-nano 与 StartLux 都是 jev 类 systemone 模型，正确形态是
+`/v1/systemone`（命名问题 → 校准概率）。判据与处理见 §3.4。
+
+**第 4 组的意义**：`choice` 类型的 `none_probability` 达 0.505，说明模型自认
+「三个选项都不够合适」——这正是该字段存在的理由（告警而非硬选）。但本轮 §3.10 的
+systemone 适配器只映射 `noul`，classify 走 `choice` 的映射未落（§18.1 能力表
+标「受限」）。
+
+### 对照：openai 协议的 logprobs
+
+实测 llama.cpp 的 `/v1/chat/completions` **带 `logprobs`**（token 级概率），
+但那是「下一个 token 的分布」，映射到 §3.2 decide 契约的「每个问题一个概率」还需
+额外约定（多 token 答案如何聚合、答案在序列中的位置如何定位）。所以 §18.1 能力表
+里 openai 的 decide 标「受限」的结论成立，理由是实测后的具体依据而非待办。
+anthropic / responses 的 logprobs 能力本轮未实测，表中保持原状。
+
+**注意与上一节的区别**：logprobs 的「受限」是**能调通、映射缺约定**；jev 类模型走
+chat 协议的「退化」是**协议层就不对**。两者不是同一个问题。

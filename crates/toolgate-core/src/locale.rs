@@ -387,6 +387,32 @@ fn en(zh: &str) -> Option<&'static str> {
         }
         "未知 config 子命令：{other}" => "Unknown config subcommand: {other}",
         "槽位绑定：{summary}" => "Slot bindings: {summary}",
+        // CLI 侧（§18.9 配置层 / §14 阶段 1 判定调试面）
+        "decide 需要 --state。" => "decide requires --state.",
+        "decide 需要至少一个 --question。" => "decide requires at least one --question.",
+        "decide 槽位未绑定模型。" => "The decide slot has no model bound.",
+        "在配置的 models 里让某个模型的 serves 含 decide" => {
+            "Let a model in the config serve decide via serves"
+        }
+        "当前构建未启用外部协议客户端（external-protocols）。" => {
+            "This build has no external protocol client (external-protocols)."
+        }
+        "用 cargo build --features external-protocols 重新构建后再试" => {
+            "Rebuild with cargo build --features external-protocols and retry"
+        }
+        "判定调用失败：{e}" => "Decide call failed: {e}",
+        "判定结果形状不符合槽位契约：{e}" => {
+            "Decide result violates the slot contract: {e}"
+        }
+        "问题：{q}" => "question: {q}",
+        "概率：{p}" => "probability: {p}",
+        "门控结论：采用" => "gate: adopt",
+        "门控结论：低置信" => "gate: adopt with low confidence",
+        "门控结论：两种视图" => "gate: both views",
+        "整体门控结论：{gate}" => "overall gate: {gate}",
+        "判定耗时 {ms} ms" => "decide took {ms} ms",
+        "--question 需要一个文本参数。" => "--question requires a text argument.",
+        "--state 需要一个文本参数。" => "--state requires a text argument.",
         _ => return None,
     })
 }

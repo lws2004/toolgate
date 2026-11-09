@@ -439,6 +439,17 @@ pub enum ConfidenceGate {
     BothViews,
 }
 
+impl ConfidenceGate {
+    /// 机器可读形态：稳定小写串（§7.2）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConfidenceGate::Adopt => "adopt",
+            ConfidenceGate::AdoptWithLowConfidence => "adopt_with_low_confidence",
+            ConfidenceGate::BothViews => "both_views",
+        }
+    }
+}
+
 /// §7.2 的三档门控。纯函数，同输入同输出（§16.3）。
 pub fn confidence_gate(p: f64) -> ConfidenceGate {
     if p >= 0.85 {

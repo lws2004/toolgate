@@ -17,7 +17,8 @@ use toolgate_core::config::{
     ConfigError, ConfigErrors, ResolvedConfig, default_config_path, load_config,
 };
 use toolgate_core::locale::{Language, localize_value, tf};
-use toolgate_core::slots::SlotKind;
+use toolgate_core::slm::{DecideOutcome, SlotCallError, SlotClient};
+use toolgate_core::slots::{ConfidenceGate, DecideInput, SlotKind, confidence_gate};
 use toolgate_core::tools::{ToolContext, all_specs, dispatch};
 use toolgate_mcp::McpServer;
 
@@ -29,15 +30,19 @@ const USAGE: &str = "\
   list                  列出全部工具与入参 schema
   call <工具名> [JSON]   直接调用一次工具，参数是 JSON 对象（调试用）
   config check          校验配置文件并打印五个槽位的最终绑定（§18.9）
+  decide                调用 decide 槽位判定一次并打印概率与门控结论（调试用）
 
 选项:
   --config <路径>       指定配置文件路径（默认 ~/.toolgate/config.yaml）
-  --json                config check 以 JSON 输出结果
+  --json                config check 与 decide 以 JSON 输出结果
+  --state <文本>        decide 的待判定状态（必填）
+  --question <问题>     decide 的判定问题，可重复（至少一个）
 
 示例:
   toolgate serve
   toolgate list --config ~/.toolgate/config.yaml
   toolgate config check
+  toolgate decide --state \"The sky is blue.\" --question \"Is the sky blue?\"
   toolgate call read '{\"path\":\"Cargo.toml\"}'
 ";
 
@@ -49,15 +54,19 @@ Subcommands:
   list                  List all tools and their input schemas
   call <tool> [JSON]     Invoke one tool directly (debug only)
   config check          Validate the config file and print the five slot bindings (§18.9)
+  decide                Run one decide-slot judgment and print probabilities and the gate
 
 Options:
   --config <path>       Config file path (default ~/.toolgate/config.yaml)
-  --json                Print the config check result as JSON
+  --json                Print the config check and decide results as JSON
+  --state <text>        State to judge for decide (required)
+  --question <question> Decision question for decide; repeatable (at least one)
 
 Examples:
   toolgate serve
   toolgate list --config ~/.toolgate/config.yaml
   toolgate config check
+  toolgate decide --state \"The sky is blue.\" --question \"Is the sky blue?\"
   toolgate call read '{\"path\":\"Cargo.toml\"}'
 ";
 
@@ -224,6 +233,13 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        "decide" => {
+            let decide_args = match parse_decide_args(lang, &args[1..]) {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
+            run_decide(lang, decide_args).await
+        }
         "config" => match args.get(1).map(String::as_str) {
             Some("check") => {
                 let (config_path, json_out) = match parse_config_check_args(lang, &args[2..]) {
@@ -324,6 +340,291 @@ fn parse_config_check_args(
         }
     }
     Ok((path, json_out))
+}
+
+/// decide 子命令的参数。
+struct DecideArgs {
+    config_path: Option<PathBuf>,
+    state: Option<String>,
+    questions: Vec<String>,
+    json_out: bool,
+}
+
+/// 解析 decide 的 --config / --state / --question / --json 参数。
+fn parse_decide_args(lang: Language, args: &[String]) -> Result<DecideArgs, ExitCode> {
+    let mut config_path: Option<PathBuf> = None;
+    let mut state: Option<String> = None;
+    let mut questions: Vec<String> = Vec::new();
+    let mut json_out = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--config" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("{}", tf(lang, "--config 需要一个路径参数。", &[]));
+                    return Err(ExitCode::FAILURE);
+                };
+                config_path = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--state" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("{}", tf(lang, "--state 需要一个文本参数。", &[]));
+                    return Err(ExitCode::FAILURE);
+                };
+                state = Some(value.clone());
+                i += 2;
+            }
+            "--question" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("{}", tf(lang, "--question 需要一个文本参数。", &[]));
+                    return Err(ExitCode::FAILURE);
+                };
+                questions.push(value.clone());
+                i += 2;
+            }
+            "--json" => {
+                json_out = true;
+                i += 1;
+            }
+            other => {
+                eprintln!(
+                    "{}",
+                    tf(lang, "未知参数：{other}", &[("other", other.to_owned())])
+                );
+                return Err(ExitCode::FAILURE);
+            }
+        }
+    }
+    Ok(DecideArgs {
+        config_path,
+        state,
+        questions,
+        json_out,
+    })
+}
+
+/// decide：读配置 → 调 decide 槽位 → 打印每问概率与 §7.2 门控结论。
+async fn run_decide(lang: Language, args: DecideArgs) -> ExitCode {
+    let Some(state) = args.state else {
+        eprintln!("{}", tf(lang, "decide 需要 --state。", &[]));
+        return ExitCode::FAILURE;
+    };
+    if args.questions.is_empty() {
+        eprintln!("{}", tf(lang, "decide 需要至少一个 --question。", &[]));
+        return ExitCode::FAILURE;
+    }
+
+    let cfg = match load_cli_config(lang, args.config_path.as_deref()) {
+        ConfigOutcome::Resolved(cfg) => cfg,
+        ConfigOutcome::Missing => {
+            report_errors(
+                lang,
+                &ConfigErrors {
+                    items: vec![ConfigError {
+                        code: "CONFIG_FILE_NOT_FOUND".to_owned(),
+                        field: default_config_path().to_string_lossy().into_owned(),
+                        value: None,
+                        expected: tf(lang, "存在的配置文件路径", &[]),
+                        fix: tf(lang, "检查路径或先创建文件", &[]),
+                    }],
+                },
+                args.json_out,
+            );
+            return ExitCode::FAILURE;
+        }
+        ConfigOutcome::Failed(errors) => {
+            report_errors(lang, &errors, args.json_out);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // decide 槽位必须绑定模型，否则无法判定（§3.8 空槽位降级到机械路径，不做语义判定）。
+    let bound = cfg
+        .bindings
+        .iter()
+        .find(|b| b.slot == SlotKind::Decide && b.model_id.is_some());
+    if bound.is_none() {
+        eprintln!("{}", tf(lang, "decide 槽位未绑定模型。", &[]));
+        eprintln!(
+            "{}",
+            tf(lang, "在配置的 models 里让某个模型的 serves 含 decide", &[])
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let input = DecideInput {
+        state: json!(state),
+        images: None,
+        questions: args.questions.clone(),
+    };
+
+    let client = SlotClient::new(cfg);
+    let outcome = match client.decide(&input).await {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            report_decide_error(lang, &err);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    print_decide_outcome(lang, &outcome, args.json_out)
+}
+
+/// 打印判定调用失败：事实 + 可执行的下一步（§1.4.5）。
+fn report_decide_error(lang: Language, err: &SlotCallError) {
+    match err {
+        SlotCallError::NotBound { slot } => {
+            eprintln!(
+                "{}",
+                tf(
+                    lang,
+                    "槽位 {slot} 未绑定模型。",
+                    &[("slot", slot.as_str().to_owned())]
+                )
+            );
+            eprintln!(
+                "{}",
+                tf(
+                    lang,
+                    "在配置的 models 里让某个模型的 serves 含 {slot}",
+                    &[("slot", slot.as_str().to_owned())]
+                )
+            );
+        }
+        SlotCallError::ClientUnavailable { slot, reason } => {
+            eprintln!(
+                "{}",
+                tf(
+                    lang,
+                    "槽位 {slot} 不可用：{reason}",
+                    &[
+                        ("slot", slot.as_str().to_owned()),
+                        ("reason", reason.clone())
+                    ]
+                )
+            );
+            eprintln!(
+                "{}",
+                tf(
+                    lang,
+                    "用 cargo build --features external-protocols 重新构建后再试",
+                    &[]
+                )
+            );
+        }
+        SlotCallError::Transport { slot, reason } => {
+            eprintln!(
+                "{}",
+                tf(
+                    lang,
+                    "判定调用失败：{slot} {reason}",
+                    &[
+                        ("slot", slot.as_str().to_owned()),
+                        ("reason", reason.clone())
+                    ]
+                )
+            );
+            eprintln!(
+                "{}",
+                tf(
+                    lang,
+                    "确认判定服务已启动且 base_url 与端口可达，再重试",
+                    &[]
+                )
+            );
+        }
+        SlotCallError::Contract { slot, reason } => {
+            eprintln!(
+                "{}",
+                tf(
+                    lang,
+                    "判定结果形状不符合槽位契约：{slot} {reason}",
+                    &[
+                        ("slot", slot.as_str().to_owned()),
+                        ("reason", reason.clone())
+                    ]
+                )
+            );
+            eprintln!(
+                "{}",
+                tf(lang, "确认上游返回的答案是 noul 类型且概率在 [0,1]", &[])
+            );
+        }
+    }
+}
+
+/// 打印判定结果：每问一行概率与门控结论，最后一行给整体门控结论。
+fn print_decide_outcome(lang: Language, outcome: &DecideOutcome, json_out: bool) -> ExitCode {
+    // answers 的键是问题原文（core 解析时已从 qN 回映），值带概率。
+    let mut answers: Vec<(String, f64)> = outcome
+        .output
+        .answers
+        .iter()
+        .map(|(question, answer)| (question.clone(), answer.probability))
+        .collect();
+    answers.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if json_out {
+        let payload = json!({
+            "ok": true,
+            "answers": answers
+                .iter()
+                .map(|(question, probability)| json!({
+                    "question": question,
+                    "probability": probability,
+                    "gate": gate_label(confidence_gate(*probability)),
+                }))
+                .collect::<Vec<_>>(),
+            "gate": gate_label(outcome.gate),
+            "latencyMs": outcome.latency_ms,
+        });
+        println!("{}", pretty_json(lang, &payload));
+        return ExitCode::SUCCESS;
+    }
+
+    for (question, probability) in &answers {
+        println!(
+            "{}",
+            tf(lang, "问题：{q}", &[("q", question.as_str().to_owned())])
+        );
+        println!(
+            "  {}",
+            tf(lang, "概率：{p}", &[("p", format!("{probability:.4}"))])
+        );
+        println!("  {}", gate_text(lang, confidence_gate(*probability)));
+    }
+    println!(
+        "{}",
+        tf(
+            lang,
+            "整体门控结论：{gate}",
+            &[("gate", gate_label(outcome.gate).to_owned())]
+        )
+    );
+    println!(
+        "{}",
+        tf(
+            lang,
+            "判定耗时 {ms} ms",
+            &[("ms", outcome.latency_ms.to_string())]
+        )
+    );
+    ExitCode::SUCCESS
+}
+
+/// 门控三档的机器可读标签（§7.2）：采用 / 低置信 / 两种视图。
+fn gate_label(gate: ConfidenceGate) -> &'static str {
+    gate.as_str()
+}
+
+/// 门控三档的人读结论。
+fn gate_text(lang: Language, gate: ConfidenceGate) -> String {
+    match gate {
+        ConfidenceGate::Adopt => tf(lang, "门控结论：采用", &[]),
+        ConfidenceGate::AdoptWithLowConfidence => tf(lang, "门控结论：低置信", &[]),
+        ConfidenceGate::BothViews => tf(lang, "门控结论：两种视图", &[]),
+    }
 }
 
 /// 加载配置的四种结局：解析成功 / 文件缺失 / 校验失败。

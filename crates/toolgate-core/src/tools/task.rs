@@ -161,10 +161,10 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
     let exit_for_wait = exit.clone();
     tokio::spawn(async move {
         let mut guard = child_for_wait.lock().await;
-        if let Ok(status) = guard.wait().await {
-            if let Ok(mut e) = exit_for_wait.lock() {
-                *e = status.code();
-            }
+        if let Ok(status) = guard.wait().await
+            && let Ok(mut e) = exit_for_wait.lock()
+        {
+            *e = status.code();
         }
     });
 
