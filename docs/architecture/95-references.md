@@ -561,3 +561,39 @@ anthropic / responses 的 logprobs 能力本轮未实测，表中保持原状。
 
 **注意与上一节的区别**：logprobs 的「受限」是**能调通、映射缺约定**；jev 类模型走
 chat 协议的「退化」是**协议层就不对**。两者不是同一个问题。
+
+### 对照：本机 typed-decide 网关的判定接口
+
+> 来源：本机 `~/.agents/skills/typed-decide/references/gateway-and-backends.md` 与
+> `typesafe-official-skill.md`（2026-11-09 取）；官方文档 docs.typesafe.ai。
+> 本节是**接口事实记录**，对齐口径落在 §18.1 与 §13.4。
+
+**端点与形状**（网关 `:4000/v1/decide/*`，Bearer master key）：
+
+| 端点 | 入参 | 出参（`result` 内层字段） |
+|---|---|---|
+| `POST /v1/decide/noul` | `state, question, criteria?` | `probability, value, margin` |
+| `POST /v1/decide/choice` | `state, question, options[]` | `value, probability, margin, distribution, confidence` |
+| `POST /v1/decide/score` | `state, question, levels[]` | `value, level, margin, distribution, confidence, top_probability` |
+| `POST /v1/decide/batch` | `state, questions{qid:{type,instructions,criteria}}` | `{qid: 与单问同构的结果}` |
+
+**响应是三层包装**：三个 POST 判定端点统一返回 `{ok: true, result: {…}, latency_ms: N}`，
+字段在 `result` 内层。**按顶层直接取 `value` / `probability` 只会拿到空对象**——
+来源文件明确记了这个坑（「本次即因此白跑一轮」）。`GET /v1/decide/health` 是例外：
+字段平铺在同一层，没有 `result` 包装。`latency_ms` **在台账命中时为 0**。
+
+**幂等台账**：判定统一走网关 client，带幂等键；台账按
+`sha256(primitive + model + state + question + 选项)` 落盘，同一输入永远同一决策，
+命中时零上游调用、延迟降到 0ms（返回 `cached:true`）。这是本机链路「重复判定没有
+成本」的原因，也是 §18.1 要求**远程判定源必须带幂等键**的参照。
+
+**TypeSafe 三原语**：`noul`（yes/no 概率）、`choice`（候选择一并给逐候选分布）、
+`score`（有序量表，给逐级分布与期望等级）。本机 `:8090` 的 startlux-decision 原生
+提供 `/v1/systemone`（命名问题 + noul/choice/score），与上面的 batch 形态同源——
+toolgate 上一轮已接它（§18.1）。
+
+**与 toolgate 的关系**：判定服务侧的三原语比 §3.2 的 decide 契约**更宽**（契约只有
+「每个问题一个概率」，没有类型维度）。这个差距本轮评估过「要不要给契约加类型
+维度」，结论是**不采纳**（理由与重新评估的触发条件见
+[architecture-review-2026-11-09-typed-decide-align.md](../architecture-review-2026-11-09-typed-decide-align.md)
+第 5 节）——**§3.2 正文保持不动**。
