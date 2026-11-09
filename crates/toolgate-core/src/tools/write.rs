@@ -71,7 +71,10 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         content.len()
     );
     if let Some(s) = &snapshot {
-        body.push_str(&format!("\n旧内容已快照：{}（需要回滚时读它再写回）", s.path.display()));
+        body.push_str(&format!(
+            "\n旧内容已快照：{}（需要回滚时读它再写回）",
+            s.path.display()
+        ));
     }
 
     Ok(ToolResponse::text(body).with_meta(json!({
@@ -92,12 +95,9 @@ mod tests {
     async fn creates_file_and_parents() {
         let dir = std::env::temp_dir().join(format!("tg-write-{}", std::process::id()));
         let ctx = ToolContext::new(&dir).expect("ctx");
-        let resp = run(
-            &json!({ "path": "a/b/c.txt", "content": "hello\n" }),
-            &ctx,
-        )
-        .await
-        .expect("write ok");
+        let resp = run(&json!({ "path": "a/b/c.txt", "content": "hello\n" }), &ctx)
+            .await
+            .expect("write ok");
         assert_eq!(resp.meta["created"], json!(true));
         let read_back = std::fs::read_to_string(dir.join("a/b/c.txt")).expect("read back");
         assert_eq!(read_back, "hello\n");

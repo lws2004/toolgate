@@ -172,10 +172,14 @@ mod tests {
     #[tokio::test]
     async fn initialize_negotiates_version() {
         let mut s = test_server();
-        let resp = call(&mut s, json!({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": { "protocolVersion": "2026-07-28" }
-        })).await;
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": "2026-07-28" }
+            }),
+        )
+        .await;
         assert_eq!(resp["result"]["protocolVersion"], json!("2026-07-28"));
         assert_eq!(resp["result"]["serverInfo"]["name"], json!("toolgate"));
     }
@@ -183,30 +187,45 @@ mod tests {
     #[tokio::test]
     async fn initialize_falls_back_on_unknown_version() {
         let mut s = test_server();
-        let resp = call(&mut s, json!({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": { "protocolVersion": "1999-01-01" }
-        })).await;
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": "1999-01-01" }
+            }),
+        )
+        .await;
         assert_eq!(resp["result"]["protocolVersion"], json!("2026-07-28"));
     }
 
     #[tokio::test]
     async fn tools_list_returns_six_tools() {
         let mut s = test_server();
-        let resp = call(&mut s, json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).await;
+        let resp = call(
+            &mut s,
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        )
+        .await;
         let tools = resp["result"]["tools"].as_array().expect("tools");
         assert_eq!(tools.len(), 6);
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(names, vec!["read", "write", "edit", "search", "bash", "task"]);
+        assert_eq!(
+            names,
+            vec!["read", "write", "edit", "search", "bash", "task"]
+        );
     }
 
     #[tokio::test]
     async fn unknown_tool_returns_is_error() {
         let mut s = test_server();
-        let resp = call(&mut s, json!({
-            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-            "params": { "name": "nope", "arguments": {} }
-        })).await;
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "nope", "arguments": {} }
+            }),
+        )
+        .await;
         assert_eq!(resp["result"]["isError"], json!(true));
     }
 
@@ -237,7 +256,11 @@ mod tests {
     #[tokio::test]
     async fn unknown_method_returns_jsonrpc_error() {
         let mut s = test_server();
-        let resp = call(&mut s, json!({ "jsonrpc": "2.0", "id": 4, "method": "bogus" })).await;
+        let resp = call(
+            &mut s,
+            json!({ "jsonrpc": "2.0", "id": 4, "method": "bogus" }),
+        )
+        .await;
         assert_eq!(resp["error"]["code"], json!(-32601));
     }
 }

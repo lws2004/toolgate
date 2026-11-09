@@ -38,7 +38,10 @@ impl Default for TruncationOptions {
 
 impl TruncationOptions {
     pub fn new(max_lines: usize, max_bytes: usize) -> Self {
-        Self { max_lines, max_bytes }
+        Self {
+            max_lines,
+            max_bytes,
+        }
     }
 }
 

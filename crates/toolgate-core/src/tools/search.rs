@@ -92,9 +92,13 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
 }
 
 /// 内容检索：正则逐行匹配，返回 路径:行号:内容。
-fn search_content(root: &Path, pattern: &str, max_results: usize) -> Result<(String, usize), ToolError> {
-    let re = regex::Regex::new(pattern)
-        .map_err(|e| ToolError::BadArgument(format!("正则无效：{e}")))?;
+fn search_content(
+    root: &Path,
+    pattern: &str,
+    max_results: usize,
+) -> Result<(String, usize), ToolError> {
+    let re =
+        regex::Regex::new(pattern).map_err(|e| ToolError::BadArgument(format!("正则无效：{e}")))?;
 
     let mut out = String::new();
     let mut hits = 0usize;
@@ -130,10 +134,14 @@ fn search_content(root: &Path, pattern: &str, max_results: usize) -> Result<(Str
 }
 
 /// 文件枚举：按子串或通配符匹配文件名。
-fn list_files(root: &Path, pattern: &str, max_results: usize) -> Result<(String, usize), ToolError> {
+fn list_files(
+    root: &Path,
+    pattern: &str,
+    max_results: usize,
+) -> Result<(String, usize), ToolError> {
     let glob = glob_to_regex(pattern);
-    let re = regex::Regex::new(&glob)
-        .map_err(|e| ToolError::BadArgument(format!("通配符无效：{e}")))?;
+    let re =
+        regex::Regex::new(&glob).map_err(|e| ToolError::BadArgument(format!("通配符无效：{e}")))?;
 
     let mut out = String::new();
     let mut hits = 0usize;

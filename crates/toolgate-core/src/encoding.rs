@@ -7,7 +7,7 @@
 //! 唯一必须拒绝的情况是写回时目标编码无法表示新内容（例如往 GBK 文件里
 //! 写 emoji），那时明确报错而不是静默替换成问号。
 
-use encoding_rs::{Encoding, UTF_16BE, UTF_16LE, UTF_8};
+use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 
 /// 识别出的文件编码，附带 BOM 信息。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

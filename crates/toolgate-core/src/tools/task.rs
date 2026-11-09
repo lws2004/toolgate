@@ -84,7 +84,11 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
     let argv: Vec<String> = args
         .get("args")
         .and_then(Value::as_array)
-        .map(|a| a.iter().map(|v| v.as_str().unwrap_or_default().to_owned()).collect())
+        .map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or_default().to_owned())
+                .collect()
+        })
         .unwrap_or_default();
     let cwd = optional_str(args, "cwd")
         .map(|p| ctx.resolve(p))
@@ -235,7 +239,8 @@ async fn kill(args: &Value) -> Result<ToolResponse, ToolError> {
         .kill()
         .await
         .map_err(|e| ToolError::Failed(format!("终止失败：{e}")))?;
-    Ok(ToolResponse::text(format!("已请求终止任务 {task_id}。")).with_meta(json!({ "taskId": task_id })))
+    Ok(ToolResponse::text(format!("已请求终止任务 {task_id}。"))
+        .with_meta(json!({ "taskId": task_id })))
 }
 
 fn list() -> Result<ToolResponse, ToolError> {
@@ -283,8 +288,15 @@ mod tests {
         .expect("start ok");
         let id = resp.meta["taskId"].as_str().expect("taskId").to_owned();
 
-        let listed = run(&json!({ "action": "list" }), &ctx).await.expect("list ok");
-        assert!(listed.content.iter().any(|c| matches!(c, crate::tools::Content::Text(t) if t.contains(&id))));
+        let listed = run(&json!({ "action": "list" }), &ctx)
+            .await
+            .expect("list ok");
+        assert!(
+            listed
+                .content
+                .iter()
+                .any(|c| matches!(c, crate::tools::Content::Text(t) if t.contains(&id)))
+        );
 
         run(&json!({ "action": "kill", "task_id": id }), &ctx)
             .await

@@ -49,10 +49,7 @@ impl fmt::Display for AnchorError {
         match self {
             Self::MissingSeparator => write!(f, "锚点格式应为 行号#哈希，例如 12#f8a2"),
             Self::BadLineNumber(s) => write!(f, "行号必须是正整数，收到：{s}"),
-            Self::BadHash(s) => write!(
-                f,
-                "哈希应为 {ANCHOR_HASH_LEN} 位十六进制字符，收到：{s}"
-            ),
+            Self::BadHash(s) => write!(f, "哈希应为 {ANCHOR_HASH_LEN} 位十六进制字符，收到：{s}"),
         }
     }
 }
@@ -150,7 +147,10 @@ mod tests {
             parse_anchor("3#zzzz"),
             Err(AnchorError::BadHash(_))
         ));
-        assert!(matches!(parse_anchor("3#abc"), Err(AnchorError::BadHash(_))));
+        assert!(matches!(
+            parse_anchor("3#abc"),
+            Err(AnchorError::BadHash(_))
+        ));
     }
 
     #[test]

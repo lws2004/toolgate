@@ -48,9 +48,9 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     let raw_path = required_str(args, "path")?;
     let path = ctx.resolve(raw_path);
 
-    let meta = tokio::fs::metadata(&path).await.map_err(|e| {
-        ToolError::Failed(format!("无法访问 {}：{e}", path.display()))
-    })?;
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| ToolError::Failed(format!("无法访问 {}：{e}", path.display())))?;
 
     if meta.is_dir() {
         return Err(ToolError::Failed(format!(
@@ -94,10 +94,10 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         .collect();
 
     if window.is_empty() {
-        return Ok(ToolResponse::text(format!(
-            "起始行 {offset} 超过文件总行数 {total_lines}。"
-        ))
-        .with_meta(json!({ "totalLines": total_lines, "offset": offset })));
+        return Ok(
+            ToolResponse::text(format!("起始行 {offset} 超过文件总行数 {total_lines}。"))
+                .with_meta(json!({ "totalLines": total_lines, "offset": offset })),
+        );
     }
 
     let window_text = window.join("\n");
@@ -122,7 +122,10 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         let next = offset + shown.len();
         let reason = match truncation.truncated_by {
             Some(crate::truncate::TruncatedBy::Bytes) => {
-                format!("已截断到 {}（字节上限）", format_size(truncation.output_bytes))
+                format!(
+                    "已截断到 {}（字节上限）",
+                    format_size(truncation.output_bytes)
+                )
             }
             _ => format!("已截断到 {} 行（行数上限）", shown.len()),
         };

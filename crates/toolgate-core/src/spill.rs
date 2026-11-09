@@ -138,12 +138,20 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("toolgate-snap-{}", std::process::id()));
         let store = SpillStore::new(&dir).expect("create store");
         let target = Path::new("/tmp/src/main.rs");
-        let snap = store.snapshot(target, "fn old() {}
-").expect("snapshot");
+        let snap = store
+            .snapshot(
+                target,
+                "fn old() {}
+",
+            )
+            .expect("snapshot");
         assert!(snap.path.to_string_lossy().contains("snapshot-main.rs"));
         let restored = std::fs::read_to_string(&snap.path).expect("read back");
-        assert_eq!(restored, "fn old() {}
-");
+        assert_eq!(
+            restored,
+            "fn old() {}
+"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

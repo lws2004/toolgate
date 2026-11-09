@@ -10,8 +10,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use image::{DynamicImage, GenericImageView, ImageEncoder};
 use serde_json::json;
 
-use crate::tools::{Content, ToolResponse};
 use crate::ToolError;
+use crate::tools::{Content, ToolResponse};
 
 /// 压缩流水线的配置。
 #[derive(Debug, Clone)]
@@ -83,17 +83,20 @@ pub fn prepare_with(
         && matches!(mime, "image/png" | "image/jpeg" | "image/webp");
 
     if already_small {
-        return Ok(ok_response(Prepared {
-            mime_type: mime.to_owned(),
-            base64: B64.encode(bytes),
-            sha256: digest,
-            width: ow,
-            height: oh,
-            original_width: ow,
-            original_height: oh,
-            quality: None,
-            resized: false,
-        }, path));
+        return Ok(ok_response(
+            Prepared {
+                mime_type: mime.to_owned(),
+                base64: B64.encode(bytes),
+                sha256: digest,
+                width: ow,
+                height: oh,
+                original_width: ow,
+                original_height: oh,
+                quality: None,
+                resized: false,
+            },
+            path,
+        ));
     }
 
     let has_alpha = img.color().has_alpha();
@@ -107,17 +110,20 @@ pub fn prepare_with(
         if has_alpha {
             if let Some(encoded) = encode_png(&scaled) {
                 if B64.encode(&encoded).len() <= cfg.max_base64_bytes {
-                    return Ok(ok_response(Prepared {
-                        mime_type: "image/png".to_owned(),
-                        base64: B64.encode(&encoded),
-                        sha256: crate::spill::sha256_short(&encoded),
-                        width: w,
-                        height: h,
-                        original_width: ow,
-                        original_height: oh,
-                        quality: None,
-                        resized: round > 0 || w != ow || h != oh,
-                    }, path));
+                    return Ok(ok_response(
+                        Prepared {
+                            mime_type: "image/png".to_owned(),
+                            base64: B64.encode(&encoded),
+                            sha256: crate::spill::sha256_short(&encoded),
+                            width: w,
+                            height: h,
+                            original_width: ow,
+                            original_height: oh,
+                            quality: None,
+                            resized: round > 0 || w != ow || h != oh,
+                        },
+                        path,
+                    ));
                 }
             }
         }
@@ -127,17 +133,20 @@ pub fn prepare_with(
         for &q in cfg.quality_ladder {
             if let Some(encoded) = encode_jpeg(&rgb, q) {
                 if B64.encode(&encoded).len() <= cfg.max_base64_bytes {
-                    return Ok(ok_response(Prepared {
-                        mime_type: "image/jpeg".to_owned(),
-                        base64: B64.encode(&encoded),
-                        sha256: crate::spill::sha256_short(&encoded),
-                        width: w,
-                        height: h,
-                        original_width: ow,
-                        original_height: oh,
-                        quality: Some(q),
-                        resized: round > 0 || w != ow || h != oh,
-                    }, path));
+                    return Ok(ok_response(
+                        Prepared {
+                            mime_type: "image/jpeg".to_owned(),
+                            base64: B64.encode(&encoded),
+                            sha256: crate::spill::sha256_short(&encoded),
+                            width: w,
+                            height: h,
+                            original_width: ow,
+                            original_height: oh,
+                            quality: Some(q),
+                            resized: round > 0 || w != ow || h != oh,
+                        },
+                        path,
+                    ));
                 }
             }
         }
@@ -264,7 +273,11 @@ mod tests {
     fn small_image_passes_through() {
         let png = make_png(64, 64);
         let resp = prepare(&png, "image/png", Path::new("/tmp/x.png")).expect("prepare");
-        assert!(resp.content.iter().any(|c| matches!(c, Content::Image { .. })));
+        assert!(
+            resp.content
+                .iter()
+                .any(|c| matches!(c, Content::Image { .. }))
+        );
         let meta = &resp.meta;
         assert_eq!(meta["resized"], json!(false));
     }
@@ -276,7 +289,10 @@ mod tests {
         let meta = &resp.meta;
         let w = meta["width"].as_u64().expect("width") as u32;
         let h = meta["height"].as_u64().expect("height") as u32;
-        assert!(w <= 1568 && h <= 1568, "压缩后应不超过最长边上限，实际 {w}x{h}");
+        assert!(
+            w <= 1568 && h <= 1568,
+            "压缩后应不超过最长边上限，实际 {w}x{h}"
+        );
         assert_eq!(meta["originalWidth"], json!(3000));
     }
 

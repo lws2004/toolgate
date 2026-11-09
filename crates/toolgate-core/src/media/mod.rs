@@ -84,7 +84,10 @@ mod tests {
 
     #[test]
     fn sniffs_jpeg() {
-        assert_eq!(sniff_mime(b"\xff\xd8\xff\xe0").as_deref(), Some("image/jpeg"));
+        assert_eq!(
+            sniff_mime(b"\xff\xd8\xff\xe0").as_deref(),
+            Some("image/jpeg")
+        );
     }
 
     #[test]

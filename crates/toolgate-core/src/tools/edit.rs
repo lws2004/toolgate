@@ -75,7 +75,11 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     }
 
     let updated = if let Some(anchor_raw) = optional_str(args, "anchor") {
-        apply_anchor_mode(&original, anchor_raw, optional_str(args, "newText").unwrap_or(""))?
+        apply_anchor_mode(
+            &original,
+            anchor_raw,
+            optional_str(args, "newText").unwrap_or(""),
+        )?
     } else if let Some(edits) = args.get("edits").and_then(Value::as_array) {
         apply_text_mode(&original, edits)?
     } else {
@@ -171,7 +175,11 @@ fn split_lines(text: &str) -> Vec<&str> {
 }
 
 /// 行锚点模式：校验哈希后替换单行。
-fn apply_anchor_mode(original: &str, anchor_raw: &str, new_text: &str) -> Result<String, ToolError> {
+fn apply_anchor_mode(
+    original: &str,
+    anchor_raw: &str,
+    new_text: &str,
+) -> Result<String, ToolError> {
     let anchor = parse_anchor(anchor_raw).map_err(|e| ToolError::BadArgument(e.to_string()))?;
     let ending = LineEnding::detect(original);
     let mut lines = split_lines(original);
@@ -220,9 +228,8 @@ fn apply_text_mode(original: &str, edits: &[Value]) -> Result<String, ToolError>
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::BadArgument(format!("edits[{i}] 缺少 newText")))?;
 
-        let (start, len) = locate(original, old).map_err(|msg| {
-            ToolError::Failed(format!("edits[{i}] {msg}"))
-        })?;
+        let (start, len) =
+            locate(original, old).map_err(|msg| ToolError::Failed(format!("edits[{i}] {msg}")))?;
         spans.push((start, len, new.to_owned()));
     }
 
@@ -270,10 +277,7 @@ fn locate(original: &str, old: &str) -> Result<(usize, usize), String> {
     // 归一化匹配：逐行比对，容忍引号/破折号/空白差异。
     let norm_old = normalize(old);
     let spans = line_spans(original);
-    let orig_lines: Vec<&str> = spans
-        .iter()
-        .map(|(s, e)| &original[*s..*e])
-        .collect();
+    let orig_lines: Vec<&str> = spans.iter().map(|(s, e)| &original[*s..*e]).collect();
     let old_lines: Vec<&str> = old.lines().collect();
 
     let mut hits: Vec<usize> = Vec::new();
@@ -337,7 +341,9 @@ fn normalize(text: &str) -> String {
                 .map(|c| match c {
                     '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
                     '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
-                    '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}' => '-',
+                    '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}' => {
+                        '-'
+                    }
                     '\u{00A0}' | '\u{2007}' | '\u{202F}' => ' ',
                     other => other,
                 })
