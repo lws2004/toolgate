@@ -11,9 +11,10 @@ use crate::bash_path::intent_tag;
 use crate::compat::{CompatConfig, resolve_intent};
 use crate::decision::Intent;
 use crate::locale::Language;
+use crate::notice::{ConfidenceViews, Notice};
 use crate::slm::SlotClient;
 use crate::slot_state::SlotState;
-use crate::slots::{SlotKind, SlotSet};
+use crate::slots::{ConfidenceGate, SlotKind, SlotSet};
 use crate::spill::SpillStore;
 use crate::truncate::TruncationOptions;
 
@@ -171,6 +172,22 @@ impl ToolSpec {
             "additionalProperties": true,
             "description": "structuredContent 是程序可读通道（§4.4）；notices 之外的键为各工具特有的程序事实（路径、行数、退出码等）"
         })
+    }
+}
+
+/// §7.2 门控 → 告知：采用且足够确定时不告知；不够确定或两种视图时给 LOW_CONFIDENCE。
+/// bash 与 task 共用，避免各写一份（§28 DRY）。
+pub(crate) fn gate_notices(gate: ConfidenceGate, confidence: f64) -> Vec<Notice> {
+    match gate {
+        ConfidenceGate::Adopt => vec![],
+        ConfidenceGate::AdoptWithLowConfidence => vec![Notice::LowConfidence {
+            p: confidence as f32,
+            views: ConfidenceViews::Local,
+        }],
+        ConfidenceGate::BothViews => vec![Notice::LowConfidence {
+            p: confidence as f32,
+            views: ConfidenceViews::Both,
+        }],
     }
 }
 

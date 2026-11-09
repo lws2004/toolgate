@@ -14,14 +14,14 @@ use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use super::{ToolContext, ToolResponse, ToolSpec, optional_str, optional_usize, required_str};
+use super::{ToolContext, ToolResponse, ToolSpec, gate_notices, optional_str, optional_usize, required_str};
 use crate::ToolError;
 use crate::bash_path::{
     BashDecision, BashMode, DecisionFacts, L1_QUESTION_KEYS, L1_QUESTIONS, estimate_tokens,
     intent_tag, merge_decision, plan_bash, resolve_bash_intent, structured_facts,
 };
 use crate::locale::{t, tformat};
-use crate::notice::{ConfidenceViews, Notice, SlotFallback, budgeted_notices};
+use crate::notice::{Notice, SlotFallback, budgeted_notices};
 use crate::slots::{ConfidenceGate, DecideInput};
 use crate::truncate::{format_size, truncate_tail};
 
@@ -269,21 +269,6 @@ async fn run_decide(ctx: &ToolContext, body: &str) -> Option<DecideRun> {
         decision: merge_decision(&probs),
         gate: outcome.gate,
     })
-}
-
-/// §7.2 门控 → 告知：采用且足够确定时不告知；不够确定或两种视图时给 LOW_CONFIDENCE。
-fn gate_notices(gate: ConfidenceGate, confidence: f64) -> Vec<Notice> {
-    match gate {
-        ConfidenceGate::Adopt => vec![],
-        ConfidenceGate::AdoptWithLowConfidence => vec![Notice::LowConfidence {
-            p: confidence as f32,
-            views: ConfidenceViews::Local,
-        }],
-        ConfidenceGate::BothViews => vec![Notice::LowConfidence {
-            p: confidence as f32,
-            views: ConfidenceViews::Both,
-        }],
-    }
 }
 
 /// 拒绝把 shell 解释器当作命令入口。

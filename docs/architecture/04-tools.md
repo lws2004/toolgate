@@ -11,8 +11,8 @@
 |---|---|---|---|---|
 | read | 读文本/图片/URL | 解码、嗅探、截断；URL 走 fetch.provider | decide 判类型 / sensitivity / best_view；summarize 结构化；vision 看图 | raw / summary / structured / visual |
 | write | 新建或整体覆盖 | 建父目录、写前快照 | 无 | 原文确认 + 快照路径 |
-| edit | 局部修改 | 匹配、锚点校验、快照 | d1 解释失败原因 | diff / 失败归因 |
-| search | 内容检索 / 文件枚举 | 遍历、正则、上限 | d1 rerank（命中 > 20） | 全部 / top-k / 结构化 |
+| edit | 局部修改 | 匹配、锚点校验、快照 | decide 槽位解释失败原因 | diff / 失败归因 |
+| search | 内容检索 / 文件枚举 | 遍历、正则、上限 | rerank 槽位（命中 > 20） | 全部 / top-k / 结构化 |
 | bash | 一次性命令 | 执行、截断、落盘 | decide 判错；summarize 摘要 | raw / summary / structured |
 | task | 后台长任务 | 进程管理、增量读取 | decide 判状态；summarize 摘要 | 原始增量 / 摘要 + 状态 |
 
@@ -147,7 +147,7 @@ content 由固定模板渲染，structuredContent 原样携带同一份 `notices
 | 阶段 | 产出 | 输入 |
 |---|---|---|
 | 决策（`decide_output`，纯函数，§4.5） | `ISOLATION_FALLBACK` / `DEGRADED`（能力/延迟/上游类）/ `SLOT_UNAVAILABLE` | intent、隔离配置、上游能力、槽位可用性 |
-| 执行后（`finalize_notices`，纯函数） | `TRUNCATED` / `REDACTED` / `LOW_CONFIDENCE` / `NORMALIZED` / `UNCALIBRATED` / `LOSSY_DECODE` / `SNIFFED` / `DEGRADED`（压缩熔断） | 执行层观测值：截断量、脱敏计数、d1 概率、匹配级别、解码结果、嗅探结果、压缩结果 |
+| 执行后（`finalize_notices`，纯函数） | `TRUNCATED` / `REDACTED` / `LOW_CONFIDENCE` / `NORMALIZED` / `UNCALIBRATED` / `LOSSY_DECODE` / `SNIFFED` / `DEGRADED`（压缩熔断） | 执行层观测值：截断量、脱敏计数、decide 概率、匹配级别、解码结果、嗅探结果、压缩结果 |
 
 两个函数都是纯函数：同输入同输出。`decide_output` 不读执行结果，`finalize_notices`
 不读配置与模型，二者都不产生副作用；对外只有一个 `notices` 数组。
@@ -160,7 +160,7 @@ content 由固定模板渲染，structuredContent 原样携带同一份 `notices
 |---|---|---|---|
 | `TRUNCATED` | 输出被裁短，或摘要替代原文且原文可回溯 | kept:u64 total:u64 unit:lines\|bytes pointer:option<string> | `[TRUNCATED] kept=2000 total=8734 unit=lines pointer=spill://ab12cd34` |
 | `DEGRADED` | 非隔离原因的输出形态或质量降级（槽位可用但输出被迫变化，含有损压缩） | requested:enum actual:enum reason:enum slot:option<string> | `[DEGRADED] requested=summary actual=none reason=capability_missing slot=summarize` |
-| `LOW_CONFIDENCE` | d1 概率低于门控（§7.2） | p:f32(2) views:both\|local | `[LOW_CONFIDENCE] p=0.62 views=local` |
+| `LOW_CONFIDENCE` | decide 概率低于门控（§7.2） | p:f32(2) views:both\|local | `[LOW_CONFIDENCE] p=0.62 views=local` |
 | `ISOLATION_FALLBACK` | 隔离回退命中（§8.7） | requested:enum actual:enum rule:string reason:enum | `[ISOLATION_FALLBACK] requested=raw actual=structure rule=**/.env* reason=retention_below_threshold` |
 | `SLOT_UNAVAILABLE` | 槽位不可用或未配置 | slot:string fallback:enum | `[SLOT_UNAVAILABLE] slot=vision fallback=metadata` |
 | `REDACTED` | 内容被脱敏 | count:u32 retention:percent(1) | `[REDACTED] count=3 retention=99.4%` |
@@ -437,7 +437,7 @@ pub fn decide_output(input: &DecisionInput) -> DecisionOutput
 `decision_notices` 只含本阶段能决定的形态类告知（`ISOLATION_FALLBACK` / `DEGRADED`
 （能力/上游）/ `SLOT_UNAVAILABLE`，**不含压缩熔断**）；执行后由
 `finalize_notices(decision_notices, observed)` 合并执行事实类告知（截断量、脱敏计数、
-d1 概率、压缩熔断等，§4.4b「生成分两段」）。最终 `notices` 是唯一事实源：content 由它按
+decide 概率、压缩熔断等，§4.4b「生成分两段」）。最终 `notices` 是唯一事实源：content 由它按
 固定模板渲染，structuredContent 原样携带；`meta` 只放程序字段。
 
 **`finalize_notices` 契约**（与 `decide_output` 一样是纯函数）：
@@ -845,7 +845,7 @@ L1/L2/协商：与上面的文件路径完全同一套治理（截断、脱敏�
 对「帮我改这个页面的按钮颜色」这类任务，坐标比原图更有用——它直接告诉
 云端该改哪一行 CSS。
 
-### 5.4 edit —— 三种寻址模式 + d1 解释失败
+### 5.4 edit —— 三种寻址模式 + decide 槽位解释失败
 
 **三种模式，按场景选**
 
@@ -915,7 +915,7 @@ L0 校验：patch 模式额外校验 hunk 行号与内容匹配
 | 1 | 精确字节匹配 | 机械 | 直接应用 |
 | 2 | 行尾归一化（CRLF/LF、尾随空白） | 机械 | 应用，按 §4.4b 的 `NORMALIZED` 告知（level=2 kind=eol） |
 | 3 | 空白归一化（行首缩进、行内多空格、全角空格 / NBSP） | 机械 | 应用，按 §4.4b 的 `NORMALIZED` 告知（level=3 kind=whitespace） |
-| 4 | 语义对齐（内容被重排、模型记的是旧版本） | d1 判定 | 给出「最像的位置 + 差异类型」，能安全改就改，不能才报错 |
+| 4 | 语义对齐（内容被重排、模型记的是旧版本） | decide 槽位判定 | 给出「最像的位置 + 差异类型」，能安全改就改，不能才报错 |
 
 **两条硬约束**
 
@@ -928,7 +928,7 @@ L0 校验：patch 模式额外校验 hunk 行号与内容匹配
 
 **第 4 级是「智能」真正介入的地方**
 
-| 现象 | d1 的判断 | 动作 |
+| 现象 | decide 槽位的判断 | 动作 |
 |---|---|---|
 | 找到高度相似但不完全一致的片段 | 空白 / 缩进差异 | 归一化后应用，返回 diff 供核对 |
 | 相似片段有多处 | 歧义 | 拒绝，列出候选行号 |
@@ -943,7 +943,7 @@ L0 校验：patch 模式额外校验 hunk 行号与内容匹配
 事也交给模型，等于用数百毫秒换 0ms 就能做对的事，还引入了不确定性——同一个
 edit 两次可能给出不同结果，缓存与预期一起失效（§16.3 对策二）。
 
-**失败时的 d1 介入：先对齐，再归因**
+**失败时的 decide 槽位介入：先对齐，再归因**
 
 ```text
 L1 归一化对齐（第 4 级）：在文件里找最相似的候选片段
@@ -1009,7 +1009,7 @@ span（§3.2 的 span 仅在「要求定位时返回」），而且位置本来�
 
 unified diff 的 hunk 头带行号（@@ -12,3 +12,5 @@）。如果文件已经被改过，
 行号会错位。校验规则是：按 hunk 头定位，逐行比对上下文行（空格前缀的行），
-全部匹配才应用。不匹配就报「patch 冲突」并给出实际内容，让 d1 判断是
+全部匹配才应用。不匹配就报「patch 冲突」并给出实际内容，让 decide 槽位判断是
 「文件已变」还是「模型算错了 hunk」。
 
 ### 5.5 task —— 状态判断 + 增量摘要
@@ -1025,6 +1025,45 @@ L2 summarize 增量摘要（仅当 action=read 且累积输出 > 2000 token）
 
 「卡住」的判定值得单说：开发服务器启动后输出不再变化，可能是正常等待，
 也可能是死锁。decide 看最后几行 + 时间间隔能给出概率判断。
+
+#### L1 判定的落地口径：多值语义分解成二元问题
+
+上面图里的 `state?`（四选一）与 `progress?`（三选一）是**多值语义**，但 §3.2 的
+decide 槽位契约是二元形状——「每个问题一个概率」，没有类型维度；systemone 的
+`choice` 类型本轮未映射（§3.10）。所以与 §5.1 同构，把多值语义**分解成七个二元
+问题**，一次请求问完（§13.4 方案 A）：
+
+| 组 | 问题 | 稳定 key | 数 |
+|---|---|---|---|
+| state | 仍在正常运行（正常等待也算） | `state_running` | 1 |
+| state | 已正常完成并退出 | `state_completed` | 1 |
+| state | 输出长时间不再变化、卡住了 | `state_stuck` | 1 |
+| state | 已崩溃或异常退出 | `state_crashed` | 1 |
+| progress | 有新进展 | `progress_made` | 1 |
+| progress | 长时间没有变化 | `progress_no_change` | 1 |
+| progress | 重复同样的报错（报错循环） | `progress_error_loop` | 1 |
+| | **合计** | | **7** |
+
+**归并规则**（把七个二元概率合回多值字段）：
+
+| 字段 | 规则 |
+|---|---|
+| `state` | 四个 state 候选取概率最大者；最大者 < 0.5 → `"unknown"`；否则 `running` / `completed` / `stuck` / `crashed` |
+| `progress` | 三个 progress 候选取概率最大者；最大者 < 0.5 → `"unknown"`；否则 `made` / `no_change` / `error_loop` |
+| `confidence` | min(被选中的 state 类别概率, 被选中的 progress 类别概率)，口径见 §7.3 |
+
+**机械事实与模型判定分工**：`processState` / `exitCode` 由进程表直接给出
+（§5.5「工具层只知道进程还在不在」），不依赖模型；模型给的是输出语义层面的状态
+判断。两者分列在返回里，不互相覆盖。
+
+**判定的 state 是有界窗口**：取累积输出**最后 8000 字符**（§6.4 prefill 预算，与
+§5.1 同源），加上 `exitCode` / `elapsedSecs` 等机械观测——「decide 看最后几行 +
+时间间隔」即落在这里。取尾部是因为卡住与报错循环看最近的输出最准。
+
+**触发条件**沿用 §9.2 与 §5.1：`raw` 不判定；`summary` / `structured` / `auto`
+输出 **≥ 500 token** 才判定，低于门槛由 `exitCode` 机械判断。判定不可用时工具照常
+工作，`state` / `progress` 给 `"unknown"`、`meta.confidence` 为 `null`，按 §3.8
+降级并按 §4.4b 发 `SLOT_UNAVAILABLE` 告知——**不编造状态**（§4.6）。
 
 **task 怎么支持「断点续传」**
 

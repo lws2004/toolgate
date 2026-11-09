@@ -9,7 +9,7 @@
 //! 检查点属于会话层（记录已完成的步骤与未完成的意图）。把两者混在
 //! 一起会让工具依赖会话状态，破坏可测试性。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -18,13 +18,18 @@ use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 
-use super::{ToolContext, ToolResponse, ToolSpec, optional_str, required_str};
+use super::{ToolContext, ToolResponse, ToolSpec, gate_notices, optional_str, required_str};
 use crate::ToolError;
 use crate::bash_path::{estimate_tokens, intent_tag};
 use crate::decision::Intent;
 use crate::locale::{Language, t, tf, tformat};
-use crate::notice::budgeted_notices;
-use crate::task_path::{TaskMode, plan_task, resolve_task_intent, structured_facts};
+use crate::notice::{Notice, SlotFallback, budgeted_notices};
+use crate::slots::ConfidenceGate;
+use crate::task_path::{
+    TASK_L1_QUESTION_KEYS, TASK_L1_QUESTIONS, TaskDecision, TaskDecisionFacts, TaskMode,
+    decision_state_tail, merge_task_decision, plan_task, resolve_task_intent,
+    state_decide_request, structured_facts,
+};
 use crate::truncate::{format_size, truncate_tail};
 
 /// 单任务累积输出上限，超出后丢弃最早的内容。
@@ -47,10 +52,10 @@ fn registry() -> &'static Mutex<HashMap<String, Job>> {
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "task",
-        description: "能做什么：启动、查看、终止后台长任务；action=read 返回累积输出（尾部截断并落盘）与进程状态，intent 协商仅作用于 read。 \
-                      不能做什么：不做任务级断点与完成度判断（归调用方）；不判定卡住/崩溃/报错循环（decide 槽位属可选层，未接入时按 §3.8 降级并告知）；不返回图片。 \
+        description: "能做什么：启动、查看、终止后台长任务；action=read 返回累积输出（尾部截断并落盘）与进程状态，卡住/崩溃/报错循环由 decide 槽位判定，intent 协商仅作用于 read。 \
+                      不能做什么：不做任务级断点与完成度判断（归调用方）；decide 槽位不可用时按 §3.8 降级并告知、不编造状态；不返回图片。 \
                       什么时候用别的工具：一次性等结果的命令用 bash；按内容查找用 search；精确看图用 read。",
-        description_en: "Can: start, inspect and kill background long jobs; action=read returns accumulated output (tail-truncated and spilled) plus process state; intent applies only to read. Cannot: decide task-level checkpoints or completion (caller's job), judge stuck / crash / error loops (decide slot is optional, unavailable degrades per §3.8), or return images. Use instead: bash for one-shot commands, search to find content, read for precise images.",
+        description_en: "Can: start, inspect and kill background long jobs; action=read returns accumulated output (tail-truncated and spilled) plus process state; intent applies only to read. Cannot: decide task-level checkpoints or completion (caller's job), or fabricate states when the decide slot is unavailable (degrades per §3.8); no images. Use instead: bash for one-shot commands, search to find content, read for precise images.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -85,7 +90,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     let lang = ctx.language;
     match required_str(args, "action")? {
         "start" => start(args, ctx).await,
-        "read" => read_output(args, ctx, intent),
+        "read" => read_output(args, ctx, intent).await,
         "kill" => kill(args, lang).await,
         "list" => list(lang),
         other => Err(ToolError::bad_argument(format!(
@@ -198,22 +203,30 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
     .with_meta(json!({ "taskId": task_id, "pid": pid, "label": label })))
 }
 
-fn read_output(args: &Value, ctx: &ToolContext, intent: Intent) -> Result<ToolResponse, ToolError> {
+async fn read_output(args: &Value, ctx: &ToolContext, intent: Intent) -> Result<ToolResponse, ToolError> {
     let task_id = required_str(args, "task_id")?;
-    let reg = registry()
-        .lock()
-        .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?;
-    let job = reg
-        .get(task_id)
-        .ok_or_else(|| ToolError::failed(format!("没有这个任务：{task_id}")))?;
-
-    let raw = job
-        .output
-        .lock()
-        .map(|g| String::from_utf8_lossy(&g).into_owned())
-        .unwrap_or_default();
-    let exit = job.exit.lock().ok().and_then(|g| *g);
-    let elapsed = job.started.elapsed().as_secs();
+    // 先在同步块里收集机械事实并释放 registry 锁，再 await 判定（不跨 await 持锁）。
+    let (raw, exit, elapsed, label, pid) = {
+        let reg = registry()
+            .lock()
+            .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?;
+        let job = reg
+            .get(task_id)
+            .ok_or_else(|| ToolError::failed(format!("没有这个任务：{task_id}")))?;
+        let raw = job
+            .output
+            .lock()
+            .map(|g| String::from_utf8_lossy(&g).into_owned())
+            .unwrap_or_default();
+        let exit = job.exit.lock().ok().and_then(|g| *g);
+        (
+            raw,
+            exit,
+            job.started.elapsed().as_secs(),
+            job.label.clone(),
+            job.pid,
+        )
+    };
 
     let truncation = truncate_tail(&raw, ctx.limits);
     let mut body = truncation.content.clone();
@@ -239,8 +252,8 @@ fn read_output(args: &Value, ctx: &ToolContext, intent: Intent) -> Result<ToolRe
     let plan = plan_task(intent, estimate_tokens(&body)).map_err(ToolError::bad_argument)?;
     let mut meta = json!({
         "taskId": task_id,
-        "label": job.label,
-        "pid": job.pid,
+        "label": label,
+        "pid": pid,
         "running": exit.is_none(),
         "exitCode": exit,
         "elapsedSecs": elapsed,
@@ -249,6 +262,32 @@ fn read_output(args: &Value, ctx: &ToolContext, intent: Intent) -> Result<ToolRe
         "spill": spill_meta,
         "intent": intent_tag(intent),
     });
+
+    // §5.5：L1 判定只在协商层判定要判时跑；判定不可用只降级并告知，工具照常工作（§7.3）。
+    let mut notices = plan.notices.clone();
+    let mut decision_facts = TaskDecisionFacts::default();
+    if plan.should_decide {
+        match run_state_decide(ctx, &body, exit, elapsed).await {
+            Some(run) => {
+                notices.extend(gate_notices(run.gate, run.decision.confidence));
+                decision_facts = TaskDecisionFacts {
+                    state: Some(run.decision.state.clone()),
+                    progress: Some(run.decision.progress.clone()),
+                    confidence: Some(run.decision.confidence),
+                };
+                meta["confidence"] = json!(run.decision.confidence);
+                meta["decision"] = json!({
+                    "state": run.decision.state,
+                    "progress": run.decision.progress,
+                });
+            }
+            None => notices.push(Notice::SlotUnavailable {
+                slot: "decide".to_owned(),
+                fallback: SlotFallback::Mechanical,
+            }),
+        }
+    }
+
     let mut content = body;
     match plan.mode {
         TaskMode::Raw => {}
@@ -261,11 +300,13 @@ fn read_output(args: &Value, ctx: &ToolContext, intent: Intent) -> Result<ToolRe
                 raw.len(),
                 truncation.truncated,
             ));
-            content.push('\n');
-            let ch = budgeted_notices(plan.notices.clone());
-            content.push_str(&ch.text);
-            meta["notices"] = ch.structured;
-            meta["noticeOverflow"] = json!(ch.overflow);
+            if !notices.is_empty() {
+                content.push('\n');
+                let ch = budgeted_notices(notices);
+                content.push_str(&ch.text);
+                meta["notices"] = ch.structured;
+                meta["noticeOverflow"] = json!(ch.overflow);
+            }
         }
         TaskMode::Structured => {
             let facts = structured_facts(
@@ -274,12 +315,57 @@ fn read_output(args: &Value, ctx: &ToolContext, intent: Intent) -> Result<ToolRe
                 raw.len(),
                 truncation.truncated,
                 spill_path.as_deref(),
+                &decision_facts,
             );
             content = facts.to_string();
             meta["facts"] = facts;
+            // structured 形态的 content 是纯事实 JSON，告知只进 structuredContent（§4.4b 两个通道）。
+            if !notices.is_empty() {
+                let ch = budgeted_notices(notices);
+                meta["notices"] = ch.structured;
+                meta["noticeOverflow"] = json!(ch.overflow);
+            }
         }
     }
     Ok(ToolResponse::text(content).with_meta(meta))
+}
+
+/// 一次状态判定的结果：归并后的结论与 §7.2 门控档位。
+struct TaskDecideRun {
+    decision: TaskDecision,
+    gate: ConfidenceGate,
+}
+
+/// 跑一次 L1 状态判定；判定不可用（未绑定 / feature 未开 / 调用失败）时返回 None，
+/// 由调用方降级（§7.3）。
+async fn run_state_decide(
+    ctx: &ToolContext,
+    body: &str,
+    exit: Option<i32>,
+    elapsed: u64,
+) -> Option<TaskDecideRun> {
+    let client = ctx.slm.as_ref()?;
+    let tail = decision_state_tail(body);
+    let input = state_decide_request(exit, elapsed, &tail);
+    let outcome = client.decide(&input).await.ok()?;
+    // 按固定 key 归并：answers 的键是问题原文，先按顺序映射到稳定 key。
+    let probs: BTreeMap<String, f64> = TASK_L1_QUESTION_KEYS
+        .iter()
+        .zip(TASK_L1_QUESTIONS.iter())
+        .map(|(key, question)| {
+            let probability = outcome
+                .output
+                .answers
+                .get(*question)
+                .map(|answer| answer.probability)
+                .unwrap_or(0.0);
+            ((*key).to_owned(), probability)
+        })
+        .collect();
+    Some(TaskDecideRun {
+        decision: merge_task_decision(&probs),
+        gate: outcome.gate,
+    })
 }
 
 /// 机械可观测的进程状态行（§4.7：只给事实，不给判断）。
@@ -515,9 +601,30 @@ mod tests {
         let facts: Value = serde_json::from_str(body_of(&resp)).expect("content 应是 JSON");
         assert_eq!(facts["state"], json!("unknown"));
         assert_eq!(facts["progress"], json!("unknown"));
+        assert!(facts["confidence"].is_null());
         assert!(facts["summary"].is_null());
+        // 低于 500 token 门槛不触发判定，因此没有 decide 降级告知（§5.1/§9.2）。
+        assert!(resp.meta.get("notices").is_none());
         assert_eq!(resp.meta["facts"]["state"], json!("unknown"));
         assert_eq!(resp.meta["intent"], json!("structured"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §7.3：到达门槛但判定不可用时降级并告知，工具照常成功（不因判定失败而失败）。
+    #[tokio::test]
+    async fn decide_unavailable_degrades_without_failing() {
+        let (ctx, dir) = task_ctx("no-decide");
+        assert!(ctx.slm.is_none(), "默认构造应当没有槽位客户端");
+        let id = seed_output(&ctx, 3000).await;
+        let resp = run(
+            &json!({ "action": "read", "task_id": id, "intent": "auto" }),
+            &ctx,
+        )
+        .await
+        .expect("read ok");
+        assert!(body_of(&resp).contains("slot=decide"));
+        assert!(resp.meta.get("confidence").is_none());
+        assert!(resp.meta.get("decision").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

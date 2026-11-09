@@ -52,11 +52,11 @@ JSON、minified 代码），offset 续读无能为力。这种情况仍会落盘
 
 ### 9.2 第二层：语义（按判据触发）
 
-| 动作 | 触发条件 | 模型 |
+| 动作 | 触发条件 | 槽位 |
 |---|---|---|
-| 错误判定 | bash/task 输出 > 500 token（L1 判定；低于门槛时由 exitCode 机械判断） | d1 |
-| rerank | search 命中 > 20 | d1 |
-| 摘要 | d1 判定有错且阻断 | LFM3 |
+| 错误判定 | bash/task 输出 > 500 token（L1 判定；低于门槛时由 exitCode 机械判断） | decide 槽位 |
+| rerank | search 命中 > 20 | rerank 槽位 |
+| 摘要 | decide 槽位判定有错且阻断 | summarize 槽位 |
 | 结构化提取 | intent=structured | LFM3 |
 | 图像理解 | read 读到图片且非 visual | VL |
 
