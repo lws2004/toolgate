@@ -7,6 +7,7 @@ pub mod encoding;
 pub mod error;
 pub mod hashline;
 pub mod media;
+pub mod notice;
 pub mod slots;
 pub mod spill;
 pub mod tools;
