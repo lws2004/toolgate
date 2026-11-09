@@ -4,6 +4,7 @@
 //! 工具实现与治理规则。
 
 pub mod encoding;
+pub mod error;
 pub mod hashline;
 pub mod media;
 pub mod spill;

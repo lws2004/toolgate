@@ -8,6 +8,7 @@ use std::io::Write as _;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use toolgate_core::error::{error_response as tool_error_response, govern_error};
 use toolgate_core::tools::{ToolContext, all_specs, dispatch};
 
 /// 支持的 MCP 协议版本，按新到旧排列。
@@ -111,32 +112,22 @@ impl McpServer {
                     .cloned()
                     .unwrap_or_else(|| json!({}));
 
-                match dispatch(name, &args, &self.ctx).await {
-                    Ok(resp) => {
-                        let content: Vec<Value> = resp.content.iter().map(|c| c.to_mcp()).collect();
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "content": content,
-                                "isError": resp.is_error,
-                                "structuredContent": resp.meta,
-                            }
-                        })
+                // 工具级错误走 isError，而不是 JSON-RPC 错误——模型据此自行修正。
+                // Ok 与 Err 都收敛成 ToolResponse，序列化只有一处。
+                let resp = match dispatch(name, &args, &self.ctx).await {
+                    Ok(resp) => resp,
+                    Err(e) => tool_error_response(&govern_error(&e)),
+                };
+                let content: Vec<Value> = resp.content.iter().map(|c| c.to_mcp()).collect();
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": content,
+                        "isError": resp.is_error,
+                        "structuredContent": resp.meta,
                     }
-                    Err(e) => {
-                        // 工具级错误走 isError，而不是 JSON-RPC 错误——
-                        // 这样模型能看到错误文本并自行修正。
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "content": [{ "type": "text", "text": e.to_string() }],
-                                "isError": true,
-                            }
-                        })
-                    }
-                }
+                })
             }
             other => error_response(id, -32601, &format!("不支持的方法：{other}")),
         }
@@ -217,6 +208,30 @@ mod tests {
             "params": { "name": "nope", "arguments": {} }
         })).await;
         assert_eq!(resp["result"]["isError"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_error_carries_next_steps() {
+        let mut s = test_server();
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                "params": { "name": "nope", "arguments": {} }
+            }),
+        )
+        .await;
+        let err = &resp["result"]["structuredContent"]["error"];
+        assert_eq!(err["code"], json!("UNKNOWN_TOOL"));
+        assert!(err["fact"].is_string());
+        assert!(err["reason"].is_string());
+        assert!(err["nextSteps"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(
+            !resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
