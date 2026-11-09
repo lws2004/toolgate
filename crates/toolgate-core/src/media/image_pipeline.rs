@@ -3,6 +3,7 @@
 //! 降级顺序：缩放 → 质量阶梯 → 尺寸再缩 → 熔断。
 //! 每降一档都重新测量 base64 体积，达标即停。
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use base64::Engine as _;
@@ -21,8 +22,10 @@ pub struct PipelineConfig {
     pub max_edge: u32,
     /// base64 文本的硬熔断阈值。
     pub max_base64_bytes: usize,
-    /// 有损编码的质量阶梯，从高到低依次尝试。
+    /// photo 类内容的有损质量阶梯，从高到低依次尝试。
     pub quality_ladder: &'static [u8],
+    /// flat 类内容的保守阶梯：不降到会糊掉文字边缘的档（§10.2b 标定契约）。
+    pub flat_ladder: &'static [u8],
     /// 尺寸兜底轮数：每轮把最长边乘 0.75 重试。
     pub shrink_rounds: u32,
 }
@@ -33,8 +36,92 @@ impl Default for PipelineConfig {
             max_edge: 1568,
             max_base64_bytes: 1_200_000,
             quality_ladder: &[85, 70, 55, 40],
+            flat_ladder: &[85, 70],
             shrink_rounds: 3,
         }
+    }
+}
+
+/// §10.2b 标定契约：由 L0 采样统计量机械判定的内容类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentKind {
+    /// 截图 / 图表 / 文字图：大面积平坦色块，降质量易糊文字。
+    Flat,
+    /// 照片 / 渐变 / 噪声：颜色丰富，可承受更多降质量。
+    Photo,
+}
+
+/// 分类阈值，来自合成样本实测（§10.2b）：不同颜色占比与相邻像素相等占比。
+pub const FLAT_DISTINCT_RATIO: f64 = 0.15;
+pub const FLAT_NEIGHBOR_RATIO: f64 = 0.9;
+
+/// 采样统计量，供分类与基准脚本共用。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContentStats {
+    pub sampled: usize,
+    pub distinct: usize,
+    pub flat_ratio: f64,
+}
+
+/// 网格采样：最多约 64×64 个点，把颜色量化到 5bit/通道后统计多样性，
+/// 并统计水平相邻像素的相等比例。纯函数、零新增依赖。
+pub fn content_stats(rgb: &image::RgbImage) -> ContentStats {
+    let (w, h) = rgb.dimensions();
+    let step_x = (w / 64).max(1);
+    let step_y = (h / 64).max(1);
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut sampled = 0usize;
+    let mut equal_neighbors = 0usize;
+    let mut neighbor_pairs = 0usize;
+    let mut y = 0u32;
+    while y < h {
+        let mut x = 0u32;
+        while x < w {
+            let p = rgb.get_pixel(x, y).0;
+            let key = ((p[0] as u32 >> 3) << 10) | ((p[1] as u32 >> 3) << 5) | (p[2] as u32 >> 3);
+            seen.insert(key);
+            sampled += 1;
+            if x + 1 < w {
+                neighbor_pairs += 1;
+                if p == rgb.get_pixel(x + 1, y).0 {
+                    equal_neighbors += 1;
+                }
+            }
+            x += step_x;
+        }
+        y += step_y;
+    }
+    ContentStats {
+        sampled,
+        distinct: seen.len(),
+        flat_ratio: if neighbor_pairs == 0 {
+            0.0
+        } else {
+            equal_neighbors as f64 / neighbor_pairs as f64
+        },
+    }
+}
+
+/// 按统计量分类：颜色少或大面积同色即 flat，否则 photo。
+pub fn classify_content(rgb: &image::RgbImage) -> ContentKind {
+    let s = content_stats(rgb);
+    let distinct_ratio = if s.sampled == 0 {
+        1.0
+    } else {
+        s.distinct as f64 / s.sampled as f64
+    };
+    if distinct_ratio < FLAT_DISTINCT_RATIO || s.flat_ratio > FLAT_NEIGHBOR_RATIO {
+        ContentKind::Flat
+    } else {
+        ContentKind::Photo
+    }
+}
+
+/// 按内容类型取标定后的阶梯；两条阶梯都来自配置，压缩循环不硬编码档位。
+pub fn ladder_for(kind: ContentKind, cfg: &PipelineConfig) -> &'static [u8] {
+    match kind {
+        ContentKind::Flat => cfg.flat_ladder,
+        ContentKind::Photo => cfg.quality_ladder,
     }
 }
 
@@ -128,9 +215,10 @@ pub fn prepare_with(
             }
         }
 
-        // 有损 JPEG：按质量阶梯逐档下降。
+        // 有损 JPEG：按内容类型选标定后的阶梯，逐档下降（§10.2b）。
         let rgb = scaled.to_rgb8();
-        for &q in cfg.quality_ladder {
+        let ladder = ladder_for(classify_content(&rgb), cfg);
+        for &q in ladder {
             if let Some(encoded) = encode_jpeg(&rgb, q) {
                 if B64.encode(&encoded).len() <= cfg.max_base64_bytes {
                     return Ok(ok_response(
@@ -241,7 +329,7 @@ fn scale_to_edge(img: &DynamicImage, edge: u32) -> DynamicImage {
     img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3)
 }
 
-fn encode_jpeg(rgb: &image::RgbImage, quality: u8) -> Option<Vec<u8>> {
+pub fn encode_jpeg(rgb: &image::RgbImage, quality: u8) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
     let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
     enc.write_image(
@@ -300,6 +388,57 @@ mod tests {
             "压缩后应不超过最长边上限，实际 {w}x{h}"
         );
         assert_eq!(meta["originalWidth"], json!(3000));
+    }
+
+    fn flat_sample() -> image::RgbImage {
+        image::RgbImage::from_fn(256, 256, |x, y| {
+            if (x / 32) % 2 == 0 && y % 16 < 3 {
+                image::Rgb([0, 0, 0])
+            } else {
+                image::Rgb([255, 255, 255])
+            }
+        })
+    }
+
+    fn photo_sample() -> image::RgbImage {
+        image::RgbImage::from_fn(256, 256, |x, y| {
+            let n = (x.wrapping_mul(73856093) ^ y.wrapping_mul(19349663)).wrapping_mul(2654435761);
+            image::Rgb([(n >> 16) as u8, (n >> 8) as u8, n as u8])
+        })
+    }
+
+    #[test]
+    fn content_kinds_are_separable() {
+        assert_eq!(classify_content(&flat_sample()), ContentKind::Flat);
+        assert_eq!(classify_content(&photo_sample()), ContentKind::Photo);
+    }
+
+    #[test]
+    fn flat_ladder_is_conservative_and_configurable() {
+        let cfg = PipelineConfig::default();
+        assert_eq!(ladder_for(ContentKind::Flat, &cfg), &[85u8, 70][..]);
+        assert_eq!(
+            ladder_for(ContentKind::Photo, &cfg),
+            &[85u8, 70, 55, 40][..]
+        );
+        let custom = PipelineConfig {
+            flat_ladder: &[90],
+            ..Default::default()
+        };
+        assert_eq!(ladder_for(ContentKind::Flat, &custom), &[90u8][..]);
+    }
+
+    #[test]
+    fn quality_ladder_bytes_decrease_monotonically() {
+        let rgb = photo_sample();
+        let sizes: Vec<usize> = [85u8, 70, 55, 40]
+            .iter()
+            .map(|&q| encode_jpeg(&rgb, q).expect("encode").len())
+            .collect();
+        assert!(
+            sizes.windows(2).all(|w| w[0] >= w[1]),
+            "体积未随质量下降单调不增: {sizes:?}"
+        );
     }
 
     #[test]
