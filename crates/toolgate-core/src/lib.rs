@@ -18,6 +18,7 @@ pub mod search_path;
 pub mod slot_state;
 pub mod slots;
 pub mod spill;
+pub mod task_path;
 pub mod tools;
 pub mod truncate;
 pub mod understanding;
