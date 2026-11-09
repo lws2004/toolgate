@@ -12,6 +12,7 @@ use super::{
 };
 use crate::ToolError;
 use crate::compat::{CompatConfig, resolve_intent};
+use crate::decision::Intent;
 use crate::hashline::render_anchored;
 use crate::locale::{tf, tformat};
 use crate::media;
@@ -19,9 +20,10 @@ use crate::media::image_pipeline;
 use crate::notice::Notice;
 use crate::notice::budgeted_notices;
 use crate::read_path::{
-    ImageOutcome, ImagePlan, display_path, metadata_facts, metadata_text, plan_image,
+    ImageFacts, ImageOutcome, ImagePlan, display_path, image_decide_questions, merge_image_answers,
+    metadata_facts, metadata_text, plan_image,
 };
-use crate::slots::{SlotKind, VisionInput, VisionTask};
+use crate::slots::{DecideInput, SlotKind, VisionInput, VisionTask};
 use crate::truncate::{TruncationOptions, format_size, truncate_head};
 
 pub fn spec() -> ToolSpec {
@@ -87,7 +89,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     if let Some(mime) = media::detect_image_mime(&path).await? {
         let intent =
             resolve_intent(args, &CompatConfig::default()).map_err(ToolError::bad_argument)?;
-        // §3.10：vision 槽位可用性按绑定 + 能力矩阵真实判定，不硬编码（§7.3 状态要真实）。
+        // §3.10：槽位可用性按绑定 + 能力矩阵真实判定，不硬编码（§7.3 状态要真实）。
         let vision_available = ctx.slm.as_ref().is_some_and(|client| {
             client.is_bound(SlotKind::Vision)
                 && client
@@ -98,8 +100,31 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
                     })
                     .unwrap_or(true)
         });
-        let plan = plan_image(intent, ctx.upstream_vision, vision_available);
-        return image_response(&path, &mime, &meta, &plan, ctx).await;
+        let decide_available = ctx.slm.as_ref().is_some_and(|client| {
+            client.is_bound(SlotKind::Decide)
+                && client
+                    .source_for_slot(SlotKind::Decide)
+                    .map(|source| {
+                        crate::capability::source_slot_capability(source, SlotKind::Decide).grade
+                            == crate::capability::CapabilityGrade::Available
+                    })
+                    .unwrap_or(true)
+        });
+        // §5.3 图片路径 L1：auto / structured / summary 需要 image_kind 与 need_pixels。
+        let ruling = if decide_available
+            && matches!(intent, Intent::Auto | Intent::Structured | Intent::Summary)
+        {
+            image_ruling(&path, &mime, &meta, ctx).await
+        } else {
+            None
+        };
+        let plan = plan_image(
+            intent,
+            ctx.upstream_vision,
+            vision_available,
+            ruling.as_ref().map(|r| &r.facts),
+        );
+        return image_response(&path, &mime, &meta, &plan, ctx, ruling.as_ref()).await;
     }
 
     // §22：按 intent 的确定性预判决定要不要预热；缓存可丢弃，
@@ -222,6 +247,67 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     })))
 }
 
+/// decide 对图片的 L1 判定结果（§5.3 / §7.3）。
+struct ImageRuling {
+    facts: ImageFacts,
+    /// 多问题取各问题概率的最小值（§7.3 的口径）。
+    confidence: f64,
+    latency_ms: u64,
+    /// systemone 的 noul 是校准概率；外部 JSON 适配器为自报值（§3.10）。
+    calibrated: bool,
+}
+
+/// 调 decide 槽位做图片 L1 判定（§5.3 七问）。任何失败返回 None，由调用方走保守路径。
+async fn image_ruling(
+    path: &Path,
+    mime: &str,
+    meta: &std::fs::Metadata,
+    ctx: &ToolContext,
+) -> Option<ImageRuling> {
+    let client = ctx.slm.as_ref()?;
+    let bytes = tokio::fs::read(path).await.ok()?;
+    let prepared = image_pipeline::prepare(&bytes, mime, path).ok()?;
+    let (mime_type, data_base64) = prepared.content.iter().find_map(|c| match c {
+        Content::Image {
+            mime_type,
+            data_base64,
+            ..
+        } => Some((mime_type.clone(), data_base64.clone())),
+        _ => None,
+    })?;
+    let dims = image_pipeline::dimensions(&bytes);
+    let (width, height) = match dims {
+        Some((w, h)) => (Some(w), Some(h)),
+        None => (None, None),
+    };
+    let input = DecideInput {
+        state: json!({
+            "mime": mime,
+            "size": meta.len(),
+            "width": width,
+            "height": height,
+        }),
+        images: Some(vec![json!(format!(
+            "data:{mime_type};base64,{data_base64}"
+        ))]),
+        questions: image_decide_questions(),
+    };
+    let outcome = client.decide(&input).await.ok()?;
+    let facts = merge_image_answers(&outcome.output.answers)?;
+    let confidence = outcome
+        .output
+        .answers
+        .values()
+        .map(|answer| answer.probability)
+        .fold(f64::INFINITY, f64::min);
+    Some(ImageRuling {
+        facts,
+        confidence,
+        latency_ms: outcome.latency_ms,
+        calibrated: outcome.calibrated,
+    })
+}
+
 /// 图片分支的返回组装（§10.1 / §3.8 / §4.4b 两个通道）。
 async fn image_response(
     path: &Path,
@@ -229,7 +315,20 @@ async fn image_response(
     meta: &std::fs::Metadata,
     plan: &ImagePlan,
     ctx: &ToolContext,
+    ruling: Option<&ImageRuling>,
 ) -> Result<ToolResponse, ToolError> {
+    // 非校准概率必须标注（§3.10 / §4.4b）：decide 走外部 JSON 适配器时追加 UNCALIBRATED。
+    let mut effective = plan.clone();
+    if let Some(ruling) = ruling
+        && !ruling.calibrated
+    {
+        effective.notices.push(Notice::Uncalibrated {
+            slot: "decide".to_owned(),
+            adapter: crate::notice::AdapterKind::Json,
+        });
+    }
+    let plan = &effective;
+
     let bytes = tokio::fs::read(path).await?;
     let dims = image_pipeline::dimensions(&bytes);
     let (width, height) = match dims {
@@ -237,25 +336,43 @@ async fn image_response(
         None => (None, None),
     };
 
-    match plan.outcome {
+    let mut resp = match plan.outcome {
         ImageOutcome::Original => {
             let mut resp = image_pipeline::prepare(&bytes, mime, path)?;
             attach_notices(&mut resp, plan.notices.clone(), true);
-            Ok(resp)
+            resp
         }
-        ImageOutcome::Metadata => Ok(metadata_response(
-            path,
-            mime,
-            meta,
-            width,
-            height,
-            plan.notices.clone(),
-            ctx,
-        )),
+        ImageOutcome::Metadata => {
+            metadata_response(path, mime, meta, width, height, plan.notices.clone(), ctx)
+        }
         ImageOutcome::TextUnderstanding => {
-            text_understanding_response(path, mime, meta, dims, plan, ctx, &bytes).await
+            text_understanding_response(path, mime, meta, dims, plan, ctx, &bytes).await?
         }
+        // §10.1 中间区间：结构化在前、原图在后。
+        ImageOutcome::Both => {
+            let mut resp =
+                text_understanding_response(path, mime, meta, dims, plan, ctx, &bytes).await?;
+            // vision 失败时 text_understanding_response 已退回原图，不要重复追加。
+            if !resp
+                .content
+                .iter()
+                .any(|c| matches!(c, Content::Image { .. }))
+            {
+                let original = image_pipeline::prepare(&bytes, mime, path)?;
+                resp.content.extend(original.content);
+            }
+            resp
+        }
+    };
+
+    if let Some(ruling) = ruling {
+        resp.meta["imageKind"] = json!(ruling.facts.kind.as_str());
+        resp.meta["hasText"] = json!(ruling.facts.has_text);
+        resp.meta["needPixels"] = json!(ruling.facts.need_pixels);
+        resp.meta["confidence"] = json!(ruling.confidence);
+        resp.meta["decideLatencyMs"] = json!(ruling.latency_ms);
     }
+    Ok(resp)
 }
 
 /// §10.1:143-162 的元信息降级页；统一走一次预算合并（§4.4b 一个事实源）。
@@ -606,6 +723,17 @@ mod tests {
         ctx.slm = Some(std::sync::Arc::new(crate::slm::SlotClient::new(cfg)));
     }
 
+    /// 同时绑定 decide（systemone）与 vision（openai）的上下文；
+    /// 默认构建下两次真实调用都会降级，用于验证编排与保守路径。
+    fn set_decide_and_vision_slots(ctx: &mut ToolContext) {
+        let cfg = crate::config::parse_config(
+            "models:\n  llm:\n    source: openai\n    base_url: http://127.0.0.1:8090/v1\n    model: demo\n    path: /tmp/model\n    serves: [vision]\n  jev:\n    source: systemone\n    base_url: http://127.0.0.1:8090/v1\n    model: demo\n    serves: [decide]\n",
+            "test.yaml",
+        )
+        .expect("配置应当解析成功");
+        ctx.slm = Some(std::sync::Arc::new(crate::slm::SlotClient::new(cfg)));
+    }
+
     fn text_blocks(resp: &ToolResponse) -> Vec<&str> {
         resp.content
             .iter()
@@ -683,6 +811,70 @@ mod tests {
         let body = text_blocks(&resp).join("\n");
         assert!(body.contains("slot=decide"), "{body}");
         assert!(body.contains("fallback=mechanical"), "{body}");
+        let _ = std::fs::remove_dir_all(ctx.cwd);
+    }
+
+    /// 同时绑定 decide 与 vision：默认构建下两次外部调用都不可用，
+    /// auto 必须优雅降级为原图，且不伪造 imageKind / confidence。
+    #[tokio::test]
+    async fn image_auto_with_decide_and_vision_slots_degrades_to_original() {
+        let (mut ctx, file) = ctx_with_png("auto-both-slots");
+        ctx.upstream_vision = true;
+        set_decide_and_vision_slots(&mut ctx);
+        let resp = run(
+            &json!({ "path": file.to_str().unwrap(), "intent": "auto" }),
+            &ctx,
+        )
+        .await
+        .expect("read ok");
+        assert!(
+            resp.content
+                .iter()
+                .any(|c| matches!(c, Content::Image { .. })),
+            "判定不可用时 auto 应给原图"
+        );
+        assert!(
+            resp.meta.get("imageKind").is_none(),
+            "判定失败不应伪造 imageKind"
+        );
+        let body = text_blocks(&resp).join("\n");
+        assert!(body.contains("slot=decide"), "{body}");
+        let _ = std::fs::remove_dir_all(ctx.cwd);
+    }
+
+    /// §10.1 中间区间（Both）：结构化在前、原图在后；vision 失败时退回原图，
+    /// 但决定判定产出的 meta 仍要如实写入。
+    #[tokio::test]
+    async fn image_both_plan_returns_original_with_ruling_meta() {
+        let (mut ctx, file) = ctx_with_png("both-plan");
+        ctx.upstream_vision = true;
+        set_vision_client(&mut ctx, "openai");
+        let facts = ImageFacts {
+            kind: crate::read_path::ImageKind::Chart,
+            has_text: true,
+            need_pixels: 0.5,
+        };
+        let plan = plan_image(Intent::Auto, true, true, Some(&facts));
+        assert_eq!(plan.outcome, ImageOutcome::Both);
+        let ruling = ImageRuling {
+            facts,
+            confidence: 0.77,
+            latency_ms: 4,
+            calibrated: true,
+        };
+        let meta = std::fs::metadata(&file).expect("meta");
+        let resp = image_response(&file, "image/png", &meta, &plan, &ctx, Some(&ruling))
+            .await
+            .expect("image response");
+        assert!(
+            resp.content
+                .iter()
+                .any(|c| matches!(c, Content::Image { .. })),
+            "vision 失败时 Both 应退回原图"
+        );
+        assert_eq!(resp.meta["imageKind"], json!("chart"));
+        assert_eq!(resp.meta["needPixels"], json!(0.5));
+        assert_eq!(resp.meta["confidence"], json!(0.77));
         let _ = std::fs::remove_dir_all(ctx.cwd);
     }
 }

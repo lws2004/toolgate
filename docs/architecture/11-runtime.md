@@ -225,7 +225,7 @@ vision（多模态 chat 适配器）四条；classify 一条仍未落；§13.4 �
 按收益排序接入，不做并行：
 
 1. **bash**（收益最大）→ decide 判定 + summarize 摘要
-2. **read 图片**（第二）→ classify 槽位分类 + vision 槽位理解
+2. **read 图片**（第二）→ decide 槽位判 image_kind / need_pixels + vision 槽位理解（§5.3 / §10.1）
 3. **search**（第三）→ rerank 槽位
 4. **edit**（第四）→ 四级匹配 + decide 槽位失败归因 + 改动后的事实返回（§5.7）
 5. **task**（第五）→ decide 槽位状态判断
@@ -266,10 +266,20 @@ vision（多模态 chat 适配器）四条；classify 一条仍未落；§13.4 �
   `TextUnderstanding`（压缩流水线 → vision 的 `describe`），上游收图时
   `structured` / `summary` 也走本地理解；调用失败按上游能力降级（收图退压缩后
   原图、不收图退元信息）并按 §4.4b 告知。**按 `image_kind` 分流与 `need_pixels`
-  三档仍未接**（依赖 decide 判定）：`auto` 在判定缺位时保守给原图并告知
-  `slot=decide`，`structured` 的任务档先退化 `describe`。
-- **阶段 2 验收项仍未勾选**：read 图片的 classify/decide 判定与按 kind 分流尚未接入。
-  上面六条是当前进度记录，**不是架构决策的变更**——§5.1、§5.2、§5.4、§5.5、§7.2、§7.3 的契约
+  三档当时未接**（依赖 decide 判定），本轮已由下一条接入。
+- **read 图片的 decide 判定已接入**——auto / structured / summary 走 §5.3 的七问
+  （五类 image_kind + has_text + need_pixels）：image_kind 取五个候选的最大概率、
+  最大者 < 0.5 记 unknown；need_pixels 按 §10.1 三档（不另设阈值）；vision 任务档
+  按 kind 分流（UI 截图 → ground / 文档与代码截图 → OCR / 图表与照片 → describe）。
+  auto 的三档分别给原图 / 结构化 / 两者都给（结构化在前）；decide 不可用时保守给
+  原图并告知。真实链路实测（2026-11-09 本机 StartLux systemone，320x180 合成图）：
+  七问一次调用返回（decideLatencyMs=2674），needPixels=0.708 落中间区间；imageKind
+  判 unknown（合成图不是真实 UI 截图，分类置信不足）——**真实截图样本复核前不勾
+  阶段 2 验收**。
+- **阶段 2 验收项仍未勾选**：read 图片的实现已接入（vision 文本理解 + decide 判定 +
+  按 kind 分流），auto 判定正确性待真实截图样本复核；classify 槽位仍未实现（阶段 1
+  剩余项）。
+  上面七条是当前进度记录，**不是架构决策的变更**——§5.1、§5.2、§5.3、§5.4、§5.5、§7.2、§7.3 的契约
   早已定案，本轮只是把实现状态写清楚。
 
 ### 阶段 3：协商层与 intent
