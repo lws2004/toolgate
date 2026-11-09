@@ -3,12 +3,22 @@
 //! 治理规则与 pi 一致：超过 2000 行或 50KB 时头部截断，并提示用
 //! offset 续读；**不落盘**——文件本身就在磁盘上，指针没有意义。
 
+use std::path::Path;
+
 use serde_json::{Value, json};
 
-use super::{ToolContext, ToolResponse, ToolSpec, optional_bool, optional_usize, required_str};
+use super::{
+    Content, ToolContext, ToolResponse, ToolSpec, optional_bool, optional_usize, required_str,
+};
 use crate::ToolError;
+use crate::compat::{CompatConfig, resolve_intent};
 use crate::hashline::render_anchored;
 use crate::media;
+use crate::media::image_pipeline;
+use crate::notice::{render_notices, structured_notices};
+use crate::read_path::{
+    ImageOutcome, ImagePlan, display_path, metadata_facts, metadata_text, plan_image,
+};
 use crate::truncate::{TruncationOptions, format_size, truncate_head};
 
 pub fn spec() -> ToolSpec {
@@ -37,6 +47,11 @@ pub fn spec() -> ToolSpec {
                     "type": "boolean",
                     "description": "是否给每行附加 行号#短哈希 锚点，供 edit 的锚点模式使用。\
                                     大文件反复编辑时开启可省 token，其余场景建议关闭。默认 false"
+                },
+                "intent": {
+                    "type": "string",
+                    "enum": ["raw", "summary", "structured", "visual", "auto"],
+                    "description": "图片协商：visual 给压缩后原图 / structured 给元素列表或 OCR 文本 / auto 按 need_pixels 判定 / raw 与 summary 按 §5.3 分流。文本路径 intent 暂只影响协商层标注"
                 }
             },
             "required": ["path"]
@@ -62,9 +77,13 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         )));
     }
 
-    // 图片分支：交给附件流水线处理，产出 image content block。
+    // 图片分支：§10.1 前置判断 → 协商 → 槽位全空时给可行动的元信息。
     if let Some(mime) = media::detect_image_mime(&path).await? {
-        return media::prepare_image(&path, &mime).await;
+        let intent =
+            resolve_intent(args, &CompatConfig::default()).map_err(ToolError::bad_argument)?;
+        // vision 槽位当前不可用（可选层未接入，§3.3）。
+        let plan = plan_image(intent, ctx.upstream_vision, false);
+        return image_response(&path, &mime, &meta, &plan, ctx).await;
     }
 
     let bytes = tokio::fs::read(&path).await?;
@@ -149,6 +168,54 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     })))
 }
 
+/// 图片分支的返回组装（§10.1 / §3.8 / §4.4b 两个通道）。
+async fn image_response(
+    path: &Path,
+    mime: &str,
+    meta: &std::fs::Metadata,
+    plan: &ImagePlan,
+    ctx: &ToolContext,
+) -> Result<ToolResponse, ToolError> {
+    let display = display_path(path, &ctx.cwd);
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("image");
+    let bytes = tokio::fs::read(path).await?;
+    let (width, height) = match image_pipeline::dimensions(&bytes) {
+        Some((w, h)) => (Some(w), Some(h)),
+        None => (None, None),
+    };
+
+    match plan.outcome {
+        ImageOutcome::Original => {
+            let mut resp = image_pipeline::prepare(&bytes, mime, path)?;
+            if !plan.notices.is_empty() {
+                resp.content
+                    .insert(0, Content::Text(render_notices(&plan.notices)));
+                resp.meta["notices"] = structured_notices(&plan.notices);
+            }
+            Ok(resp)
+        }
+        // 槽位全空且上游不收图：返回元信息 + 原因 + 可选路径（§10.1:143-162）。
+        // TextUnderstanding 需要 vision 槽位的真实输出，本阶段同样退到元信息。
+        ImageOutcome::Metadata | ImageOutcome::TextUnderstanding => {
+            let facts = metadata_facts(mime, meta.len(), width, height, &display);
+            let text = metadata_text(
+                &plan.notices,
+                file_name,
+                mime,
+                meta.len(),
+                width,
+                height,
+                &display,
+            );
+            let mut out_meta = facts;
+            if !plan.notices.is_empty() {
+                out_meta["notices"] = structured_notices(&plan.notices);
+            }
+            Ok(ToolResponse::text(text).with_meta(out_meta))
+        }
+    }
+}
+
 /// 渲染成 行号│内容 的形式，行号右对齐到 6 位。
 fn render_numbered(lines: &[&str], start: usize) -> String {
     let mut out = String::with_capacity(lines.len() * 40);
@@ -215,6 +282,86 @@ mod tests {
         let (ctx, _f) = ctx_with_file("c", "x");
         let err = run(&json!({ "path": "/nonexistent/nope.txt" }), &ctx).await;
         assert!(err.is_err());
+        let _ = std::fs::remove_dir_all(ctx.cwd);
+    }
+
+    fn ctx_with_png(name: &str) -> (ToolContext, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("tg-read-img-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("shot.png");
+        let img = image::RgbImage::from_fn(32, 16, |x, y| image::Rgb([x as u8, y as u8, 0]));
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("png");
+        std::fs::write(&file, &buf).expect("write");
+        (ToolContext::new(&dir).expect("ctx"), file)
+    }
+
+    #[tokio::test]
+    async fn image_without_upstream_vision_returns_actionable_metadata() {
+        let (ctx, file) = ctx_with_png("meta");
+        let resp = run(&json!({ "path": file.to_str().unwrap() }), &ctx)
+            .await
+            .expect("read ok");
+        let Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("[SLOT_UNAVAILABLE]"));
+        assert!(body.contains("[图片文件] shot.png"));
+        assert!(body.contains("配置 vision 槽位后重试"));
+        assert!(!body.contains("/Users/"));
+        assert!(resp.content.iter().all(|c| matches!(c, Content::Text(_))));
+        assert_eq!(resp.meta["kind"], json!("image"));
+        assert_eq!(resp.meta["mime"], json!("image/png"));
+        assert!(
+            resp.meta["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("<workspace>")
+        );
+        assert_eq!(resp.meta["width"], json!(32));
+        let _ = std::fs::remove_dir_all(ctx.cwd);
+    }
+
+    #[tokio::test]
+    async fn image_with_upstream_vision_returns_original_block() {
+        let (mut ctx, file) = ctx_with_png("original");
+        ctx.upstream_vision = true;
+        let resp = run(
+            &json!({ "path": file.to_str().unwrap(), "intent": "visual" }),
+            &ctx,
+        )
+        .await
+        .expect("read ok");
+        assert!(
+            resp.content
+                .iter()
+                .any(|c| matches!(c, Content::Image { .. }))
+        );
+        assert!(resp.meta.get("notices").is_none());
+        let _ = std::fs::remove_dir_all(ctx.cwd);
+    }
+
+    #[tokio::test]
+    async fn image_structured_with_upstream_vision_degrades_with_notice() {
+        let (mut ctx, file) = ctx_with_png("structured");
+        ctx.upstream_vision = true;
+        let resp = run(
+            &json!({ "path": file.to_str().unwrap(), "intent": "structured" }),
+            &ctx,
+        )
+        .await
+        .expect("read ok");
+        assert!(
+            resp.content
+                .iter()
+                .any(|c| matches!(c, Content::Image { .. }))
+        );
+        let Content::Text(notice) = &resp.content[0] else {
+            panic!("首块应为告知文本")
+        };
+        assert!(notice.contains("[SLOT_UNAVAILABLE]"));
+        assert_eq!(resp.meta["notices"].as_array().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(ctx.cwd);
     }
 }

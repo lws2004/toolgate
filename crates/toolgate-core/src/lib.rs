@@ -12,6 +12,7 @@ pub use error::ErrorCode;
 pub mod hashline;
 pub mod media;
 pub mod notice;
+pub mod read_path;
 pub mod slot_state;
 pub mod slots;
 pub mod spill;

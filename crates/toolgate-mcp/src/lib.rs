@@ -136,7 +136,10 @@ impl McpServer {
 
                 // 工具级错误走 isError，而不是 JSON-RPC 错误——模型据此自行修正。
                 // Ok 与 Err 都收敛成 ToolResponse，序列化只有一处。
-                let resp = match dispatch(name, &args, &self.ctx).await {
+                // 把 _meta 的上游视觉能力注入本次调用上下文（§18.1b）。
+                let mut call_ctx = self.ctx.clone();
+                call_ctx.upstream_vision = meta.upstream_capability().vision;
+                let resp = match dispatch(name, &args, &call_ctx).await {
                     Ok(resp) => resp,
                     Err(e) => tool_error_response(&govern_error(&e)),
                 };

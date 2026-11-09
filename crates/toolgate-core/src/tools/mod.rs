@@ -32,6 +32,8 @@ pub struct ToolContext {
     pub spill: SpillStore,
     pub snapshots: SpillStore,
     pub limits: TruncationOptions,
+    /// 请求级上游视觉能力（§18.1b）：来自 _meta.toolgate/upstream.vision，缺省 false。
+    pub upstream_vision: bool,
 }
 
 impl ToolContext {
@@ -45,6 +47,7 @@ impl ToolContext {
             spill,
             snapshots,
             limits: TruncationOptions::default(),
+            upstream_vision: false,
         })
     }
 

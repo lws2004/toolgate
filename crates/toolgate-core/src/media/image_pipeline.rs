@@ -223,6 +223,12 @@ fn ok_response(p: Prepared, path: &Path) -> ToolResponse {
     }
 }
 
+/// 只读取像素尺寸，供「返回元信息」的降级分支使用（§10.1）。
+pub fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let img = image::load_from_memory(bytes).ok()?;
+    Some(img.dimensions())
+}
+
 /// 等比缩放到最长边不超过 edge；本来就没超则原样返回。
 fn scale_to_edge(img: &DynamicImage, edge: u32) -> DynamicImage {
     let (w, h) = img.dimensions();
