@@ -195,16 +195,32 @@ pub(crate) fn gate_notices(gate: ConfidenceGate, confidence: f64) -> Vec<Notice>
 ///
 /// 槽位状态给三档（§7.3）：没有绑定模型 → unavailable；有绑定且健康 → ready；
 /// 有绑定但被连续失败禁用 → degraded。loading（embedded 懒加载）本轮不产出。
+/// §3.10 准入：能力矩阵判「不可用」的 source × slot 一律 unavailable，不因绑定而谎报 ready。
 /// 没有判定输出时 confidence 给 null，不编造（§4.6）。
 /// 一个函数产出、六个工具共用，避免各工具自行拼装形成双源。
 pub fn negotiation_meta(intent: Intent, slots: &SlotSet, client: Option<&SlotClient>) -> Value {
     let mut status = serde_json::Map::new();
     for kind in SlotKind::ALL {
         let state = match client {
-            Some(client) => slot_state(
-                client.is_bound(kind),
-                client.slot_health(kind).state == SlotState::Disabled,
-            ),
+            Some(client) => {
+                // §3.10 准入：能力矩阵判「不可用」的来源，即使绑定了也不能标 ready
+                // （信息不充分 / 输出形状不可转换；§3.11「serves 是声明不是承诺」）。
+                let usable = client
+                    .source_for_slot(kind)
+                    .map(|source| {
+                        crate::capability::source_slot_capability(source, kind).grade
+                            != crate::capability::CapabilityGrade::Unavailable
+                    })
+                    .unwrap_or(true);
+                if !usable {
+                    "unavailable"
+                } else {
+                    slot_state(
+                        client.is_bound(kind),
+                        client.slot_health(kind).state == SlotState::Disabled,
+                    )
+                }
+            }
             None => {
                 if slots.is_available(kind) {
                     "ready"
@@ -366,6 +382,48 @@ mod tests {
         assert_eq!(meta["slmStatus"]["decide"], json!("ready"));
         assert_eq!(meta["slmStatus"]["summarize"], json!("unavailable"));
         assert!(meta["confidence"].is_null());
+    }
+
+    /// §3.10 准入：能力矩阵判「不可用」的 source × slot 不能谎报 ready。
+    /// systemone 只做判定、不生成文本，serves 里写了 summarize 也不该是 ready。
+    #[test]
+    fn capability_unavailable_slot_is_not_reported_ready() {
+        let cfg = crate::config::parse_config(
+            "models:
+  jev:
+    source: systemone
+    base_url: http://127.0.0.1:8090
+    serves: [decide, summarize]
+",
+            "test.yaml",
+        )
+        .expect("配置应当解析成功");
+        let client = SlotClient::new(cfg);
+        let meta = negotiation_meta(Intent::Raw, &SlotSet::none(), Some(&client));
+        assert_eq!(meta["slmStatus"]["decide"], json!("ready"));
+        assert_eq!(meta["slmStatus"]["summarize"], json!("unavailable"));
+        // 未绑定的槽位仍按绑定状态，不受能力矩阵影响。
+        assert_eq!(meta["slmStatus"]["rerank"], json!("unavailable"));
+        assert!(meta["confidence"].is_null());
+    }
+
+    /// 能力矩阵标「受限」的槽位仍按绑定状态给 ready（受限由调用侧标注，不是不可用）。
+    #[test]
+    fn limited_capability_still_reports_bound_state() {
+        let cfg = crate::config::parse_config(
+            "models:
+  jev:
+    source: systemone
+    base_url: http://127.0.0.1:8090
+    serves: [classify, decide]
+",
+            "test.yaml",
+        )
+        .expect("配置应当解析成功");
+        let client = SlotClient::new(cfg);
+        let meta = negotiation_meta(Intent::Raw, &SlotSet::none(), Some(&client));
+        assert_eq!(meta["slmStatus"]["classify"], json!("ready"));
+        assert_eq!(meta["slmStatus"]["decide"], json!("ready"));
     }
 
     /// §13.3 / §4.6：六个工具的规格声明必须齐全且一致。

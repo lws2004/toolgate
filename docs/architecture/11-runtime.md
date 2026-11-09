@@ -89,7 +89,7 @@ dsh-ledger-compact 的对照与六条借鉴见附件 E.5。
 |---|---|---|
 | SLM 客户端（五个槽位的契约适配：classify / rerank / decide / summarize / vision） | 中 | 本地推理后端（llama.cpp / MLX / vLLM） |
 | embedded 推理后端（动态库加载、模型实例与常驻管理、故障边界，§18.1） | 大 | llama.cpp / MLX 的 Rust 绑定 |
-| 判定封装（命名问题 → 带概率的答案） | 中 | d1 的接口形态 |
+| 判定封装（命名问题 → 带概率的答案） | 中 | decide 槽位的接口形态 |
 | `_meta` 解析 + 新旧协议兼容层（2026-07-28 无握手 + 旧版 initialize） | 中 | MCP 传输层 |
 | 协商层（intent → 输出形态） | 小 | 纯逻辑 |
 | 置信度门控 | 小 | 纯逻辑 |

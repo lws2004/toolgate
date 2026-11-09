@@ -131,6 +131,15 @@ impl SlotClient {
             .is_some()
     }
 
+    /// 某槽位最终绑定模型的来源（§18.1）；供返回出口按 §3.10 能力矩阵判真实可用性。
+    pub fn source_for_slot(&self, slot: SlotKind) -> Option<ModelSource> {
+        self.cfg
+            .bindings
+            .iter()
+            .find(|binding| binding.slot == slot)
+            .and_then(|binding| binding.source)
+    }
+
     /// 某槽位的健康状态（§3.11）；未绑定的槽位是 declared。
     pub fn slot_health(&self, slot: SlotKind) -> SlotHealth {
         self.health
