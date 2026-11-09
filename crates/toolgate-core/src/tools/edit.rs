@@ -13,11 +13,19 @@
 //!
 //! 两种模式都基于**原始文件**计算，多笔编辑互不累积偏移。
 
+use std::path::Path;
+
 use serde_json::{Value, json};
 
 use super::{ToolContext, ToolResponse, ToolSpec, optional_str, required_str};
 use crate::ToolError;
+use crate::edit_path::{
+    FileFacts, MatchLevel, change_facts, classify_match, detect_eol, diff_stats,
+    mechanical_attribution, nearby_build_files, plan_edit,
+};
 use crate::hashline::{line_anchor, parse_anchor};
+use crate::notice::{Notice, render_notices, structured_notices};
+use crate::read_path::display_path;
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -77,12 +85,15 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         )));
     }
 
-    let updated = if let Some(anchor_raw) = optional_str(args, "anchor") {
-        apply_anchor_mode(
-            &original,
-            anchor_raw,
-            optional_str(args, "newText").unwrap_or(""),
-        )?
+    let (updated, notices) = if let Some(anchor_raw) = optional_str(args, "anchor") {
+        (
+            apply_anchor_mode(
+                &original,
+                anchor_raw,
+                optional_str(args, "newText").unwrap_or(""),
+            )?,
+            vec![],
+        )
     } else if let Some(edits) = args.get("edits").and_then(Value::as_array) {
         apply_text_mode(&original, edits)?
     } else {
@@ -110,14 +121,38 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         .map(|s| json!(s.path.display().to_string()))
         .unwrap_or(json!(null));
 
-    Ok(ToolResponse::text(diff).with_meta(json!({
+    // §5.7：只给事实，不给「你该跑什么」的指令。
+    let stats = diff_stats(&original, &updated);
+    let file_facts = FileFacts {
+        lines: updated.lines().count(),
+        bytes: out_bytes.len(),
+        encoding: encoding.name(),
+        eol: detect_eol(&original),
+    };
+    let nearby = nearby_build_files(path.parent().unwrap_or_else(|| Path::new(".")));
+    let facts = change_facts(
+        &display_path(&path, &ctx.cwd),
+        stats,
+        file_facts,
+        nearby,
+        &diff,
+    );
+    let mut meta = json!({
         "path": path.display().to_string(),
         "changed": true,
         "bytesBefore": original.len(),
         "bytesAfter": updated.len(),
         "snapshot": snapshot_meta,
         "encoding": encoding.name(),
-    })))
+        "facts": facts,
+    });
+    let mut content = diff;
+    if !notices.is_empty() {
+        content.push('\n');
+        content.push_str(&render_notices(&notices));
+        meta["notices"] = structured_notices(&notices);
+    }
+    Ok(ToolResponse::text(content).with_meta(meta))
 }
 
 /// 行尾风格。读改写必须保留它，否则 CRLF 文件会被整体转成 LF，
@@ -214,13 +249,14 @@ fn apply_anchor_mode(
 }
 
 /// 文本匹配模式：逐笔在原始文件上定位并替换。
-fn apply_text_mode(original: &str, edits: &[Value]) -> Result<String, ToolError> {
+fn apply_text_mode(original: &str, edits: &[Value]) -> Result<(String, Vec<Notice>), ToolError> {
     if edits.is_empty() {
         return Err(ToolError::bad_argument("edits 不能为空".to_owned()));
     }
 
     // 先收集所有替换区间，再统一应用，避免前一笔改动影响后一笔的匹配位置。
     let mut spans: Vec<(usize, usize, String)> = Vec::with_capacity(edits.len());
+    let mut notices: Vec<Notice> = Vec::new();
     for (i, e) in edits.iter().enumerate() {
         let old = e
             .get("oldText")
@@ -231,8 +267,9 @@ fn apply_text_mode(original: &str, edits: &[Value]) -> Result<String, ToolError>
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::bad_argument(format!("edits[{i}] 缺少 newText")))?;
 
-        let (start, len) =
+        let (start, len, level) =
             locate(original, old).map_err(|msg| ToolError::failed(format!("edits[{i}] {msg}")))?;
+        notices.extend(plan_edit(level, false).notices);
         spans.push((start, len, new.to_owned()));
     }
 
@@ -254,12 +291,12 @@ fn apply_text_mode(original: &str, edits: &[Value]) -> Result<String, ToolError>
     for (start, len, new) in sorted.iter().rev() {
         out.replace_range(*start..(*start + *len), new);
     }
-    Ok(out)
+    Ok((out, notices))
 }
 
 /// 在原文中定位 oldText，返回 (起始字节偏移, 长度)。
 /// 精确匹配优先，失败后尝试归一化匹配。
-fn locate(original: &str, old: &str) -> Result<(usize, usize), String> {
+fn locate(original: &str, old: &str) -> Result<(usize, usize, MatchLevel), String> {
     if old.is_empty() {
         return Err("oldText 不能为空".to_owned());
     }
@@ -267,7 +304,7 @@ fn locate(original: &str, old: &str) -> Result<(usize, usize), String> {
     match original.match_indices(old).count() {
         1 => {
             let start = original.find(old).expect("already counted");
-            return Ok((start, old.len()));
+            return Ok((start, old.len(), MatchLevel::Exact));
         }
         n if n > 1 => {
             return Err(format!(
@@ -279,6 +316,7 @@ fn locate(original: &str, old: &str) -> Result<(usize, usize), String> {
 
     // 归一化匹配：逐行比对，容忍引号/破折号/空白差异。
     let norm_old = normalize(old);
+    let wide_old = normalize_wide(old);
     let spans = line_spans(original);
     let orig_lines: Vec<&str> = spans.iter().map(|(s, e)| &original[*s..*e]).collect();
     let old_lines: Vec<&str> = old.lines().collect();
@@ -287,7 +325,8 @@ fn locate(original: &str, old: &str) -> Result<(usize, usize), String> {
     if old_lines.len() <= orig_lines.len() {
         for start in 0..=(orig_lines.len() - old_lines.len()) {
             let window = &orig_lines[start..start + old_lines.len()];
-            if normalize(&window.join("\n")) == norm_old {
+            let window_text = window.join("\n");
+            if normalize(&window_text) == norm_old || normalize_wide(&window_text) == wide_old {
                 hits.push(start);
             }
         }
@@ -314,10 +353,16 @@ fn locate(original: &str, old: &str) -> Result<(usize, usize), String> {
                 }
                 byte_len = nl - byte_start;
             }
-            Ok((byte_start, byte_len))
+            // 机械三级都没唯一判出时，locate 的更宽归一化仍命中，按第 3 级告知。
+            let level = match classify_match(original, old) {
+                MatchLevel::Semantic => MatchLevel::Whitespace,
+                other => other,
+            };
+            Ok((byte_start, byte_len, level))
         }
         0 => Err(format!(
-            "未找到 oldText。原文片段：{}\n请重新 read 确认当前内容。",
+            "未找到 oldText（机械归因：{}）。原文片段：{}\n请重新 read 确认当前内容。",
+            mechanical_attribution(original, old).as_str(),
             snippet(original)
         )),
         n => Err(format!(
@@ -356,6 +401,15 @@ fn normalize(text: &str) -> String {
         .join("\n")
 }
 
+/// 第 3 级归一化：在 normalize 基础上折行首缩进与行内多空格（§5.4）。
+fn normalize_wide(text: &str) -> String {
+    normalize(text)
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// 生成 unified diff 供模型确认改动。
 fn unified_diff(before: &str, after: &str, label: &str) -> String {
     use similar::{ChangeTag, TextDiff};
@@ -387,7 +441,7 @@ mod tests {
     fn text_mode_replaces_single_occurrence() {
         let src = "fn a() {}\nfn b() {}\n";
         let edits = vec![json!({ "oldText": "fn b() {}", "newText": "fn c() {}" })];
-        let out = apply_text_mode(src, &edits).expect("ok");
+        let out = apply_text_mode(src, &edits).expect("ok").0;
         assert_eq!(out, "fn a() {}\nfn c() {}\n");
     }
 
@@ -406,7 +460,7 @@ mod tests {
             json!({ "oldText": "one", "newText": "1" }),
             json!({ "oldText": "three", "newText": "3" }),
         ];
-        let out = apply_text_mode(src, &edits).expect("ok");
+        let out = apply_text_mode(src, &edits).expect("ok").0;
         assert_eq!(out, "1\ntwo\n3\n");
     }
 
@@ -414,7 +468,7 @@ mod tests {
     fn text_mode_tolerates_smart_quotes() {
         let src = "say \"hi\"\n";
         let edits = vec![json!({ "oldText": "say \u{201C}hi\u{201D}", "newText": "say bye" })];
-        let out = apply_text_mode(src, &edits).expect("ok");
+        let out = apply_text_mode(src, &edits).expect("ok").0;
         assert_eq!(out, "say bye\n");
     }
 
@@ -459,7 +513,7 @@ mod tests {
         // 替换会落到错误位置。这里用 LF 形式的 oldText 强制走归一化路径。
         let src = "one\r\ntwo\r\nthree\r\n";
         let edits = vec![json!({ "oldText": "one\ntwo", "newText": "1\n2" })];
-        let out = apply_text_mode(src, &edits).expect("ok");
+        let out = apply_text_mode(src, &edits).expect("ok").0;
         assert_eq!(out, "1\n2\r\nthree\r\n");
         assert!(out.ends_with("three\r\n"), "第三行不能被破坏");
     }
@@ -468,8 +522,83 @@ mod tests {
     fn exact_match_works_on_crlf_without_touching_other_lines() {
         let src = "one\r\ntwo\r\nthree\r\n";
         let edits = vec![json!({ "oldText": "two", "newText": "TWO" })];
-        let out = apply_text_mode(src, &edits).expect("ok");
+        let out = apply_text_mode(src, &edits).expect("ok").0;
         assert_eq!(out, "one\r\nTWO\r\nthree\r\n");
+    }
+
+    #[test]
+    fn normalized_eol_match_emits_l2_notice() {
+        let src = "one\r\ntwo\r\nthree\r\n";
+        let edits = vec![json!({ "oldText": "one\ntwo", "newText": "1\n2" })];
+        let (out, notices) = apply_text_mode(src, &edits).expect("ok");
+        assert!(out.ends_with("three\r\n"));
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].render(), "[NORMALIZED] level=2 kind=eol");
+    }
+
+    #[test]
+    fn normalized_whitespace_match_emits_l3_notice() {
+        let src = "  fn   a() {}\n";
+        let edits = vec![json!({ "oldText": "fn a() {}", "newText": "fn b() {}" })];
+        let (out, notices) = apply_text_mode(src, &edits).expect("ok");
+        assert!(out.contains("fn b() {}"));
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].render(), "[NORMALIZED] level=3 kind=whitespace");
+    }
+
+    async fn ctx_with_file(name: &str) -> (ToolContext, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("tg-edit-run-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("f.txt");
+        std::fs::write(&file, "alpha\nbeta\n").expect("write");
+        (ToolContext::new(&dir).expect("ctx"), dir)
+    }
+
+    #[tokio::test]
+    async fn run_reports_change_facts() {
+        let (ctx, dir) = ctx_with_file("facts").await;
+        let file = dir.join("f.txt");
+        let resp = run(
+            &json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{ "oldText": "beta", "newText": "BETA" }]
+            }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let facts = &resp.meta["facts"];
+        assert_eq!(facts["changed"]["added"], json!(1));
+        assert_eq!(facts["changed"]["removed"], json!(1));
+        assert_eq!(facts["file"]["lines"], json!(2));
+        assert_eq!(facts["file"]["eol"], json!("lf"));
+        assert_eq!(facts["nearby"], json!("未检测到构建描述文件"));
+        assert!(facts["diff"].as_str().unwrap().contains("+BETA"));
+        assert!(
+            facts["changed"]["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("<workspace>")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn run_error_includes_mechanical_attribution() {
+        let (ctx, dir) = ctx_with_file("error").await;
+        let file = dir.join("f.txt");
+        let err = run(
+            &json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{ "oldText": "completely missing line", "newText": "x" }]
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("机械归因"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

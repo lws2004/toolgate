@@ -6,6 +6,7 @@
 pub mod bash_path;
 pub mod compat;
 pub mod decision;
+pub mod edit_path;
 pub mod encoding;
 pub mod error;
 pub use error::ErrorCode;
