@@ -391,6 +391,7 @@ slots:
 |---|---|
 | `source: local` | `native` |
 | `source: systemone` → 槽位 `decide` | `native` |
+| `source: rerank` → 槽位 `rerank` | `native` |
 | 外部协议（`openai` / `anthropic` / `responses`）→ 槽位 `classify` / `decide` | `json` |
 | 外部协议 → 槽位 `summarize` / `vision` | `text` |
 | 外部协议 → 槽位 `rerank` | `ordered` |

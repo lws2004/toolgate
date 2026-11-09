@@ -117,7 +117,7 @@ slm:
 | `paths.expose_absolute` | `false` | 模型可见路径默认工作区相对；raw 显式开启才绝对 |
 | `paths.allowed_roots` | `[启动时工作目录]` | 文件访问允许根；read / write / edit / search 的路径必须在其中（§17.2） |
 | `models` | `{}` | 模型清单；每个模型声明 `serves`（能服务哪些槽位，§3.10） |
-| `models.<id>.source` | `auto` | `auto`（按 path / base_url 推断）；也可显式 `local` / `openai` / `anthropic` / `responses` / `systemone`（§18.1；`systemone` 必须显式写，不参与 auto 推断） |
+| `models.<id>.source` | `auto` | `auto`（按 path / base_url 推断）；也可显式 `local` / `openai` / `anthropic` / `responses` / `systemone` / `rerank`（§18.1；`systemone` 与 `rerank` 必须显式写，不参与 auto 推断） |
 | `models.<id>.adapter` | `auto` | 形状适配器：`auto` / `native` / `json` / `text` / `ordered`（§3.10） |
 | `models.<id>.path` | 空 | `source: local`（或 auto 推断为 local）的权重路径 |
 | `models.<id>.base_url` | 空 | 外部来源的接口地址（默认仅 loopback） |

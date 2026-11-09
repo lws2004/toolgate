@@ -112,6 +112,7 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
 | `anthropic` | Anthropic Messages | 同上 | 同上 | Anthropic 兼容服务 |
 | `responses` | OpenAI Responses | 同上 | 同上 | OpenAI Responses 兼容服务 |
 | `systemone` | TypeSafe SystemOne（`/v1/systemone`） | 同上 | 同上 | StartLux-Decision 等类型化判定服务 |
+| `rerank` | 原生重排序端点（`/v1/rerank`） | 同上 | 同上 | jina-reranker 等专用 listwise reranker |
 | `auto` | 按 URL 推断 | `path` 或 `base_url` + `model` | 推断为上面某一种，规则见下 | 地址已含协议信息时 |
 
 ```yaml
@@ -121,7 +122,7 @@ models:
     path: ~/.toolgate/models/jev
     serves: [classify, decide]
   lfm3-vl:
-    source: auto              # auto（默认）| local | openai | anthropic | responses | systemone
+    source: auto              # auto（默认）| local | openai | anthropic | responses | systemone | rerank
     base_url: http://127.0.0.1:8080/v1
     model: lfm3-vl
     api_key_env: TOOLGATE_MODEL_KEY   # 可选；密钥从环境变量读，不落配置
@@ -137,26 +138,26 @@ models:
 5. host 是 `api.openai.com` → `openai`；`api.anthropic.com` → `anthropic`；
 6. 都不命中 → **启动失败**，要求显式写 `source`。
 
-**这六条顺序不变，`systemone` 不进自动推断。** `base_url` 写的是服务根地址
+**这六条顺序不变，`systemone` 与 `rerank` 都不进自动推断。** `base_url` 写的是服务根地址
 （如 `http://127.0.0.1:8090`）时，根地址里没有任何协议特征可据此判断后端是
 systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，也能挂 systemone
 端点。按本节的保守推断原则（猜错协议比报错更糟，§1.4.4 的可行动失败），
-**`systemone` 必须显式写 `source: systemone`**。
+**`systemone` 与 `rerank` 都必须显式写 `source`**（猜错协议比报错更糟）。
 
 显式写 `source: systemone` 时，`base_url` 指向服务根地址，客户端自行拼
-`/v1/systemone` 路径。
+`/v1/systemone` 路径；`source: rerank` 同口径，客户端拼 `/v1/rerank`（形状见下）。
 
 不做启动探测：探测要发真实请求，且错误响应形状不可靠；猜错协议比报错更糟（§1.4.4 的可行动失败）。
 
-**协议能力不是能力等价**：四类接口是「传输形态」，各槽位能否用要看接口能力（适配器见 §3.10）：
+**协议能力不是能力等价**：五类接口是「传输形态」，各槽位能否用要看接口能力（适配器见 §3.10）：
 
-| 槽位 | openai | anthropic | responses | systemone | 说明 |
-|---|---|---|---|---|---|
-| summarize | 可用 | 可用 | 可用 | **不可用** | systemone 只做判定，不生成文本 |
-| vision | 可用 | 可用 | 可用 | 可用 | systemone 的 `images` 需后端模型带 vision tower（本机 4B MLX 构建带） |
-| classify | 可用（JSON schema） | 可用（JSON / tool use） | 可用（structured outputs） | **受限** | systemone 的 `choice` 类型返回逐选项 `probabilities`，但 §3.10 的 systemone 适配器本轮只映射 `noul`；走 `choice` 的 classify 映射未落 |
-| decide | **受限** | **受限** | **受限** | **可用（给校准概率）** | systemone 的 `noul` = P(yes)，直接满足 §3.2 decide 契约与 §7.2 门控 |
-| rerank | **受限** | **受限** | **受限** | **不可用** | systemone 无排序接口 |
+| 槽位 | openai | anthropic | responses | systemone | rerank | 说明 |
+|---|---|---|---|---|---|---|
+| summarize | 可用 | 可用 | 可用 | **不可用** | **不可用** | systemone 只做判定，不生成文本；rerank 协议只做排序 |
+| vision | 可用 | 可用 | 可用 | 可用 | **不可用** | systemone 的 `images` 需后端模型带 vision tower（本机 4B MLX 构建带） |
+| classify | 可用（JSON schema） | 可用（JSON / tool use） | 可用（structured outputs） | **受限** | **不可用** | systemone 的 `choice` 类型返回逐选项 `probabilities`，但 §3.10 的 systemone 适配器本轮只映射 `noul`；走 `choice` 的 classify 映射未落 |
+| decide | **受限** | **受限** | **受限** | **可用（给校准概率）** | **不可用** | systemone 的 `noul` = P(yes)，直接满足 §3.2 decide 契约与 §7.2 门控 |
+| rerank | **受限** | **受限** | **受限** | **不可用** | **可用（原生排序）** | systemone 无排序接口；`source: rerank` 走原生 `/v1/rerank` |
 
 **这张表是 §3.10「信息充分 ∧ 形状可转换」的判例**：每个「不可用」都能归到输入
 信息不足（systemone 不生成文本、无排序接口），每个「受限」归到输出形状可转但
@@ -204,7 +205,20 @@ systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，�
 | 协议 → 槽位 | `choices[0].message.content` 解析成 `RerankOutput.results`，再按 §3.2 校验：覆盖全部输入、index 指向原始位置、按 score 降序 |
 
 协议无原生排序接口，分数是模型自报值、非校准（§18.1 能力表标「受限」）；
-形状不符按 §3.11 降级。专用 listwise reranker 不在本轮实现范围内（§3.5）。
+形状不符按 §3.11 降级。这是「通用 LLM 承担 rerank」的转换层；专用 listwise reranker 走下节 `source: rerank` 的原生协议，不复用本形状（§3.5）。
+
+#### rerank 协议：原生 `/v1/rerank` 端点
+
+`source: rerank` 用于上游直接提供排序接口的场景（本机 127.0.0.1:10020 的 rmlx retrieval 服务，jina-reranker-v3.5-mlx-merged）。它是独立协议族，不是 `openai` 上的形状变体（ADR 0007）；`adapter: auto` 给它 `native`。
+
+`base_url` 指向服务根地址，客户端自行拼 `/v1/rerank`（与 `systemone` 拼 `/v1/systemone` 同口径）：
+
+| 方向 | 形状 |
+|---|---|
+| 槽位 → 协议 | `POST /v1/rerank`，`{"model": <models.<id>.model>, "query": ..., "documents": [...]}`；`model` 必须与上游服务启动时的模型名完全一致，不做别名推断（配错按 §18.9 fail loud） |
+| 协议 → 槽位 | `results[].{index, relevance_score}` → `RerankResult{index, score}`；`document` 等额外字段丢弃；再按 §3.2 校验覆盖全部输入、index 指向原始位置、按 score 降序 |
+
+`RerankInput.top_n` 不透传（上游是否支持本轮未实测），由 toolgate 侧在完整 `results` 上按 §3.2 截断。形状不符按 §3.11 降级。`source: rerank` 的 `serves` 只能含 `rerank`（其余槽位在能力表里是「不可用」）。HTTP 发送在 `external-protocols` feature 后（§19.6）。
 
 #### vision 适配器的协议形状
 
