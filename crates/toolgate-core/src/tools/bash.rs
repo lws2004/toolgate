@@ -15,6 +15,10 @@ use tokio::process::Command;
 
 use super::{ToolContext, ToolResponse, ToolSpec, optional_str, optional_usize, required_str};
 use crate::ToolError;
+use crate::bash_path::{
+    BashMode, estimate_tokens, intent_tag, plan_bash, resolve_bash_intent, structured_facts,
+};
+use crate::notice::{render_notices, structured_notices};
 use crate::truncate::{format_size, truncate_tail};
 
 /// 默认超时：5 分钟。
@@ -42,6 +46,11 @@ pub fn spec() -> ToolSpec {
                     "type": "integer",
                     "description": "超时秒数，默认 300",
                     "minimum": 1
+                },
+                "intent": {
+                    "type": "string",
+                    "enum": ["raw", "summary", "structured", "visual", "auto"],
+                    "description": "协商层输出形态：raw 截断原文加落盘指针（默认）/ summary 失败摘要 / structured 结构化事实 JSON / visual 不适用（看图请用 read）/ auto 输出小于 500 token 给原文，否则走 summary"
                 }
             },
             "required": ["binary"]
@@ -139,7 +148,10 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     }
 
     let code = status.code();
-    Ok(ToolResponse::text(body).with_meta(json!({
+    let intent = resolve_bash_intent(args).map_err(ToolError::bad_argument)?;
+    let plan = plan_bash(intent, estimate_tokens(&body)).map_err(ToolError::bad_argument)?;
+
+    let mut meta = json!({
         "binary": binary,
         "args": argv,
         "cwd": cwd.display().to_string(),
@@ -147,7 +159,21 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "success": status.success(),
         "truncated": truncation.truncated,
         "spill": spill_meta,
-    })))
+        "intent": intent_tag(intent),
+    });
+    let mut content = body;
+    if !plan.notices.is_empty() {
+        content.push('\n');
+        content.push_str(&render_notices(&plan.notices));
+        meta["notices"] = structured_notices(&plan.notices);
+    }
+    if plan.mode == BashMode::Structured {
+        let spill_path = meta["spill"]["path"].as_str();
+        let facts = structured_facts(code, spill_path);
+        content = facts.to_string();
+        meta["facts"] = facts;
+    }
+    Ok(ToolResponse::text(content).with_meta(meta))
 }
 
 /// 拒绝把 shell 解释器当作命令入口。
@@ -206,6 +232,122 @@ mod tests {
         };
         assert!(body.contains("hello"));
         assert_eq!(resp.meta["success"], json!(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn bash_ctx(suffix: &str) -> (ToolContext, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("tg-bash-{}-{suffix}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let ctx = ToolContext::new(&dir).expect("ctx");
+        (ctx, dir)
+    }
+
+    #[tokio::test]
+    async fn raw_intent_matches_v1_behavior() {
+        let (ctx, dir) = bash_ctx("raw");
+        let resp = run(
+            &json!({ "binary": "echo", "args": ["hello"], "intent": "raw" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("hello"));
+        assert!(!body.contains("[SLOT_UNAVAILABLE]"));
+        assert!(resp.meta.get("notices").is_none());
+        assert_eq!(resp.meta["intent"], json!("raw"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn summary_intent_degrades_with_slot_unavailable() {
+        let (ctx, dir) = bash_ctx("summary");
+        let resp = run(
+            &json!({ "binary": "echo", "args": ["hello"], "intent": "summary" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("[SLOT_UNAVAILABLE]"));
+        assert!(body.contains("slot=decide"));
+        assert!(body.contains("slot=summarize"));
+        assert_eq!(resp.meta["intent"], json!("summary"));
+        assert_eq!(resp.meta["notices"].as_array().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn auto_small_output_stays_raw() {
+        let (ctx, dir) = bash_ctx("auto-small");
+        let resp = run(
+            &json!({ "binary": "echo", "args": ["hello"], "intent": "auto" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("hello"));
+        assert!(!body.contains("[SLOT_UNAVAILABLE]"));
+        assert!(resp.meta.get("notices").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn auto_large_output_degrades() {
+        let (ctx, dir) = bash_ctx("auto-large");
+        let long = "x".repeat(2400);
+        let resp = run(
+            &json!({ "binary": "echo", "args": [long], "intent": "auto" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("[SLOT_UNAVAILABLE]"));
+        assert_eq!(resp.meta["intent"], json!("auto"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn structured_intent_returns_facts_json() {
+        let (ctx, dir) = bash_ctx("structured");
+        let resp = run(
+            &json!({ "binary": "echo", "args": ["hi"], "intent": "structured" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        let facts: Value = serde_json::from_str(body).expect("content 应是 JSON");
+        assert_eq!(facts["exitCode"], json!(0));
+        assert_eq!(facts["errorKind"], json!("unknown"));
+        assert_eq!(facts["failedItems"], json!([]));
+        assert_eq!(resp.meta["facts"]["errorKind"], json!("unknown"));
+        assert_eq!(resp.meta["intent"], json!("structured"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn visual_intent_is_rejected_actionably() {
+        let (ctx, dir) = bash_ctx("visual");
+        let err = run(
+            &json!({ "binary": "echo", "args": ["hi"], "intent": "visual" }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("read"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
