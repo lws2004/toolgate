@@ -5,9 +5,14 @@
 //! 变成注入面；数组形式直接走 execve，没有解析层。
 //!
 //! 输出治理：尾部截断（错误栈与最终结果在尾部），完整输出落盘。
+//!
+//! 执行边界（§17.2）：子进程不继承父进程环境，只注入固定白名单；
+//! 真实 uid/gid 也在这里记录一次，供 MCP initialize 与 CLI status 上报。
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -31,6 +36,70 @@ use crate::truncate::{format_size, truncate_tail};
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 /// 输出累积上限，超过后停止读取，避免一条命令吃光内存。
 const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
+
+/// 子进程环境变量白名单（§17.2）：固定名单，不做配置。
+///
+/// 允许配置扩大等于把父进程环境重新泄漏给子进程，与白名单目的相反。
+const ENV_ALLOWLIST: &[&str] = &[
+    "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "USER", "LOGNAME", "SHELL",
+    "PWD",
+];
+
+/// 给子进程注入白名单环境（§17.2）。
+///
+/// 先 `env_clear` 清掉继承来的父进程环境，再逐项透传名单内存在的变量。
+/// `PWD` 不透传父进程的值：它必须是子进程自己的工作目录，否则子进程看到的是
+/// 启动 toolgate 时所在的目录，而不是它真正运行的位置。
+pub(crate) fn apply_env_allowlist(cmd: &mut Command, cwd: &Path) {
+    cmd.env_clear();
+    for key in ENV_ALLOWLIST {
+        if *key == "PWD" {
+            continue;
+        }
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    cmd.env("PWD", cwd);
+}
+
+/// 进程身份（§17.2 权限越界）：启动时记录的真实 uid/gid。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    /// 真实 uid；取不到时是 None——不填 0，0 会被读成 root。
+    pub uid: Option<u32>,
+    /// 真实 gid；取不到时是 None。
+    pub gid: Option<u32>,
+}
+
+impl ProcessIdentity {
+    /// 上报形态：取不到的值给 null，不编造数字（§4.6 诚实）。
+    pub fn to_json(self) -> Value {
+        json!({ "uid": self.uid, "gid": self.gid })
+    }
+}
+
+static IDENTITY: OnceLock<ProcessIdentity> = OnceLock::new();
+
+/// 进程级缓存的真实 uid/gid：只探测一次，之后读缓存。
+///
+/// 零依赖取法：调 `id -u` / `id -g` 子进程。macOS 没有 `/proc/self/status`，
+/// 而 `getuid(2)` 需要 libc 依赖（§1.5 准入）。
+pub fn identity() -> ProcessIdentity {
+    *IDENTITY.get_or_init(|| ProcessIdentity {
+        uid: read_id("-u"),
+        gid: read_id("-g"),
+    })
+}
+
+/// 读 `id <flag>` 的输出并解析成数字；失败返回 None（诚实上报，不猜）。
+fn read_id(flag: &str) -> Option<u32> {
+    let out = std::process::Command::new("id").arg(flag).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
+}
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -87,14 +156,18 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         optional_usize(args, "timeout_secs").unwrap_or(DEFAULT_TIMEOUT_SECS as usize) as u64,
     );
 
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(&argv)
         .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // §14 阶段 4：独立进程组，超时可整组终止（避免子进程残留）。
-        .process_group(0)
+        .process_group(0);
+    // §17.2：子进程不继承父进程环境，只拿白名单。
+    apply_env_allowlist(&mut command, &cwd);
+    let mut child = command
         .spawn()
         .map_err(|e| ToolError::failed(format!("无法启动 {binary}：{e}")))?;
     let pid = child.id().unwrap_or(0);
@@ -369,6 +442,60 @@ mod tests {
         assert!(reject_shell("/bin/sh").is_err());
         assert!(reject_shell("git").is_ok());
         assert!(reject_shell("/usr/bin/env").is_ok());
+    }
+
+    /// §17.2：白名单外的父进程变量不进子进程。
+    #[tokio::test]
+    async fn env_allowlist_hides_unlisted_parent_vars() {
+        // SAFETY: edition 2024 把 set_var 标为 unsafe（多线程下改环境不安全）。
+        // 这里用本次测试独占的变量名，断言的是子进程看不到它，测完即删。
+        unsafe { std::env::set_var("TOOLGATE_TEST_LEAK", "1") };
+        let (ctx, dir) = bash_ctx("env-leak");
+        let resp = run(&json!({ "binary": "env", "args": [] }), &ctx)
+            .await
+            .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(
+            !body.contains("TOOLGATE_TEST_LEAK"),
+            "子进程看到了白名单外的变量：{body}"
+        );
+        unsafe { std::env::remove_var("TOOLGATE_TEST_LEAK") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §17.2：白名单内的变量透传，PWD 是子进程自己的工作目录。
+    #[tokio::test]
+    async fn env_allowlist_keeps_listed_vars_and_sets_pwd() {
+        let (ctx, dir) = bash_ctx("env-keep");
+        let resp = run(&json!({ "binary": "env", "args": [] }), &ctx)
+            .await
+            .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("PATH="), "PATH 未透传：{body}");
+        assert!(body.contains("HOME="), "HOME 未透传：{body}");
+        // PWD 必须是子进程的 cwd，而不是 toolgate 进程的 cwd。
+        let expected = format!("PWD={}", ctx.cwd.display());
+        assert!(
+            body.contains(&expected),
+            "PWD 不是子进程 cwd：期望 {expected}（dir={}）\n{body}",
+            dir.display()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §17.2：身份探测给出整数 uid/gid（本机 id 命令可用）。
+    #[test]
+    fn identity_probe_returns_integers() {
+        let id = identity();
+        assert!(id.uid.is_some(), "uid 探测失败");
+        assert!(id.gid.is_some(), "gid 探测失败");
+        let payload = id.to_json();
+        assert!(payload["uid"].as_u64().is_some());
+        assert!(payload["gid"].as_u64().is_some());
     }
 
     #[tokio::test]

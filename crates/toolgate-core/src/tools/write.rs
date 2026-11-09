@@ -45,7 +45,8 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     // write 不产生可协商的大块内容（§4.0），所以只校验、不改输出形态。
     resolve_intent(args, &CompatConfig::default()).map_err(ToolError::bad_argument)?;
     let lang = ctx.language;
-    let path = ctx.resolve(required_str(args, "path")?);
+    // §17.2：文件路径先过根校验；新建时父目录在根外同样被拒。
+    let path = ctx.resolve_file(required_str(args, "path")?)?;
     let content = required_str(args, "content")?;
 
     if let Some(parent) = path.parent()
@@ -222,6 +223,26 @@ mod tests {
         assert!(body.contains("a.txt"));
         assert_eq!(resp.meta["created"], json!(true));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §17.2：write 新建时校验父目录，根外路径返回 ISOLATION_REFUSED 且不落盘。
+    #[tokio::test]
+    async fn path_outside_allowed_roots_is_refused() {
+        let dir = std::env::temp_dir().join(format!("tg-write-guard-{}", std::process::id()));
+        let ctx = ToolContext::new(&dir).expect("ctx");
+        let outside = dir
+            .parent()
+            .expect("parent")
+            .join(format!("tg-write-escape-{}.txt", std::process::id()));
+        let err = run(
+            &json!({ "path": outside.to_str().unwrap(), "content": "x" }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(crate::error::govern_error(&err).code, "ISOLATION_REFUSED");
+        assert!(!outside.exists(), "根外文件不得被创建");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

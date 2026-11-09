@@ -114,7 +114,8 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
         .map(|p| ctx.resolve(p))
         .unwrap_or_else(|| ctx.cwd.clone());
 
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(&argv)
         .current_dir(&cwd)
         .stdin(Stdio::null())
@@ -122,7 +123,10 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
         .stderr(Stdio::piped())
         .kill_on_drop(false)
         // §14 阶段 4：独立进程组，kill 时整组终止。
-        .process_group(0)
+        .process_group(0);
+    // §17.2：后台任务同样不继承父进程环境，只拿白名单。
+    super::bash::apply_env_allowlist(&mut command, &cwd);
+    let mut child = command
         .spawn()
         .map_err(|e| ToolError::failed(format!("无法启动 {binary}：{e}")))?;
 
@@ -555,6 +559,42 @@ mod tests {
         assert!(!body_of(&resp).contains("[SLOT_UNAVAILABLE]"));
         assert_eq!(resp.meta["intent"], json!("raw"));
         assert!(resp.meta.get("notices").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §17.2：后台任务同样只拿白名单环境，PWD 是任务自己的 cwd。
+    #[tokio::test]
+    async fn env_allowlist_applies_to_background_jobs() {
+        // SAFETY: 见 bash 侧同名测试——独占变量名，只用于断言子进程看不到它。
+        unsafe { std::env::set_var("TOOLGATE_TEST_LEAK_TASK", "1") };
+        let (ctx, dir) = task_ctx("env-allowlist");
+        let resp = run(
+            &json!({ "action": "start", "binary": "env", "args": [] }),
+            &ctx,
+        )
+        .await
+        .expect("start ok");
+        let id = resp.meta["taskId"].as_str().expect("taskId").to_owned();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let read = run(
+            &json!({ "action": "read", "task_id": id, "intent": "raw" }),
+            &ctx,
+        )
+        .await
+        .expect("read ok");
+        let body = body_of(&read);
+        assert!(
+            !body.contains("TOOLGATE_TEST_LEAK_TASK"),
+            "后台任务看到了白名单外的变量：{body}"
+        );
+        let expected = format!("PWD={}", ctx.cwd.display());
+        assert!(
+            body.contains(&expected),
+            "PWD 不是任务 cwd：期望 {expected}（dir={}）\n{body}",
+            dir.display()
+        );
+        assert!(body.contains("PATH="), "PATH 未透传：{body}");
+        unsafe { std::env::remove_var("TOOLGATE_TEST_LEAK_TASK") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -11,7 +11,8 @@
 （附件 E）。仓库根 [AGENTS.md](../AGENTS.md) 是架构迭代与实现的工作规范
 （红线、流程、验证），动手前先读。
 
-本目录是唯一权威描述。当前代码实现 v1 骨架（无 SLM），差距见 §13。
+本目录是唯一权威描述。实现进度与差距逐项状态见 [implementation-status.md](implementation-status.md)；
+架构层面的差距说明见 §13。
 
 ---
 

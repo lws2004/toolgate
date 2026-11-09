@@ -3,6 +3,8 @@
 //! 纯逻辑：命中数阈值、intent 协商、理解链 DAG、rerank 槽位全空时的降级告知。
 //! 不含模型后端（可选层，§19.6）；rerank 缺失时按 §3.8 保持命中顺序。
 
+use std::time::Duration;
+
 use serde_json::{Value, json};
 
 use crate::compat::{CompatConfig, resolve_intent};
@@ -170,6 +172,82 @@ pub fn structured_facts(
     })
 }
 
+/// §17.2 资源耗尽：search 遍历的递归深度上限（起点目录算第 0 层）。
+pub const MAX_WALK_DEPTH: usize = 32;
+/// §17.2 资源耗尽：search 单次遍历的文件数上限。
+pub const MAX_WALK_FILES: usize = 200_000;
+/// §17.2 资源耗尽：search 单次遍历的时限，超时返回 TIMEOUT。
+pub const MAX_WALK_DURATION: Duration = Duration::from_secs(10);
+
+/// 遍历上限。默认值即 §17.2 的口径；测试注入更小的值验证截断与超时。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalkLimits {
+    pub max_depth: usize,
+    pub max_files: usize,
+    pub max_duration: Duration,
+}
+
+impl Default for WalkLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: MAX_WALK_DEPTH,
+            max_files: MAX_WALK_FILES,
+            max_duration: MAX_WALK_DURATION,
+        }
+    }
+}
+
+impl WalkLimits {
+    /// 纯函数：到达时限即超时。超时是错误（TIMEOUT），与截断部分结果不同。
+    pub fn timed_out(&self, elapsed: Duration) -> bool {
+        elapsed >= self.max_duration
+    }
+}
+
+/// 一次遍历的收尾事实：处理了多少文件、是否因上限被截断。
+///
+/// 截断不是错误：返回已遍历的部分，并让调用方在 content 与 meta 里明确告知。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WalkOutcome {
+    pub files: usize,
+    pub depth_truncated: bool,
+    pub files_truncated: bool,
+}
+
+impl WalkOutcome {
+    /// 目录到达深度上限：其子项不再遍历，记深度截断。
+    pub fn observe_dir(&mut self, depth: usize, limits: WalkLimits) {
+        if depth >= limits.max_depth {
+            self.depth_truncated = true;
+        }
+    }
+
+    /// 文件计数；已达文件数上限时记截断并返回 true（调用方应停止遍历）。
+    pub fn observe_file(&mut self, limits: WalkLimits) -> bool {
+        if self.files >= limits.max_files {
+            self.files_truncated = true;
+            return true;
+        }
+        self.files += 1;
+        false
+    }
+
+    /// 是否发生了截断（深度或文件数）。
+    pub fn truncated(&self) -> bool {
+        self.depth_truncated || self.files_truncated
+    }
+
+    /// 截断原因；未截断时为 None（写进 meta 供程序判断）。
+    pub fn truncated_by(&self) -> Option<&'static str> {
+        match (self.depth_truncated, self.files_truncated) {
+            (false, false) => None,
+            (true, false) => Some("depth"),
+            (false, true) => Some("files"),
+            (true, true) => Some("depth+files"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +336,45 @@ mod tests {
             schedule(&chain, MAX_PARALLEL)
         );
         assert_eq!(schedule(&chain, MAX_PARALLEL)[0], vec![0]);
+    }
+
+    /// §17.2：遍历上限的默认值与文档口径一致（32 层 / 20 万文件 / 10 秒）。
+    #[test]
+    fn walk_limits_match_documented_defaults() {
+        let limits = WalkLimits::default();
+        assert_eq!(limits.max_depth, 32);
+        assert_eq!(limits.max_files, 200_000);
+        assert_eq!(limits.max_duration, Duration::from_secs(10));
+    }
+
+    /// §17.2：超时判定是纯函数，到达时限即超时。
+    #[test]
+    fn timed_out_is_a_pure_predicate() {
+        let limits = WalkLimits::default();
+        assert!(!limits.timed_out(Duration::from_secs(9)));
+        assert!(limits.timed_out(Duration::from_secs(10)));
+        assert!(limits.timed_out(Duration::from_secs(11)));
+    }
+
+    /// §17.2：深度与文件数分别记截断，两者都触发时原因合并。
+    #[test]
+    fn walk_outcome_records_depth_and_file_truncation() {
+        let limits = WalkLimits {
+            max_depth: 2,
+            max_files: 2,
+            max_duration: Duration::from_secs(10),
+        };
+        let mut walk = WalkOutcome::default();
+        walk.observe_dir(1, limits);
+        assert!(!walk.truncated(), "未到深度上限不应记截断");
+        walk.observe_dir(2, limits);
+        assert_eq!(walk.truncated_by(), Some("depth"));
+        assert!(!walk.observe_file(limits));
+        assert!(!walk.observe_file(limits));
+        assert_eq!(walk.files, 2);
+        assert!(walk.observe_file(limits), "文件数到上限应请求停止");
+        assert_eq!(walk.files, 2, "请求停止后不再计数");
+        assert_eq!(walk.truncated_by(), Some("depth+files"));
     }
 
     #[test]

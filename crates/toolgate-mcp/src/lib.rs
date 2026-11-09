@@ -97,6 +97,8 @@ impl McpServer {
                     .find(|v| **v == requested)
                     .copied()
                     .unwrap_or(LATEST_VERSION);
+                // §17.2 权限越界：把真实 uid/gid 交给调用方判断权限是否越界。
+                let identity = toolgate_core::tools::bash::identity();
                 json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -106,6 +108,7 @@ impl McpServer {
                         "serverInfo": {
                             "name": "toolgate",
                             "version": env!("CARGO_PKG_VERSION"),
+                            "identity": identity.to_json(),
                         }
                     }
                 })
@@ -239,6 +242,30 @@ mod tests {
         .await;
         assert_eq!(resp["result"]["protocolVersion"], json!("2026-07-28"));
         assert_eq!(resp["result"]["serverInfo"]["name"], json!("toolgate"));
+    }
+
+    /// §17.2：initialize 的 serverInfo 上报真实 uid/gid（整数，不是编造值）。
+    #[tokio::test]
+    async fn initialize_reports_process_identity() {
+        let mut s = test_server();
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": "2026-07-28" }
+            }),
+        )
+        .await;
+        let identity = &resp["result"]["serverInfo"]["identity"];
+        assert!(identity.is_object(), "serverInfo 缺 identity：{resp}");
+        assert!(
+            identity["uid"].as_u64().is_some(),
+            "uid 不是整数：{identity}"
+        );
+        assert!(
+            identity["gid"].as_u64().is_some(),
+            "gid 不是整数：{identity}"
+        );
     }
 
     #[tokio::test]

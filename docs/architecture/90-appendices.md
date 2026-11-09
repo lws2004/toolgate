@@ -115,6 +115,7 @@ slm:
 | `isolation.fallback_chain` | `[redact, structure, summarize, refuse]` | 脱敏无意义时的降级顺序 |
 | `isolation.redact_min_retention` | `0.5` | 脱敏后保留率下限 |
 | `paths.expose_absolute` | `false` | 模型可见路径默认工作区相对；raw 显式开启才绝对 |
+| `paths.allowed_roots` | `[启动时工作目录]` | 文件访问允许根；read / write / edit / search 的路径必须在其中（§17.2） |
 | `models` | `{}` | 模型清单；每个模型声明 `serves`（能服务哪些槽位，§3.10） |
 | `models.<id>.source` | `auto` | `auto`（按 path / base_url 推断）；也可显式 `local` / `openai` / `anthropic` / `responses` / `systemone`（§18.1；`systemone` 必须显式写，不参与 auto 推断） |
 | `models.<id>.adapter` | `auto` | 形状适配器：`auto` / `native` / `json` / `text` / `ordered`（§3.10） |
@@ -169,7 +170,8 @@ slm:
 | `models` | **已实现** | 模型清单解析：`source` / `path` / `base_url` / `model` / `api_key_env` / `allow_remote` / `serves` / `adapter`（§18.1、§3.10） |
 | `slots` | **已实现** | 槽位绑定解析：显式覆盖优先，否则按 `serves` 推导（§3.10） |
 | `slm` | **已实现** | 槽位运行参数：`mode` / `probe` / `disable_after_failures` / `embedded.*` / `http.base_url`（§18.1、§3.11） |
-| `intent` / `isolation` / `paths` / `limits` / `spill` / `snapshot` / `cache` / `logging` / `fetch` / `govern` | **配置参考，尚未接线** | 这些段目前只有架构定义，还没有被运行时消费 |
+| `paths.allowed_roots` | **已实现** | 文件访问允许根（§17.2）：默认 `[启动时工作目录]`，可追加扩大 |
+| `intent` / `isolation` / `paths.expose_absolute` / `limits` / `spill` / `snapshot` / `cache` / `logging` / `fetch` / `govern` | **配置参考，尚未接线** | 这些段与字段目前只有架构定义，还没有被运行时消费 |
 
 **未接线段配了会被明确拒绝**：写入上表标记为「尚未接线」的段，配置校验按
 §18.9 的结构层失败处理，报出该段名并说明「当前版本未实现该配置段」的可行动

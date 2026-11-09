@@ -80,10 +80,13 @@ dsh-ledger-compact 的对照与六条借鉴见附件 E.5。
 | 图片压缩流水线 | 完成 | v2 的降级路径，不变 |
 | 行锚点 | 完成 | v2 保留为可选模式 |
 | edit 归一化匹配 | 部分完成 | v1 已做行尾/空白归一化（含 CRLF、智能引号、破折号），第 4 级语义对齐未做；v2 扩到四级（§5.4） |
-| MCP 传输 | 部分完成 | 传输循环可接收无握手请求，但 per-request `_meta` 与版本校验未实现；需按 §13.2 补 |
-| 6 个工具的 L0 层 | 部分完成 | 执行层可用；edit 缺模式 C、read 缺单行超长落盘、search 缺超时、路径根校验与 env 白名单未实现（§17.2） |
+| MCP 传输 | 完成 | 无握手请求 + 旧版 initialize 协商；per-request `_meta` 解析与版本校验在 `compat.rs` / `toolgate-mcp/src/lib.rs` |
+| 6 个工具的 L0 层 | 部分完成 | 路径根校验、search 超时、env 白名单已补（§17.2）；剩余 edit 模式 C 与 read 单行超长落盘（逐项状态见 [implementation-status.md](../implementation-status.md)） |
 
 ### 13.2 需要新增
+
+> 除 embedded 推理后端外，下表各项均已落地；逐项状态、证据与验证方式见
+> [implementation-status.md](../implementation-status.md)（实现状态的唯一事实源）。
 
 | 模块 | 工作量 | 依赖 |
 |---|---|---|
@@ -176,6 +179,8 @@ PTC 里每次子调用仍是一个独立的 MCP 请求，工具层不做批量�
 ## 14. 路线图
 
 第一期（阶段 1–4）只覆盖 macOS（§19.7）；Windows / Linux 从阶段 6 起规划。
+
+**实现状态的唯一事实源是 [implementation-status.md](../implementation-status.md)**：本节只写阶段划分与验收口径，逐项做到哪、证据在哪、下一步做什么，一律查那张表。
 
 ### 阶段 0：架构定稿（当前）
 

@@ -278,6 +278,14 @@ pub struct SlmConfig {
     pub http: Option<HttpConfig>,
 }
 
+/// 路径语义配置（§17.2 / 附录 D）。只接线 allowed_roots；expose_absolute 等字段尚未接线。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PathsConfig {
+    /// 文件访问允许根（§17.2）：read / write / edit / search 的路径必须落在其中。
+    /// 缺省空 = 只用启动时工作目录。
+    pub allowed_roots: Vec<String>,
+}
+
 /// 槽位绑定结果（§3.10）：某个槽位由哪个模型承担。
 #[derive(Debug, Clone, Serialize)]
 pub struct SlotBinding {
@@ -304,6 +312,8 @@ pub struct ResolvedConfig {
     pub slots: BTreeMap<String, String>,
     /// SLM 全局配置。
     pub slm: SlmConfig,
+    /// 路径语义配置（§17.2）。
+    pub paths: PathsConfig,
     /// 五个槽位的绑定，顺序同 SlotKind::ALL。
     pub bindings: Vec<SlotBinding>,
 }
@@ -311,7 +321,9 @@ pub struct ResolvedConfig {
 // ---------- 合法取值表 ----------
 
 /// 顶层合法段（§18.9：未知字段一律拒绝）。
-const TOP_LEVEL_FIELDS: &str = "models / slots / slm";
+const TOP_LEVEL_FIELDS: &str = "models / slots / slm / paths";
+/// paths 段合法字段。
+const PATHS_FIELDS: &str = "allowed_roots";
 /// 模型配置合法字段。
 const MODEL_FIELDS: &str =
     "source / mode / adapter / path / base_url / model / api_key_env / allow_remote / serves";
@@ -344,9 +356,13 @@ const EN_CONFIG_TEXT: &[(&str, &str)] = &[
     ("布尔值", "boolean"),
     ("非负整数", "non-negative integer"),
     (
-        "映射（models / slots / slm）",
-        "mapping (models / slots / slm)",
+        "映射（models / slots / slm / paths）",
+        "mapping (models / slots / slm / paths)",
     ),
+    ("映射（路径语义配置）", "mapping (path semantics config)"),
+    ("字符串数组（绝对路径）", "array of absolute paths"),
+    ("绝对路径（字符串）", "absolute path (string)"),
+    ("绝对路径", "absolute path"),
     (
         "映射（模型 id → 模型配置）",
         "mapping (model id → model config)",
@@ -500,14 +516,14 @@ pub fn parse_config(text: &str, origin: &str) -> Result<ResolvedConfig, ConfigEr
         YamlValue::Null => Mapping::new(),
         YamlValue::Mapping(map) => map,
         other => {
-            errors.push(type_error(origin, &other, "映射（models / slots / slm）"));
+            errors.push(type_error(origin, &other, "映射（models / slots / slm / paths）"));
             return Err(ConfigErrors { items: errors });
         }
     };
 
-    // 顶层：只允许 models / slots / slm（§18.9）。
+    // 顶层：只允许 models / slots / slm / paths（§18.9）。
     for (key, _) in root_map.iter() {
-        if !matches!(key.as_str(), "models" | "slots" | "slm") {
+        if !matches!(key.as_str(), "models" | "slots" | "slm" | "paths") {
             errors.push(ConfigError {
                 code: "CONFIG_UNKNOWN_FIELD".to_owned(),
                 field: key.clone(),
@@ -521,6 +537,7 @@ pub fn parse_config(text: &str, origin: &str) -> Result<ResolvedConfig, ConfigEr
     let models = parse_models(root_map.get("models"), &mut errors);
     let slots = parse_slots(root_map.get("slots"), &mut errors);
     let slm = parse_slm(root_map.get("slm"), &mut errors);
+    let paths = parse_paths(root_map.get("paths"), &mut errors);
 
     // 结构层有错即返回：结构不完整时语义校验只会产生连锁噪音（§18.9 同层一次列全）。
     if !errors.is_empty() {
@@ -635,6 +652,7 @@ pub fn parse_config(text: &str, origin: &str) -> Result<ResolvedConfig, ConfigEr
         models,
         slots,
         slm,
+        paths,
         bindings,
     })
 }
@@ -992,6 +1010,59 @@ fn parse_http(value: &YamlValue, field: &str, errors: &mut Vec<ConfigError>) -> 
         }
     }
     Some(http)
+}
+
+/// 解析 paths 段：只允许 allowed_roots（§17.2）。本版本其余 paths 字段尚未接线。
+fn parse_paths(value: Option<&YamlValue>, errors: &mut Vec<ConfigError>) -> PathsConfig {
+    let mut paths = PathsConfig::default();
+    let map = match value {
+        None => return paths,
+        Some(YamlValue::Mapping(map)) => map,
+        Some(other) => {
+            errors.push(type_error("paths", other, "映射（路径语义配置）"));
+            return paths;
+        }
+    };
+    for (key, item) in map.iter() {
+        let field = format!("paths.{key}");
+        match key.as_str() {
+            "allowed_roots" => {
+                let items = match item {
+                    YamlValue::Sequence(items) => items,
+                    other => {
+                        errors.push(type_error(&field, other, "字符串数组（绝对路径）"));
+                        continue;
+                    }
+                };
+                for (index, entry) in items.iter().enumerate() {
+                    let item_field = format!("{field}[{index}]");
+                    match entry {
+                        YamlValue::String(path) if Path::new(path).is_absolute() => {
+                            paths.allowed_roots.push(path.clone());
+                        }
+                        YamlValue::String(path) => errors.push(ConfigError {
+                            code: "CONFIG_INVALID_VALUE".to_owned(),
+                            field: item_field,
+                            value: Some(path.clone()),
+                            expected: "绝对路径".to_owned(),
+                            fix: "允许根必须写绝对路径：相对路径会随启动目录漂移，不构成稳定边界"
+                                .to_owned(),
+                        }),
+                        other => errors.push(type_error(&item_field, other, "绝对路径（字符串）")),
+                    }
+                }
+            }
+            _ => errors.push(ConfigError {
+                code: "CONFIG_UNKNOWN_FIELD".to_owned(),
+                field,
+                value: Some(value_repr(item)),
+                expected: PATHS_FIELDS.to_owned(),
+                fix: "该字段不在 paths 段的合法字段表内（expose_absolute 等字段本版本尚未接线），请检查拼写或移除"
+                    .to_owned(),
+            }),
+        }
+    }
+    paths
 }
 
 // ---------- 内部：绑定与取值辅助 ----------
@@ -1782,7 +1853,7 @@ mod tests {
         assert_eq!(en.items[0].code, "CONFIG_UNKNOWN_FIELD");
         assert_eq!(en.items[0].field, "isolation");
         // 段名是字面标识符，不翻译；fix 必须整句英文。
-        assert_eq!(en.items[0].expected, "models / slots / slm");
+        assert_eq!(en.items[0].expected, "models / slots / slm / paths");
         assert_eq!(
             en.items[0].fix,
             "This configuration section is not implemented in this version; remove it or wait for a later version"
@@ -1814,5 +1885,44 @@ mod tests {
         // 中文仍是中文。
         assert!(syntax.items[0].fix.contains("行"));
         assert!(syntax.items[0].fix.contains("列"));
+    }
+
+    /// §17.2：paths.allowed_roots 解析绝对路径；缺省为空 = 只用启动工作目录。
+    #[test]
+    fn paths_allowed_roots_parses_absolute_paths() {
+        let config = parse_config(
+            "paths:\n  allowed_roots:\n    - /tmp\n    - /Users/me/project\n",
+            "test.yaml",
+        )
+        .expect("应当解析成功");
+        assert_eq!(config.paths.allowed_roots, vec!["/tmp", "/Users/me/project"]);
+        let empty = parse_config("", "test.yaml").expect("空配置应当解析成功");
+        assert!(empty.paths.allowed_roots.is_empty());
+    }
+
+    /// §17.2：允许根必须绝对路径，相对路径 fail loud。
+    #[test]
+    fn paths_allowed_roots_rejects_relative_paths() {
+        let errors = errors_of("paths:\n  allowed_roots:\n    - ./data\n");
+        assert_eq!(errors[0].code, "CONFIG_INVALID_VALUE");
+        assert_eq!(errors[0].field, "paths.allowed_roots[0]");
+        assert!(errors[0].fix.contains("绝对路径"));
+    }
+
+    /// §18.9：paths 段未接线的字段明确拒绝，不静默忽略。
+    #[test]
+    fn paths_unknown_field_rejected() {
+        let errors = errors_of("paths:\n  expose_absolute: true\n");
+        assert_eq!(errors[0].code, "CONFIG_UNKNOWN_FIELD");
+        assert_eq!(errors[0].field, "paths.expose_absolute");
+        assert!(errors[0].expected.contains("allowed_roots"));
+    }
+
+    /// §18.9：allowed_roots 类型错要 fail loud 并指出字段路径。
+    #[test]
+    fn paths_allowed_roots_type_errors() {
+        let errors = errors_of("paths:\n  allowed_roots: /tmp\n");
+        assert_eq!(errors[0].code, "CONFIG_TYPE");
+        assert_eq!(errors[0].field, "paths.allowed_roots");
     }
 }

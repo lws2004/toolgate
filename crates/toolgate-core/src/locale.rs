@@ -71,8 +71,35 @@ fn en(zh: &str) -> Option<&'static str> {
         "缩小 search 的 maxResults" => "Lower search maxResults",
         "检查 models 的 serves 声明" => "Check the serves declarations in models",
         "或让它按 §3.8 走机械路径" => "Or let it degrade to the mechanical path per §3.8",
-        "调整隔离策略" => "Adjust the isolation policy",
-        "改用允许的路径" => "Use an allowed path instead",
+        "把路径改到工作目录或已配置的允许根内" => {
+            "Move the path into the working directory or a configured allowed root"
+        }
+        "或用 paths.allowed_roots 扩大允许根后重启" => {
+            "Or widen the allowed roots via paths.allowed_roots and restart"
+        }
+        "请求的路径 {requested} 不在允许根内" => {
+            "Requested path {requested} is outside the allowed roots"
+        }
+        "允许根：{roots}（§17.2 路径穿越对策）" => {
+            "Allowed roots: {roots} (§17.2 path traversal countermeasure)"
+        }
+        "search 遍历超过单次时限：已用 {} 毫秒，上限 {} 毫秒" => {
+            "search walk exceeded the per-call limit: {} ms used, {} ms allowed"
+        }
+        "遍历上限防止一个 glob 匹配百万文件把时间与内存打满（§17.2）" => {
+            "Walk limits keep a glob matching millions of files from saturating time and memory (§17.2)"
+        }
+        "把 path 缩小到子目录后重试" => "Narrow path to a subdirectory and retry",
+        "或用更精确的 query 减少遍历量" => "Or use a more precise query to reduce the walk",
+        "\n[遍历已截断：递归深度达 {depth} 层且文件数达 {files} 个，结果只覆盖已遍历部分]" => {
+            "\n[Walk truncated: depth limit {depth} and file limit {files} both reached; results cover only the walked portion]"
+        }
+        "\n[遍历已截断：递归深度达 {depth} 层，结果只覆盖已遍历部分]" => {
+            "\n[Walk truncated: depth limit {depth} reached; results cover only the walked portion]"
+        }
+        "\n[遍历已截断：文件数达 {files} 个，结果只覆盖已遍历部分]" => {
+            "\n[Walk truncated: file limit {files} reached; results cover only the walked portion]"
+        }
         "调用 tools/list 查看可用工具名" => "Call tools/list for available tool names",
         "改用 read / write / edit / search / bash / task 之一" => {
             "Use one of read / write / edit / search / bash / task"
@@ -219,6 +246,57 @@ fn en(zh: &str) -> Option<&'static str> {
         }
         "未找到 oldText（机械归因：{}）。原文片段：{}\n请重新 read 确认当前内容。" => {
             "oldText not found (mechanical attribution: {}). Original excerpt: {}\nRe-read to confirm current content."
+        }
+        // §5.4 模式 C（扁平 patch）：冲突、hunk 校验与模式互斥
+        "patch 冲突" => "patch conflict",
+        "patch 里没有 @@ hunk 头；模式 C 需要 unified diff 文本" => {
+            "The patch has no @@ hunk header; mode C requires unified diff text"
+        }
+        "patch 的 hunk 区间重叠，请合并成一个 hunk" => {
+            "Patch hunks overlap; merge them into one hunk"
+        }
+        "edits 必须是数组" => "edits must be an array",
+        "缺少 path：edits / anchor 模式必须给目标文件路径，patch 模式可从 ---/+++ 文件头推断" => {
+            "Missing path: edits / anchor modes need the target file path; patch mode can infer it from the ---/+++ header"
+        }
+        "patch 模式没有可用的 path：请显式传 path，或在 patch 里给 ---/+++ 文件头（/dev/null 不算）" => {
+            "patch mode has no usable path: pass path explicitly, or include a ---/+++ header in the patch (/dev/null does not count)"
+        }
+        "需要提供 edits 数组（文本匹配模式）、anchor + newText（行锚点模式），或 patch（unified diff 模式）；三选一" => {
+            "Provide exactly one of: edits array (text matching), anchor + newText (line anchor), or patch (unified diff)"
+        }
+        "patch 的 hunk 与当前文件对不上：文件已被改过，或 hunk 的行号/行数算错了" => {
+            "The patch hunks do not match the current file: the file changed, or the hunk line numbers/counts are wrong"
+        }
+        "重新 read 当前文件，按最新行号重算 hunk" => {
+            "Re-read the current file and recompute the hunks against fresh line numbers"
+        }
+        "或改用 edits 文本匹配模式（oldText 需在文件中唯一）" => {
+            "Or switch to edits text matching (oldText must be unique in the file)"
+        }
+        "hunk 里出现无法识别的行前缀：{line}" => "unrecognized line prefix inside a hunk: {line}",
+        "hunk 头格式不对：{line}" => "malformed hunk header: {line}",
+        "hunk 头缺旧侧范围：{line}" => "hunk header lacks the old-side range: {line}",
+        "hunk 头缺新侧范围：{line}" => "hunk header lacks the new-side range: {line}",
+        "hunk 头的范围要以 {sign} 开头：{line}" => {
+            "hunk header range must start with {sign}: {line}"
+        }
+        "hunk 头的行号不是数字：{line}" => "hunk header line number is not a number: {line}",
+        "hunk {}（@@ -{},{} +{},{}）的行数与内容不符：头声明旧侧 {} 行 / 新侧 {} 行，体里是 {} / {}" => {
+            "hunk {} (@@ -{},{} +{},{}): line counts do not match the body — header says {} old / {} new, body has {} / {}"
+        }
+        "hunk {} 的行号 {} 超出文件范围（文件共 {} 行）" => {
+            "hunk {} start line {} is outside the file (file has {} lines)"
+        }
+        "patch 冲突：hunk {} 第 {} 行（文件第 {} 行）不匹配\n期望：{}\n实际：{}" => {
+            "patch conflict: hunk {} line {} (file line {}) does not match\nExpected: {}\nActual: {}"
+        }
+        "{}（机械归因：{}）" => "{} (mechanical attribution: {})",
+        "edits / anchor / patch 三选一，本次同时收到 {}；删掉多余的模式后重试" => {
+            "edits / anchor / patch are mutually exclusive; got {} this time — drop the extra modes and retry"
+        }
+        "{} 在读取后被其他进程修改，已放弃写入（不做三方合并）。请重新 read 后再改。" => {
+            "{} changed after it was read; write aborted (no three-way merge). Re-read, then edit again."
         }
         "锚点行号 {} 超出文件行数 {}" => "Anchor line {} exceeds the file's {} lines",
         "当前没有后台任务。" => "No background tasks.",
@@ -458,6 +536,18 @@ const TEMPLATES: &[&str] = &[
     "在文件中匹配到 {n} 处，无法确定改哪一处。请扩大 oldText 的上下文使其唯一。",
     "归一化匹配到 {n} 处，请扩大 oldText 上下文使其唯一。",
     "未找到 oldText（机械归因：{}）。原文片段：{}\n请重新 read 确认当前内容。",
+    "hunk 里出现无法识别的行前缀：{line}",
+    "hunk 头格式不对：{line}",
+    "hunk 头缺旧侧范围：{line}",
+    "hunk 头缺新侧范围：{line}",
+    "hunk 头的范围要以 {sign} 开头：{line}",
+    "hunk 头的行号不是数字：{line}",
+    "hunk {}（@@ -{},{} +{},{}）的行数与内容不符：头声明旧侧 {} 行 / 新侧 {} 行，体里是 {} / {}",
+    "hunk {} 的行号 {} 超出文件范围（文件共 {} 行）",
+    "patch 冲突：hunk {} 第 {} 行（文件第 {} 行）不匹配\n期望：{}\n实际：{}",
+    "{}（机械归因：{}）",
+    "edits / anchor / patch 三选一，本次同时收到 {}；删掉多余的模式后重试",
+    "{} 在读取后被其他进程修改，已放弃写入（不做三方合并）。请重新 read 后再改。",
     "edits[{i}] 缺少 oldText",
     "edits[{i}] 缺少 newText",
     "不支持的协议版本 {v}；支持：{}。请改用受支持版本，或去掉请求里的版本字段按旧版无元数据方式调用",
@@ -467,6 +557,12 @@ const TEMPLATES: &[&str] = &[
     "index {} 越界或重复",
     "labels 长度 {} 不在 2-50 内",
     "节点 id {} 重复",
+    "请求的路径 {requested} 不在允许根内",
+    "允许根：{roots}（§17.2 路径穿越对策）",
+    "search 遍历超过单次时限：已用 {} 毫秒，上限 {} 毫秒",
+    "\n[遍历已截断：递归深度达 {depth} 层且文件数达 {files} 个，结果只覆盖已遍历部分]",
+    "\n[遍历已截断：递归深度达 {depth} 层，结果只覆盖已遍历部分]",
+    "\n[遍历已截断：文件数达 {files} 个，结果只覆盖已遍历部分]",
     "节点 {} 依赖自身",
     "链有 {} 步，超过上限 {MAX_STEPS}",
     "命令超时（{} 秒）已被终止：{binary} {}",
@@ -688,5 +784,37 @@ mod tests {
         let out = localize_value(Language::En, &v);
         assert_eq!(out["description"], json!("Target file path"));
         assert_eq!(out["enum"], json!(["raw", "summary"]));
+    }
+
+    /// §17.2 / §18.1b：安全底线新增文案在英文下必须整句英文，不留中文。
+    #[test]
+    fn security_messages_are_fully_english() {
+        fn contains_han(text: &str) -> bool {
+            text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+        }
+        let refusal = crate::ToolError::isolation_refused(
+            "/etc/passwd",
+            &[std::path::PathBuf::from("/work")],
+        );
+        let view = crate::error::govern_error(&refusal.localized(Language::En));
+        for text in [view.fact, view.reason, view.next_steps.join("；")] {
+            assert!(!contains_han(&text), "英文输出残留中文：{text}");
+        }
+        let timeout = crate::ToolError::search_walk_timeout(
+            std::time::Duration::from_millis(11_000),
+            std::time::Duration::from_millis(10_000),
+        );
+        let view = crate::error::govern_error(&timeout.localized(Language::En));
+        for text in [view.fact, view.reason, view.next_steps.join("；")] {
+            assert!(!contains_han(&text), "英文输出残留中文：{text}");
+        }
+        for zh in [
+            "\n[遍历已截断：递归深度达 32 层，结果只覆盖已遍历部分]",
+            "\n[遍历已截断：文件数达 200000 个，结果只覆盖已遍历部分]",
+            "\n[遍历已截断：递归深度达 32 层且文件数达 200000 个，结果只覆盖已遍历部分]",
+        ] {
+            let en = t(Language::En, zh);
+            assert!(!contains_han(&en), "截断告知残留中文：{en}");
+        }
     }
 }

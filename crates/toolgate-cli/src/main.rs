@@ -2,6 +2,7 @@
 //!
 //! 子命令：
 //!   serve              以 MCP stdio server 方式运行（供 agent 接入）
+//!   status             打印进程身份 uid/gid（§17.2 权限越界）
 //!   list               列出工具及其入参 schema
 //!   call <tool> [json] 直接调用一次工具（调试用）
 //!   config check       校验配置文件并打印五个槽位的最终绑定（§18.9）
@@ -23,6 +24,7 @@ use toolgate_core::slm::{DecideOutcome, SlotCallError, SlotClient, SummarizeOutc
 use toolgate_core::slots::{
     ConfidenceGate, DecideInput, SlotKind, SummarizeInput, confidence_gate,
 };
+use toolgate_core::tools::bash::ProcessIdentity;
 use toolgate_core::tools::{ToolContext, all_specs, dispatch, round2};
 use toolgate_mcp::McpServer;
 
@@ -31,6 +33,7 @@ const USAGE: &str = "\
 
 子命令:
   serve                 以 MCP stdio server 方式运行，供 agent 客户端接入
+  status                打印进程身份 uid/gid，供无握手客户端核对权限（§17.2）
   list                  列出全部工具与入参 schema
   call <工具名> [JSON]   直接调用一次工具，参数是 JSON 对象（调试用）
   config check          校验配置文件并打印五个槽位的最终绑定（§18.9）
@@ -39,7 +42,7 @@ const USAGE: &str = "\
 
 选项:
   --config <路径>       指定配置文件路径（默认 ~/.toolgate/config.yaml）
-  --json                config check / decide / summarize 以 JSON 输出结果
+  --json                config check / decide / summarize / status 以 JSON 输出结果
   --state <文本>        decide 的待判定状态（必填）
   --question <问题>     decide 的判定问题，可重复（至少一个）
   --text <文本>        summarize 的待摘要文本（必填）
@@ -61,6 +64,7 @@ Usage: toolgate <subcommand> [args]
 
 Subcommands:
   serve                 Run as an MCP stdio server for agent clients
+  status                Print the process identity uid/gid for handshake-less clients (§17.2)
   list                  List all tools and their input schemas
   call <tool> [JSON]     Invoke one tool directly (debug only)
   config check          Validate the config file and print the five slot bindings (§18.9)
@@ -69,7 +73,7 @@ Subcommands:
 
 Options:
   --config <path>       Config file path (default ~/.toolgate/config.yaml)
-  --json                Print the config check, decide and summarize results as JSON
+  --json                Print the config check, decide, summarize and status results as JSON
   --state <text>        State to judge for decide (required)
   --question <question> Decision question for decide; repeatable (at least one)
   --text <text>         Text to summarize for the summarize subcommand (required)
@@ -195,6 +199,13 @@ async fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+        "status" => {
+            let json_out = match parse_status_args(lang, &args[1..]) {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
+            run_status(lang, json_out)
         }
         "list" => {
             let config_path = match parse_config_arg(lang, &args[1..]) {
@@ -861,20 +872,35 @@ fn build_context(
     };
     ctx.language = lang;
 
-    let (slm, rows) = match load_cli_config(lang, config_path) {
+    let (slm, rows, extra_roots) = match load_cli_config(lang, config_path) {
         ConfigOutcome::Resolved(cfg) => {
             let rows = SlotRow::from_config(&cfg);
-            (Some(std::sync::Arc::new(SlotClient::new(cfg))), rows)
+            let roots = cfg.paths.allowed_roots.clone();
+            (Some(std::sync::Arc::new(SlotClient::new(cfg))), rows, roots)
         }
-        ConfigOutcome::Missing => (None, SlotRow::empty()),
+        ConfigOutcome::Missing => (None, SlotRow::empty(), Vec::new()),
         ConfigOutcome::Failed(errors) => {
             report_errors(lang, &errors, false);
             return Err(ExitCode::FAILURE);
         }
     };
     ctx.slm = slm;
+    // §17.2：配置的允许根是在「启动时工作目录」之上的追加，不是替换。
+    if !extra_roots.is_empty() {
+        ctx.set_allowed_roots(merge_allowed_roots(&ctx.allowed_roots, &extra_roots));
+    }
 
     Ok((ctx, rows))
+}
+
+/// §17.2：配置的允许根追加到默认根上；空清单保持默认。
+///
+/// 不能直接 set_allowed_roots(extra)：那会把「启动时工作目录」这个默认根丢掉，
+/// 而 set_allowed_roots(vec![]) 等于拒绝一切文件路径。
+fn merge_allowed_roots(defaults: &[PathBuf], extra: &[String]) -> Vec<PathBuf> {
+    let mut roots = defaults.to_vec();
+    roots.extend(extra.iter().map(PathBuf::from));
+    roots
 }
 
 /// 加载配置的四种结局：解析成功 / 文件缺失 / 校验失败。
@@ -941,6 +967,64 @@ fn run_config_check(lang: Language, config_path: Option<&Path>, json_out: bool) 
             ExitCode::FAILURE
         }
     }
+}
+
+/// status：打印进程身份（§17.2 权限越界）。
+///
+/// 2026-07-28 无握手客户端不调 initialize 时，身份只能从命令行查看（§17.2）。
+fn run_status(lang: Language, json_out: bool) -> ExitCode {
+    let identity = toolgate_core::tools::bash::identity();
+    if json_out {
+        println!("{}", pretty_json(lang, &status_json(identity)));
+    } else {
+        println!("{}", identity_line(lang, identity));
+    }
+    ExitCode::SUCCESS
+}
+
+/// status 的 JSON 形态：与 MCP serverInfo.identity 同一形状（一个事实源）。
+fn status_json(identity: ProcessIdentity) -> serde_json::Value {
+    json!({ "ok": true, "identity": identity.to_json() })
+}
+
+/// status 的文本形态。新增文案没有登记进 locale.rs（不在本次改动范围），
+/// 故按语言二选一——与 USAGE / USAGE_EN 同一处理方式。
+fn identity_line(lang: Language, identity: ProcessIdentity) -> String {
+    let uid = id_text(identity.uid, lang);
+    let gid = id_text(identity.gid, lang);
+    match lang {
+        Language::En => format!("Identity: uid={uid} gid={gid}"),
+        Language::Zh => format!("身份：uid={uid} gid={gid}"),
+    }
+}
+
+/// 取不到身份时给「未知」而不是 0——0 会被读成 root（§4.6 诚实）。
+fn id_text(value: Option<u32>, lang: Language) -> String {
+    match value {
+        Some(n) => n.to_string(),
+        None => match lang {
+            Language::En => "unknown".to_owned(),
+            Language::Zh => "未知".to_owned(),
+        },
+    }
+}
+
+/// 解析 status 的 --json 开关。
+fn parse_status_args(lang: Language, args: &[String]) -> Result<bool, ExitCode> {
+    let mut json_out = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json_out = true,
+            other => {
+                eprintln!(
+                    "{}",
+                    tf(lang, "未知参数：{other}", &[("other", other.to_owned())])
+                );
+                return Err(ExitCode::FAILURE);
+            }
+        }
+    }
+    Ok(json_out)
 }
 
 /// 打印配置错误：多错误一次列全，每条四段齐全（code / field / value / expected / fix）。
@@ -1075,5 +1159,74 @@ async fn run_call(
             eprintln!("{e}");
             Ok(ExitCode::FAILURE)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §17.2：status 的 JSON 形态与 MCP serverInfo.identity 同形；
+    /// 取不到身份时给 null 而不是 0（0 会被读成 root）。
+    #[test]
+    fn status_json_reports_integer_identity() {
+        let payload = status_json(ProcessIdentity {
+            uid: Some(501),
+            gid: Some(20),
+        });
+        assert_eq!(payload["ok"].as_bool(), Some(true));
+        assert_eq!(payload["identity"]["uid"].as_u64(), Some(501));
+        assert_eq!(payload["identity"]["gid"].as_u64(), Some(20));
+
+        let unknown = status_json(ProcessIdentity {
+            uid: None,
+            gid: None,
+        });
+        assert!(
+            unknown["identity"]["uid"].is_null(),
+            "取不到身份不应编造 0：{unknown}"
+        );
+    }
+
+    /// §17.2：本机探测拿到的是真实 uid/gid，不是占位值。
+    #[test]
+    fn status_reports_probed_identity() {
+        let identity = toolgate_core::tools::bash::identity();
+        assert!(identity.uid.is_some(), "uid 探测失败");
+        assert!(identity.gid.is_some(), "gid 探测失败");
+    }
+
+    /// 文本形态按语言二选一，取不到身份给「未知 / unknown」。
+    #[test]
+    fn status_line_follows_language() {
+        let identity = ProcessIdentity {
+            uid: Some(501),
+            gid: Some(20),
+        };
+        assert!(
+            identity_line(Language::Zh, identity).starts_with("身份：uid=501"),
+            "中文文案不对"
+        );
+        assert!(
+            identity_line(Language::En, identity).starts_with("Identity: uid=501"),
+            "英文文案不对"
+        );
+        let unknown = ProcessIdentity {
+            uid: None,
+            gid: None,
+        };
+        assert!(identity_line(Language::Zh, unknown).contains("未知"));
+        assert!(identity_line(Language::En, unknown).contains("unknown"));
+    }
+
+    /// §17.2：配置的允许根是追加到默认根上，不是替换；空清单保持默认。
+    #[test]
+    fn allowed_roots_append_to_defaults() {
+        let defaults = vec![PathBuf::from("/work")];
+        assert_eq!(merge_allowed_roots(&defaults, &[]), defaults);
+        assert_eq!(
+            merge_allowed_roots(&defaults, &["/data".to_owned()]),
+            vec![PathBuf::from("/work"), PathBuf::from("/data")]
+        );
     }
 }

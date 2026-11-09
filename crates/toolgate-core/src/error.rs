@@ -63,7 +63,10 @@ fn next_steps_for(code: ErrorCode) -> Vec<String> {
         ErrorCode::Timeout => &["缩小命令范围或分批执行", "用 task 后台执行长任务"],
         ErrorCode::OutputLimit => &["用 offset/limit 分段读取", "缩小 search 的 maxResults"],
         ErrorCode::SlotUnavailable => &["检查 models 的 serves 声明", "或让它按 §3.8 走机械路径"],
-        ErrorCode::IsolationRefused => &["调整隔离策略", "改用允许的路径"],
+        ErrorCode::IsolationRefused => &[
+            "把路径改到工作目录或已配置的允许根内",
+            "或用 paths.allowed_roots 扩大允许根后重启",
+        ],
         ErrorCode::UnknownTool => &[
             "调用 tools/list 查看可用工具名",
             "改用 read / write / edit / search / bash / task 之一",
@@ -111,6 +114,43 @@ impl crate::ToolError {
             fact: fact.into(),
             reason: "工具执行未能完成".to_owned(),
             next_steps: next_steps_for(code),
+        }
+    }
+
+    /// §17.2 路径穿越：请求的路径不在允许根内。
+    ///
+    /// 三段式给出请求的路径与命中的根清单，下一步指向「改路径」或「扩大允许根」。
+    pub fn isolation_refused(requested: impl Into<String>, roots: &[std::path::PathBuf]) -> Self {
+        let requested = requested.into();
+        let roots = roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect::<Vec<_>>()
+            .join("、");
+        Self::Failed {
+            code: ErrorCode::IsolationRefused,
+            fact: format!("请求的路径 {requested} 不在允许根内"),
+            reason: format!("允许根：{roots}（§17.2 路径穿越对策）"),
+            next_steps: next_steps_for(ErrorCode::IsolationRefused),
+        }
+    }
+
+    /// §17.2 资源耗尽：search 遍历超过单次时限。
+    ///
+    /// 超时是错误而不是部分结果——半份结果无法判断完整性，调用方按 TIMEOUT 重试。
+    pub fn search_walk_timeout(elapsed: std::time::Duration, limit: std::time::Duration) -> Self {
+        Self::Failed {
+            code: ErrorCode::Timeout,
+            fact: format!(
+                "search 遍历超过单次时限：已用 {} 毫秒，上限 {} 毫秒",
+                elapsed.as_millis(),
+                limit.as_millis()
+            ),
+            reason: "遍历上限防止一个 glob 匹配百万文件把时间与内存打满（§17.2）".to_owned(),
+            next_steps: vec![
+                "把 path 缩小到子目录后重试".to_owned(),
+                "或用更精确的 query 减少遍历量".to_owned(),
+            ],
         }
     }
 }
@@ -316,6 +356,14 @@ mod tests {
             crate::ToolError::bad_argument("缺少字符串参数 path"),
             std::io::Error::new(ErrorKind::NotFound, "no such file").into(),
             crate::ToolError::failed("任务表锁失效"),
+            crate::ToolError::isolation_refused(
+                "/etc/passwd",
+                &[std::path::PathBuf::from("/work")],
+            ),
+            crate::ToolError::search_walk_timeout(
+                std::time::Duration::from_secs(11),
+                std::time::Duration::from_secs(10),
+            ),
         ]
     }
 
@@ -427,6 +475,46 @@ mod tests {
         let e = crate::ToolError::failed_with(ErrorCode::PathNotFound, "无法访问 /tmp/x");
         assert_eq!(govern_error(&e).code, "PATH_NOT_FOUND");
         assert!(govern_error(&e).next_steps[0].contains("路径"));
+    }
+
+    /// §17.2：路径穿越的三段式要给出请求路径、命中的根清单与可执行下一步。
+    #[test]
+    fn isolation_refused_names_requested_path_and_roots() {
+        let e = crate::ToolError::isolation_refused(
+            "/etc/passwd",
+            &[
+                std::path::PathBuf::from("/work"),
+                std::path::PathBuf::from("/data"),
+            ],
+        );
+        let view = govern_error(&e);
+        assert_eq!(view.code, "ISOLATION_REFUSED");
+        assert!(
+            view.fact.contains("/etc/passwd"),
+            "事实缺请求路径：{view:?}"
+        );
+        assert!(view.reason.contains("/work"), "原因缺允许根：{view:?}");
+        assert!(view.reason.contains("/data"), "原因缺允许根：{view:?}");
+        assert!(
+            view.next_steps.iter().any(|s| s.contains("allowed_roots")),
+            "下一步要能指导扩大允许根：{view:?}"
+        );
+    }
+
+    /// §17.2：遍历超时走 TIMEOUT 码，下一步指向缩小检索范围。
+    #[test]
+    fn search_walk_timeout_uses_timeout_code_with_search_steps() {
+        let e = crate::ToolError::search_walk_timeout(
+            std::time::Duration::from_secs(11),
+            std::time::Duration::from_secs(10),
+        );
+        let view = govern_error(&e);
+        assert_eq!(view.code, "TIMEOUT");
+        assert!(view.fact.contains("11000"), "事实缺实测耗时：{view:?}");
+        assert!(
+            view.next_steps.iter().any(|s| s.contains("path")),
+            "下一步要指向缩小 path：{view:?}"
+        );
     }
 
     #[test]

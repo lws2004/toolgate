@@ -7,6 +7,7 @@
 //! ripgrep 或 fd，因此行为在各平台一致。
 
 use std::path::Path;
+use std::time::Instant;
 
 use ignore::WalkBuilder;
 use serde_json::{Value, json};
@@ -14,10 +15,11 @@ use serde_json::{Value, json};
 use super::{ToolContext, ToolResponse, ToolSpec, optional_str, optional_usize, required_str};
 use crate::ToolError;
 use crate::bash_path::intent_tag;
-use crate::locale::tf;
+use crate::locale::{Language, tf};
 use crate::notice::{Notice, SlotFallback, budgeted_notices};
 use crate::search_path::{
-    RerankState, SearchShape, apply_rerank, plan_search, resolve_search_intent, structured_facts,
+    RerankState, SearchShape, WalkLimits, WalkOutcome, apply_rerank, plan_search,
+    resolve_search_intent, structured_facts,
 };
 use crate::slots::{RerankInput, SlotKind};
 use crate::truncate::{MAX_MATCH_LINE_LENGTH, truncate_head};
@@ -62,15 +64,25 @@ pub fn spec() -> ToolSpec {
 }
 
 pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolError> {
+    run_with_limits(args, ctx, WalkLimits::default()).await
+}
+
+/// 与 run 同一份实现；limits 只供测试注入更小的遍历上限（§17.2）。
+async fn run_with_limits(
+    args: &Value,
+    ctx: &ToolContext,
+    limits: WalkLimits,
+) -> Result<ToolResponse, ToolError> {
     let lang = ctx.language;
     let mode = required_str(args, "mode")?;
     let query = required_str(args, "query")?;
-    let root = ctx.resolve(optional_str(args, "path").unwrap_or("."));
+    // §17.2：检索起点同样过根校验，默认 "." 解析后必须落在允许根内。
+    let root = ctx.resolve_file(optional_str(args, "path").unwrap_or("."))?;
     let max_results = optional_usize(args, "max_results").unwrap_or(200);
 
-    let (raw, hit_count) = match mode {
-        "content" => search_content(&root, query, max_results)?,
-        "files" => list_files(&root, query, max_results)?,
+    let (raw, hit_count, walk) = match mode {
+        "content" => search_content(&root, query, max_results, limits)?,
+        "files" => list_files(&root, query, max_results, limits)?,
         other => {
             return Err(ToolError::bad_argument(format!(
                 "mode 只能是 content 或 files，收到 {other}"
@@ -150,6 +162,11 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         });
     }
 
+    // §17.2：达到深度或文件数上限时明确告知截断，不静默返回不完整结果。
+    if let Some(note) = walk_note(lang, &walk, limits) {
+        body.push_str(&note);
+    }
+
     let mut meta = json!({
         "mode": mode,
         "query": query,
@@ -158,6 +175,11 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "spill": spilled,
         "intent": intent_tag(intent),
         "rerank": plan.rerank.as_str(),
+        "walk": {
+            "files": walk.files,
+            "truncated": walk.truncated(),
+            "truncatedBy": walk.truncated_by(),
+        },
     });
     let mut content = body;
     if !plan.notices.is_empty() {
@@ -170,7 +192,9 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     if plan.shape == SearchShape::Structured {
         let candidates: Vec<&str> = raw.lines().collect();
         let spill_path = meta["spill"]["path"].as_str();
-        let facts = structured_facts(hit_count, &candidates, spill_path, plan.rerank);
+        let mut facts = structured_facts(hit_count, &candidates, spill_path, plan.rerank);
+        // §17.2：structured 的 content 就是 facts，截断事实一并放进来。
+        facts["walk"] = meta["walk"].clone();
         content = facts.to_string();
         meta["facts"] = facts;
     }
@@ -182,20 +206,37 @@ fn search_content(
     root: &Path,
     pattern: &str,
     max_results: usize,
-) -> Result<(String, usize), ToolError> {
+    limits: WalkLimits,
+) -> Result<(String, usize, WalkOutcome), ToolError> {
     let re = regex::Regex::new(pattern)
         .map_err(|e| ToolError::bad_argument(format!("正则无效：{e}")))?;
 
     let mut out = String::new();
     let mut hits = 0usize;
+    let mut walk = WalkOutcome::default();
+    let started = Instant::now();
 
-    for entry in walker(root) {
+    for entry in walker(root, limits) {
         if hits >= max_results {
             break;
         }
+        if limits.timed_out(started.elapsed()) {
+            return Err(ToolError::search_walk_timeout(
+                started.elapsed(),
+                limits.max_duration,
+            ));
+        }
         let Ok(entry) = entry else { continue };
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
+        let file_type = entry.file_type();
+        if file_type.is_some_and(|t| t.is_dir()) {
+            walk.observe_dir(entry.depth(), limits);
             continue;
+        }
+        if !file_type.is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        if walk.observe_file(limits) {
+            break;
         }
         let path = entry.path();
         let Ok(content) = std::fs::read_to_string(path) else {
@@ -216,7 +257,7 @@ fn search_content(
     if out.is_empty() {
         out.push_str("(无匹配)\n");
     }
-    Ok((out, hits))
+    Ok((out, hits, walk))
 }
 
 /// 文件枚举：按子串或通配符匹配文件名。
@@ -224,21 +265,38 @@ fn list_files(
     root: &Path,
     pattern: &str,
     max_results: usize,
-) -> Result<(String, usize), ToolError> {
+    limits: WalkLimits,
+) -> Result<(String, usize, WalkOutcome), ToolError> {
     let glob = glob_to_regex(pattern);
     let re = regex::Regex::new(&glob)
         .map_err(|e| ToolError::bad_argument(format!("通配符无效：{e}")))?;
 
     let mut out = String::new();
     let mut hits = 0usize;
+    let mut walk = WalkOutcome::default();
+    let started = Instant::now();
 
-    for entry in walker(root) {
+    for entry in walker(root, limits) {
         if hits >= max_results {
             break;
         }
+        if limits.timed_out(started.elapsed()) {
+            return Err(ToolError::search_walk_timeout(
+                started.elapsed(),
+                limits.max_duration,
+            ));
+        }
         let Ok(entry) = entry else { continue };
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
+        let file_type = entry.file_type();
+        if file_type.is_some_and(|t| t.is_dir()) {
+            walk.observe_dir(entry.depth(), limits);
             continue;
+        }
+        if !file_type.is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        if walk.observe_file(limits) {
+            break;
         }
         let path = entry.path();
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -251,16 +309,44 @@ fn list_files(
     if out.is_empty() {
         out.push_str("(无匹配)\n");
     }
-    Ok((out, hits))
+    Ok((out, hits, walk))
 }
 
-/// 用 ignore 的遍历器，自动遵守 .gitignore 并跳过隐藏目录。
-fn walker(root: &Path) -> ignore::Walk {
+/// 用 ignore 的遍历器，自动遵守 .gitignore 并跳过隐藏目录；
+/// §17.2 递归深度上限交给 walker：超过上限的目录不再深入。
+fn walker(root: &Path, limits: WalkLimits) -> ignore::Walk {
     WalkBuilder::new(root)
         .hidden(true)
         .git_ignore(true)
         .git_global(false)
+        .max_depth(Some(limits.max_depth))
         .build()
+}
+
+/// §17.2：把遍历截断转成模型可见的告知；未截断时返回 None。
+fn walk_note(lang: Language, walk: &WalkOutcome, limits: WalkLimits) -> Option<String> {
+    let note = match (walk.depth_truncated, walk.files_truncated) {
+        (true, true) => tf(
+            lang,
+            "\n[遍历已截断：递归深度达 {depth} 层且文件数达 {files} 个，结果只覆盖已遍历部分]",
+            &[
+                ("depth", limits.max_depth.to_string()),
+                ("files", limits.max_files.to_string()),
+            ],
+        ),
+        (true, false) => tf(
+            lang,
+            "\n[遍历已截断：递归深度达 {depth} 层，结果只覆盖已遍历部分]",
+            &[("depth", limits.max_depth.to_string())],
+        ),
+        (false, true) => tf(
+            lang,
+            "\n[遍历已截断：文件数达 {files} 个，结果只覆盖已遍历部分]",
+            &[("files", limits.max_files.to_string())],
+        ),
+        (false, false) => return None,
+    };
+    Some(note)
 }
 
 /// 单行过长时从中间省略，避免一行吃掉整个预算。
@@ -437,6 +523,108 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("read"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// §17.2：递归深度到上限时返回已遍历部分，并在 content 与 meta 告知截断。
+    #[tokio::test]
+    async fn depth_limit_truncates_with_notice() {
+        let dir = std::env::temp_dir().join(format!("tg-search-depth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let deep = dir.join("d1/d2/d3/d4");
+        std::fs::create_dir_all(&deep).expect("mkdir");
+        std::fs::write(dir.join("d1/shallow.txt"), "hit\n").expect("write");
+        std::fs::write(deep.join("deep.txt"), "hit\n").expect("write");
+        let ctx = ToolContext::new(&dir).expect("ctx");
+        let limits = WalkLimits {
+            max_depth: 2,
+            ..WalkLimits::default()
+        };
+        let resp = run_with_limits(&json!({ "mode": "content", "query": "hit" }), &ctx, limits)
+            .await
+            .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("shallow.txt"), "深度内的命中应返回：{body}");
+        assert!(
+            !body.contains("deep.txt"),
+            "超过深度上限的文件不应出现：{body}"
+        );
+        assert!(body.contains("遍历已截断"), "content 应告知截断：{body}");
+        assert_eq!(resp.meta["walk"]["truncated"], json!(true));
+        assert_eq!(resp.meta["walk"]["truncatedBy"], json!("depth"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §17.2：文件数到上限时返回已遍历部分并告知，不静默返回不完整结果。
+    #[tokio::test]
+    async fn file_limit_truncates_with_notice() {
+        let (ctx, dir) = ctx_with_hits("file-limit", 5);
+        let limits = WalkLimits {
+            max_files: 2,
+            ..WalkLimits::default()
+        };
+        let resp = run_with_limits(&json!({ "mode": "files", "query": "*.txt" }), &ctx, limits)
+            .await
+            .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("遍历已截断"), "content 应告知截断：{body}");
+        assert_eq!(resp.meta["walk"]["files"], json!(2));
+        assert_eq!(resp.meta["walk"]["truncatedBy"], json!("files"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// §17.2：遍历超时返回 TIMEOUT 错误码，而不是静默的部分结果。
+    #[tokio::test]
+    async fn walk_timeout_returns_timeout_error() {
+        let (ctx, dir) = ctx_with_hits("timeout", 1);
+        let limits = WalkLimits {
+            max_duration: std::time::Duration::ZERO,
+            ..WalkLimits::default()
+        };
+        let err = run_with_limits(&json!({ "mode": "content", "query": "hit" }), &ctx, limits)
+            .await
+            .unwrap_err();
+        let view = crate::error::govern_error(&err);
+        assert_eq!(view.code, "TIMEOUT");
+        assert!(!view.next_steps.is_empty(), "超时也要给可执行下一步");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// §17.2：远未到上限时不得出现截断告知（不误报）。
+    #[tokio::test]
+    async fn small_tree_is_not_marked_truncated() {
+        let (ctx, dir) = ctx_with_hits("no-trunc", 3);
+        let resp = run_with_limits(
+            &json!({ "mode": "files", "query": "*.txt" }),
+            &ctx,
+            WalkLimits::default(),
+        )
+        .await
+        .expect("run ok");
+        assert_eq!(resp.meta["walk"]["truncated"], json!(false));
+        assert!(resp.meta["walk"]["truncatedBy"].is_null());
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(!body.contains("遍历已截断"), "未截断不应告知：{body}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// §17.2：search 的根目录同样校验，根外 path 直接拒绝。
+    #[tokio::test]
+    async fn root_outside_allowed_roots_is_refused() {
+        let (ctx, dir) = ctx_with_hits("root-guard", 1);
+        let err = run(
+            &json!({ "mode": "files", "query": "*.txt", "path": "/etc" }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(crate::error::govern_error(&err).code, "ISOLATION_REFUSED");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -2,6 +2,9 @@
 //!
 //! 治理规则与 pi 一致：超过 2000 行或 50KB 时头部截断，并提示用
 //! offset 续读；**不落盘**——文件本身就在磁盘上，指针没有意义。
+//!
+//! 例外是单行超长（压缩 JSON、minified 代码，§9.1）：这种行 offset 续读
+//! 无能为力，故截断该行、把整行落盘并给 pointer，告知按 §4.4b 的 TRUNCATED。
 
 use std::path::Path;
 
@@ -19,6 +22,7 @@ use crate::locale::{tf, tformat};
 use crate::media;
 use crate::media::image_pipeline;
 use crate::notice::Notice;
+use crate::notice::TruncUnit;
 use crate::notice::budgeted_notices;
 use crate::read_path::{
     FileKind, ImageFacts, ImageOutcome, ImagePlan, TextFacts, TextMode, TextPlan, display_path,
@@ -26,15 +30,15 @@ use crate::read_path::{
     plan_image, plan_text, text_decide_questions, text_summarize_schema,
 };
 use crate::slots::{DecideInput, SlotKind, SummarizeInput, VisionInput, VisionTask};
-use crate::truncate::{TruncationOptions, format_size, truncate_head};
+use crate::truncate::{TruncationOptions, format_size, truncate_head, truncate_line_head};
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "read",
-        description: "能做什么：读取文本文件（带行号与可选行锚点）或图片；超过 2000 行 / 50KB 头部截断并用 offset 续读；图片按压缩流水线返回或转译。 \
+        description: "能做什么：读取文本文件（带行号与可选行锚点）或图片；超过 2000 行 / 50KB 头部截断并用 offset 续读；单行自身超 50KB（压缩 JSON、minified 代码）时截断该行、整行落盘并给 pointer；图片按压缩流水线返回或转译。 \
                       不能做什么：不解析网页 JS（fetch.provider 默认 none）；不跟随符号链接；文本路径的 intent 只影响协商层标注。 \
                       什么时候用别的工具：按内容查找用 search；局部修改用 edit；整段重写用 write。",
-        description_en: "Can: read text files (line numbers / optional anchors) or images; head-truncates past 2000 lines / 50KB, resume with offset; images go through the compression pipeline. Cannot: run page JS (fetch.provider defaults to none), follow symlinks; text-path intent only annotates negotiation. Use instead: search to find content, edit for local changes, write for a full rewrite.",
+        description_en: "Can: read text files (line numbers / optional anchors) or images; head-truncates past 2000 lines / 50KB, resume with offset; a single line over 50KB (minified JSON / code) is truncated with the whole line spilled and a pointer returned; images go through the compression pipeline. Cannot: run page JS (fetch.provider defaults to none), follow symlinks; text-path intent only annotates negotiation. Use instead: search to find content, edit for local changes, write for a full rewrite.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -70,8 +74,8 @@ pub fn spec() -> ToolSpec {
 
 pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolError> {
     let lang = ctx.language;
-    let raw_path = required_str(args, "path")?;
-    let path = ctx.resolve(raw_path);
+    // §17.2：文件路径先过根校验（含 ../ 与符号链接逃逸）。
+    let path = ctx.resolve_file(required_str(args, "path")?)?;
 
     let meta = tokio::fs::metadata(&path).await.map_err(|e| {
         ToolError::failed_with(
@@ -247,10 +251,23 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         );
     }
 
+    // §9.1：窗口首行自身超过字节上限（压缩 JSON、minified 代码）时，
+    // offset 续读无能为力——截断该行，把整行落盘，pointer 进 TRUNCATED 告知。
+    let single_line = if window[0].len() > ctx.limits.max_bytes {
+        let line = window[0];
+        let kept = truncate_line_head(line, ctx.limits.max_bytes);
+        Some((kept, ctx.spill.persist("read", line)?))
+    } else {
+        None
+    };
+
     let window_text = window.join("\n");
     let truncation = truncate_head(&window_text, ctx.limits);
 
-    let shown: Vec<&str> = truncation.content.lines().collect();
+    let shown: Vec<&str> = match &single_line {
+        Some((kept, _)) => vec![*kept],
+        None => truncation.content.lines().collect(),
+    };
     let body = if with_anchor {
         render_anchored(&shown, offset)
     } else {
@@ -265,7 +282,15 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
             encoding_name
         ));
     }
-    if truncation.truncated {
+    if let Some((kept, spill)) = &single_line {
+        // §4.4b：单行超长的告知带 pointer；这条路径没有可用的续读 offset。
+        text_plan.notices.push(Notice::Truncated {
+            kept: kept.len() as u64,
+            total: window[0].len() as u64,
+            unit: TruncUnit::Bytes,
+            pointer: Some(spill.path.display().to_string()),
+        });
+    } else if truncation.truncated {
         let next = offset + shown.len();
         let reason = match truncation.truncated_by {
             Some(crate::truncate::TruncatedBy::Bytes) => tformat(
@@ -300,6 +325,13 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "encoding": encoding_name,
         "decodeErrors": had_decode_errors,
     });
+    if let Some((_, spill)) = &single_line {
+        out_meta["spill"] = json!({
+            "path": spill.path.display().to_string(),
+            "bytes": spill.bytes,
+            "lines": spill.lines,
+        });
+    }
     if let Some(ruling) = &text_ruling {
         out_meta["fileKind"] = json!(ruling.facts.file_kind.as_str());
         out_meta["sensitivity"] = json!(ruling.facts.sensitivity.as_str());
@@ -790,6 +822,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(ctx.cwd);
     }
 
+    /// §17.2：read 的路径参数走根校验，根外路径返回 ISOLATION_REFUSED。
+    #[tokio::test]
+    async fn path_outside_allowed_roots_is_refused() {
+        let (ctx, _f) = ctx_with_file("guard", "x");
+        let err = run(&json!({ "path": "/etc/hosts" }), &ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(crate::error::govern_error(&err).code, "ISOLATION_REFUSED");
+        let _ = std::fs::remove_dir_all(ctx.cwd);
+    }
+
     fn ctx_with_png(name: &str) -> (ToolContext, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("tg-read-img-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
@@ -1036,6 +1079,99 @@ mod tests {
         // needPixels 输出决策档位，confidence 只保留两位小数（§4.7 输出密度）。
         assert_eq!(resp.meta["needPixels"], json!("both"));
         assert_eq!(resp.meta["confidence"], json!(0.78));
+        let _ = std::fs::remove_dir_all(ctx.cwd);
+    }
+
+    /// §9.1：单行超长（压缩 JSON / minified 代码）——截断该行、整行落盘、给 pointer。
+    #[tokio::test]
+    async fn single_line_over_byte_limit_is_truncated_and_spilled() {
+        let long = "x".repeat(500);
+        let (mut ctx, file) = ctx_with_file("single-line", &format!("{long}\n"));
+        ctx.limits = limits(2000, 100);
+        let resp = run(
+            &json!({ "path": file.to_str().unwrap(), "intent": "raw" }),
+            &ctx,
+        )
+        .await
+        .expect("read ok");
+        let Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(
+            body.contains(&format!("     1\u{2502}{}", "x".repeat(100))),
+            "应保留字节上限内的前缀：{body}"
+        );
+        assert!(
+            !body.contains(&"x".repeat(101)),
+            "超限部分不应出现在 content：{body}"
+        );
+        assert!(
+            !body.contains("offset="),
+            "单行超长没有可用的续读 offset：{body}"
+        );
+        assert!(body.contains("[TRUNCATED]"), "{body}");
+        assert!(body.contains("kept=100"), "{body}");
+        assert!(body.contains("total=500"), "{body}");
+        assert!(body.contains("unit=bytes"), "{body}");
+        assert_eq!(resp.meta["truncated"], json!(true));
+        assert_eq!(resp.meta["shownLines"], json!(1));
+        let spill_path = resp.meta["spill"]["path"].as_str().expect("spill 指针");
+        assert!(body.contains(&format!("pointer={spill_path}")), "{body}");
+        assert_eq!(resp.meta["spill"]["bytes"], json!(500));
+        let spilled = std::fs::read_to_string(spill_path).expect("读回落盘文件");
+        assert_eq!(spilled, long, "落盘的应是整行，不是截断后的片段");
+        let _ = std::fs::remove_dir_all(ctx.cwd);
+    }
+
+    /// §9.1：普通多行文件仍走 offset 续读，不落盘。
+    #[tokio::test]
+    async fn multi_line_truncation_keeps_offset_hint_without_spill() {
+        let text = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (mut ctx, file) = ctx_with_file("multi-line", &format!("{text}\n"));
+        ctx.limits = limits(3, 1024);
+        let resp = run(
+            &json!({ "path": file.to_str().unwrap(), "intent": "raw" }),
+            &ctx,
+        )
+        .await
+        .expect("read ok");
+        let Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("line3"), "{body}");
+        assert!(!body.contains("line4"), "行数上限外不应出现：{body}");
+        assert!(
+            body.contains("offset=4"),
+            "多行截断应给 offset 续读提示：{body}"
+        );
+        assert!(!body.contains("[TRUNCATED]"), "{body}");
+        assert!(resp.meta.get("spill").is_none(), "多行截断不落盘（§9.1）");
+        assert_eq!(resp.meta["truncated"], json!(true));
+        let _ = std::fs::remove_dir_all(ctx.cwd);
+    }
+
+    /// §9.1：单行未超阈值不受影响。
+    #[tokio::test]
+    async fn short_single_line_is_untouched() {
+        let line = "y".repeat(50);
+        let (mut ctx, file) = ctx_with_file("short-line", &format!("{line}\n"));
+        ctx.limits = limits(2000, 100);
+        let resp = run(
+            &json!({ "path": file.to_str().unwrap(), "intent": "raw" }),
+            &ctx,
+        )
+        .await
+        .expect("read ok");
+        let Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains(&line), "未超阈值应原样返回：{body}");
+        assert!(!body.contains("[TRUNCATED]"), "{body}");
+        assert!(resp.meta.get("spill").is_none());
+        assert_eq!(resp.meta["truncated"], json!(false));
         let _ = std::fs::remove_dir_all(ctx.cwd);
     }
 }

@@ -212,6 +212,21 @@ pub fn truncate_tail(content: &str, options: TruncationOptions) -> TruncationRes
     }
 }
 
+/// 单行超长时按字节上限截断该行（§9.1），保证不切在 UTF-8 字符中间。
+///
+/// 与 `truncate_head` 的分工：那个按「行」保留前缀、首行超限时返回空内容；
+/// 这里按「字节」切一行，用于 offset 续读无能为力的压缩 JSON / minified 代码。
+pub fn truncate_line_head(line: &str, max_bytes: usize) -> &str {
+    if line.len() <= max_bytes {
+        return line;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line[..end]
+}
+
 /// 把字节数格式化为人类可读形式，用于截断提示。
 pub fn format_size(bytes: usize) -> String {
     const KB: usize = 1024;
@@ -263,6 +278,22 @@ mod tests {
         assert_eq!(r.truncated_by, Some(TruncatedBy::Bytes));
         assert!(r.first_line_exceeds_limit);
         assert_eq!(r.content, "");
+    }
+
+    /// §9.1：单行超长按字节截断，且不切在 UTF-8 字符中间。
+    #[test]
+    fn line_truncation_keeps_byte_budget_on_char_boundary() {
+        let ascii = "x".repeat(100);
+        assert_eq!(truncate_line_head(&ascii, 40).len(), 40);
+        assert_eq!(truncate_line_head(&ascii, 100), ascii);
+        assert_eq!(truncate_line_head(&ascii, 200), ascii, "未超限时原样返回");
+
+        // 每个汉字 3 字节：上限 4 只能落到第 1 个字符（3 字节），不能切出半个字符。
+        let zh = "中文测试";
+        let kept = truncate_line_head(zh, 4);
+        assert_eq!(kept, "中");
+        assert_eq!(kept.len(), 3);
+        assert_eq!(truncate_line_head(zh, 6), "中文");
     }
 
     #[test]

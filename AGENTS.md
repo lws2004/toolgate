@@ -33,6 +33,7 @@ toolgate 是本地常驻的工具层：云端做规划，本地做理解与执�
 
 | 任务 | 先读 |
 |---|---|
+| 判断实现进度 / 接续上一次工作 | [implementation-status.md](docs/implementation-status.md)（实现状态的唯一事实源，先读它再决定做什么） |
 | 任何改动 | [architecture.md](docs/architecture.md) §0–§2（定位、核心命题、系统全景） |
 | 架构迭代 | 相关分册 + [§13 差距](docs/architecture/11-runtime.md) + [评审报告](docs/architecture-review-2026-11-07.md)对应条目 |
 | 实现工具 | [04-tools.md](docs/architecture/04-tools.md) 对应章节 + §17 安全 + §20 快照 |

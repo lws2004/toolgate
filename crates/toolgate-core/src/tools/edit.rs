@@ -18,15 +18,16 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use super::{ToolContext, ToolResponse, ToolSpec, optional_str, required_str};
+use super::{ToolContext, ToolResponse, ToolSpec, optional_str};
 use crate::ToolError;
 use crate::compat::{CompatConfig, resolve_intent};
 use crate::edit_path::{
     APPLY_CONFIDENCE_THRESHOLD, ApplyGate, Candidate, EDIT_QUESTION_KEYS, EDIT_QUESTIONS,
-    EditDecider, EditDecision, EditFuture, FileFacts, MatchLevel, SEMANTIC_SIMILARITY_THRESHOLD,
-    SEMANTIC_STATE_CHARS, SEMANTIC_TOP_K, apply_gate, change_facts, classify_match, detect_eol,
-    diff_stats, mechanical_attribution, merge_edit_decision, nearby_build_files, plan_edit,
-    similar_candidates, suggestion_for, unified_diff,
+    EditDecider, EditDecision, EditFuture, FailureKind, FileFacts, MatchLevel, PatchConflict,
+    SEMANTIC_SIMILARITY_THRESHOLD, SEMANTIC_STATE_CHARS, SEMANTIC_TOP_K, apply_gate, apply_patch,
+    change_facts, classify_match, detect_eol, diff_stats, mechanical_attribution,
+    merge_edit_decision, nearby_build_files, parse_patch, plan_edit, similar_candidates,
+    suggestion_for, unified_diff,
 };
 use crate::hashline::{line_anchor, parse_anchor};
 use crate::locale::t;
@@ -37,14 +38,14 @@ use crate::slots::DecideInput;
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "edit",
-        description: "能做什么：局部修改文件，支持 edits 文本匹配与 anchor 行锚点两种模式；多处匹配会拒绝，改动前留快照。 \
+        description: "能做什么：局部修改文件，支持三种寻址模式——edits 文本匹配（默认）、anchor 行锚点、patch 扁平 unified diff（整段重排/缩进调整时无需转义原文）；三选一，多处匹配或 hunk 不匹配会拒绝，改动前留快照。 \
                       不能做什么：不承接大块内容摘要；不返回图片；不自动回滚；失败归因在 d1 槽位不可用时按 §3.8 走机械路径并告知。 \
                       什么时候用别的工具：整段重写用 write；按内容查找用 search；读取用 read。",
-        description_en: "Can: local edits via edits text matching or anchor line mode; rejects multiple matches and snapshots before writing. Cannot: summarize large content, return images, auto-rollback; failure attribution degrades to the mechanical path per §3.8 when d1 is unavailable. Use instead: write for a full rewrite, search to find content, read to inspect.",
+        description_en: "Can: local edits in three addressing modes — edits text matching (default), anchor line anchors, patch flat unified diff (no need to escape the original text when reordering a block); pick exactly one, rejects multiple matches or hunks that do not line up, snapshots before writing. Cannot: summarize large content, return images, auto-rollback; failure attribution degrades to the mechanical path per §3.8 when d1 is unavailable. Use instead: write for a full rewrite, search to find content, read to inspect.",
         input_schema: json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "目标文件路径" },
+                "path": { "type": "string", "description": "目标文件路径。edits / anchor 模式必填；patch 模式可省略，此时从 ---/+++ 文件头推断" },
                 "edits": {
                     "type": "array",
                     "description": "文本匹配模式的编辑列表。各项都基于原始文件匹配，不要重叠",
@@ -65,13 +66,17 @@ pub fn spec() -> ToolSpec {
                     "type": "string",
                     "description": "行锚点模式下该行的新内容（不含换行）"
                 },
+                "patch": {
+                    "type": "string",
+                    "description": "模式 C：扁平 unified diff 文本（@@ -12,3 +12,5 @@ 与行前缀），原文不需要 JSON 转义。按 hunk 头行号定位并逐行比对上下文，不匹配报 patch 冲突；与 edits / anchor 互斥"
+                },
                 "intent": {
                     "type": "string",
                     "enum": ["raw", "summary", "structured", "visual", "auto"],
                     "description": "协商层输出形态（§4.2）。edit 不产生可协商的大块内容（§4.0），输出形态固定为 diff / 失败归因；intent 仅用于统一校验，非法值 fail loud"
                 }
             },
-            "required": ["path"]
+            "required": []
         }),
     }
 }
@@ -81,13 +86,33 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     // §13.3 / §18.9：intent 对所有调用统一校验，非法值 fail loud。
     // edit 不产生可协商的大块内容（§4.0），所以只校验、不改输出形态。
     resolve_intent(args, &CompatConfig::default()).map_err(ToolError::bad_argument)?;
-    let path = ctx.resolve(required_str(args, "path")?);
+
+    // §5.4：三种寻址模式三选一，多于一个直接拒绝（不猜调用方想用哪个）。
+    let mode = select_mode(args)?;
+    let patch_text = optional_str(args, "patch");
+    // §5.4 模式 C：patch 自带 ---/+++ 文件头时 path 可省略。
+    let raw_path = match optional_str(args, "path") {
+        Some(path) => path.to_owned(),
+        None => match patch_text {
+            Some(patch) => patch_target_path(patch)?,
+            None => {
+                return Err(ToolError::bad_argument(
+                    "缺少 path：edits / anchor 模式必须给目标文件路径，patch 模式可从 ---/+++ 文件头推断"
+                        .to_owned(),
+                ));
+            }
+        },
+    };
+    // §17.2：文件路径先过根校验（含 ../ 与符号链接逃逸）。
+    let path = ctx.resolve_file(&raw_path)?;
     let bytes = tokio::fs::read(&path).await.map_err(|e| {
         ToolError::failed_with(
             crate::error::ErrorCode::PathNotFound,
             format!("无法读取 {}：{e}", path.display()),
         )
     })?;
+    // §5.4 共同前置：读原文时记版本指纹，写前复核（三种模式同一份）。
+    let stamp = FileStamp::capture(&path, &bytes).await?;
 
     // 读-改-写必须字节保真：按检测出的编码解码，改完再用同一编码写回。
     let encoding = crate::encoding::FileEncoding::detect(&bytes);
@@ -101,31 +126,39 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         )));
     }
 
-    let (updated, notices, decision) = if let Some(anchor_raw) = optional_str(args, "anchor") {
-        (
-            apply_anchor_mode(
+    let (updated, notices, decision) = match mode {
+        EditMode::Patch => {
+            let patch_text = patch_text.expect("select_mode 已确认 patch 存在");
+            (apply_patch_mode(&original, patch_text)?, vec![], None)
+        }
+        EditMode::Anchor => {
+            let anchor_raw = optional_str(args, "anchor").expect("select_mode 已确认 anchor 存在");
+            (
+                apply_anchor_mode(
+                    &original,
+                    anchor_raw,
+                    optional_str(args, "newText").unwrap_or(""),
+                )?,
+                vec![],
+                None,
+            )
+        }
+        EditMode::Text => {
+            let edits = args
+                .get("edits")
+                .and_then(Value::as_array)
+                .ok_or_else(|| ToolError::bad_argument("edits 必须是数组".to_owned()))?;
+            // 第 4 级判定入口：没有配置模型时为 None，第 4 级按机械归因降级（§3.8）。
+            let decider = ctx.slm.as_deref().map(|client| SlotDecider { client });
+            let result = apply_text_mode(
                 &original,
-                anchor_raw,
-                optional_str(args, "newText").unwrap_or(""),
-            )?,
-            vec![],
-            None,
-        )
-    } else if let Some(edits) = args.get("edits").and_then(Value::as_array) {
-        // 第 4 级判定入口：没有配置模型时为 None，第 4 级按机械归因降级（§3.8）。
-        let decider = ctx.slm.as_deref().map(|client| SlotDecider { client });
-        let result = apply_text_mode(
-            &original,
-            edits,
-            &display_path(&path, &ctx.cwd),
-            decider.as_ref().map(|decider| decider as &dyn EditDecider),
-        )
-        .await?;
-        (result.updated, result.notices, result.decision)
-    } else {
-        return Err(ToolError::bad_argument(
-            "需要提供 edits 数组（文本匹配模式），或 anchor + newText（行锚点模式）".to_owned(),
-        ));
+                edits,
+                &display_path(&path, &ctx.cwd),
+                decider.as_ref().map(|decider| decider as &dyn EditDecider),
+            )
+            .await?;
+            (result.updated, result.notices, result.decision)
+        }
     };
 
     if updated == original {
@@ -134,6 +167,9 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
 
     // 落盘前留一份原文，供回滚。
     let snapshot = ctx.snapshots.snapshot(&path, &original).ok();
+
+    // §5.4 写前复核：指纹与读时不一致即拒绝，不做三方合并（§18.5）。
+    stamp.verify(&path).await?;
 
     // 按原编码写回。目标编码无法表示新内容时明确报错，不静默替换。
     let out_bytes = encoding
@@ -189,6 +225,131 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         meta["noticeOverflow"] = json!(ch.overflow);
     }
     Ok(ToolResponse::text(content).with_meta(meta))
+}
+
+/// §5.4 的三种寻址模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditMode {
+    Text,
+    Anchor,
+    Patch,
+}
+
+/// §5.4：edits / anchor / patch 三选一，多于一个给可行动错误（不猜）。
+fn select_mode(args: &Value) -> Result<EditMode, ToolError> {
+    let present: Vec<&str> = [
+        ("edits", args.get("edits").is_some()),
+        ("anchor", args.get("anchor").is_some()),
+        ("patch", args.get("patch").is_some()),
+    ]
+    .iter()
+    .filter(|(_, present)| *present)
+    .map(|(name, _)| *name)
+    .collect();
+    match present.as_slice() {
+        [] => Err(ToolError::bad_argument(
+            "需要提供 edits 数组（文本匹配模式）、anchor + newText（行锚点模式），或 patch（unified diff 模式）；三选一"
+                .to_owned(),
+        )),
+        [only] => Ok(match *only {
+            "anchor" => EditMode::Anchor,
+            "patch" => EditMode::Patch,
+            _ => EditMode::Text,
+        }),
+        many => Err(ToolError::bad_argument(format!(
+            "edits / anchor / patch 三选一，本次同时收到 {}；删掉多余的模式后重试",
+            many.join("、")
+        ))),
+    }
+}
+
+/// §5.4 模式 C：patch 未带 path 时，从 ---/+++ 文件头推断目标路径。
+fn patch_target_path(patch: &str) -> Result<String, ToolError> {
+    let parsed = parse_patch(patch).map_err(|conflict| patch_conflict_error(&conflict))?;
+    for label in [parsed.new_label.as_deref(), parsed.old_label.as_deref()] {
+        if let Some(path) = label.and_then(path_from_diff_label) {
+            return Ok(path);
+        }
+    }
+    Err(ToolError::bad_argument(
+        "patch 模式没有可用的 path：请显式传 path，或在 patch 里给 ---/+++ 文件头（/dev/null 不算）"
+            .to_owned(),
+    ))
+}
+
+/// 从 diff 标签取路径：去时间戳、去 <workspace>/ 与 a/ b/ 前缀。
+fn path_from_diff_label(label: &str) -> Option<String> {
+    let label = label.split('\t').next()?.trim();
+    if label.is_empty() || label == "/dev/null" {
+        return None;
+    }
+    let label = label.strip_prefix("<workspace>/").unwrap_or(label);
+    let label = label
+        .strip_prefix("a/")
+        .or_else(|| label.strip_prefix("b/"))
+        .unwrap_or(label);
+    Some(label.to_owned())
+}
+
+/// §5.4 模式 C：解析 unified diff，按 hunk 校验后应用。
+fn apply_patch_mode(original: &str, patch_text: &str) -> Result<String, ToolError> {
+    let parsed = parse_patch(patch_text).map_err(|conflict| patch_conflict_error(&conflict))?;
+    apply_patch(original, &parsed).map_err(|conflict| patch_conflict_error(&conflict))
+}
+
+/// patch 冲突按 §1.4.5 三段式返回：事实里带期望与实际内容，下一步指向重算 hunk。
+fn patch_conflict_error(conflict: &PatchConflict) -> ToolError {
+    ToolError::Failed {
+        code: crate::error::ErrorCode::Failed,
+        fact: format!(
+            "{}（机械归因：{}）",
+            conflict.fact,
+            FailureKind::PatchConflict.as_str()
+        ),
+        reason: "patch 的 hunk 与当前文件对不上：文件已被改过，或 hunk 的行号/行数算错了"
+            .to_owned(),
+        next_steps: vec![
+            "重新 read 当前文件，按最新行号重算 hunk".to_owned(),
+            "或改用 edits 文本匹配模式（oldText 需在文件中唯一）".to_owned(),
+        ],
+    }
+}
+
+/// §5.4 共同前置：读时的版本指纹（mtime / size / sha256），写前复核。
+struct FileStamp {
+    modified: Option<std::time::SystemTime>,
+    size: usize,
+    sha256: String,
+}
+
+impl FileStamp {
+    async fn capture(path: &Path, bytes: &[u8]) -> Result<Self, ToolError> {
+        let meta = tokio::fs::metadata(path).await?;
+        Ok(Self {
+            modified: meta.modified().ok(),
+            size: bytes.len(),
+            sha256: crate::spill::sha256_short(bytes),
+        })
+    }
+
+    /// 写前复核：与读时不一致即拒绝，不做三方合并（§18.5）。
+    async fn verify(&self, path: &Path) -> Result<(), ToolError> {
+        let meta = tokio::fs::metadata(path).await?;
+        let bytes = tokio::fs::read(path).await?;
+        let unchanged = meta.modified().ok() == self.modified
+            && bytes.len() == self.size
+            && crate::spill::sha256_short(&bytes) == self.sha256;
+        if unchanged {
+            return Ok(());
+        }
+        Err(ToolError::failed_with(
+            crate::error::ErrorCode::Failed,
+            format!(
+                "{} 在读取后被其他进程修改，已放弃写入（不做三方合并）。请重新 read 后再改。",
+                path.display()
+            ),
+        ))
+    }
 }
 
 /// 行尾风格。读改写必须保留它，否则 CRLF 文件会被整体转成 LF，
@@ -824,6 +985,23 @@ mod tests {
         (ToolContext::new(&dir).expect("ctx"), dir)
     }
 
+    /// §17.2：edit 的路径参数走根校验，../ 逃逸返回 ISOLATION_REFUSED。
+    #[tokio::test]
+    async fn path_outside_allowed_roots_is_refused() {
+        let (ctx, dir) = ctx_with_file("guard").await;
+        let err = run(
+            &json!({
+                "path": "../escape.txt",
+                "edits": [{ "oldText": "a", "newText": "b" }]
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(crate::error::govern_error(&err).code, "ISOLATION_REFUSED");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn run_reports_change_facts() {
         let (ctx, dir) = ctx_with_file("facts").await;
@@ -867,6 +1045,212 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("机械归因"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 指定内容的测试文件上下文。
+    fn ctx_with_content(name: &str, content: &str) -> (ToolContext, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("tg-edit-patch-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("f.txt"), content).expect("write");
+        (ToolContext::new(&dir).expect("ctx"), dir)
+    }
+
+    /// §5.4 模式 C：单 hunk 按行号定位并应用，输出与现有 edit 一致。
+    #[tokio::test]
+    async fn patch_mode_applies_single_hunk() {
+        let (ctx, dir) = ctx_with_content("single", "alpha\nbeta\ngamma\n");
+        let file = dir.join("f.txt");
+        let resp = run(
+            &json!({
+                "path": file.to_str().unwrap(),
+                "patch": "@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n"
+            }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "alpha\nBETA\ngamma\n"
+        );
+        assert_eq!(resp.meta["changed"], json!(true));
+        assert_eq!(resp.meta["facts"]["changed"]["added"], json!(1));
+        assert_eq!(resp.meta["facts"]["changed"]["removed"], json!(1));
+        assert!(
+            resp.meta["facts"]["diff"]
+                .as_str()
+                .unwrap()
+                .contains("+BETA")
+        );
+        assert!(resp.meta["encoding"].is_string());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.4 模式 C：多个 hunk 都基于原始行号，互不影响。
+    #[tokio::test]
+    async fn patch_mode_applies_multiple_hunks() {
+        let (ctx, dir) = ctx_with_content("multi", "a\nb\nc\nd\ne\n");
+        let file = dir.join("f.txt");
+        run(
+            &json!({
+                "path": file.to_str().unwrap(),
+                "patch": "@@ -1,1 +1,1 @@\n-a\n+A\n@@ -5,1 +5,1 @@\n-e\n+E\n"
+            }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "A\nb\nc\nd\nE\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.4：hunk 上下文不匹配报 patch 冲突，给出实际内容且不写盘。
+    #[tokio::test]
+    async fn patch_mode_conflict_reports_actual_content() {
+        let (ctx, dir) = ctx_with_content("conflict", "alpha\nbeta\ngamma\n");
+        let file = dir.join("f.txt");
+        let err = run(
+            &json!({
+                "path": file.to_str().unwrap(),
+                "patch": "@@ -1,3 +1,3 @@\n alpha\n-WRONG\n+BETA\n gamma\n"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{err:?}");
+        assert!(message.contains("patch 冲突"), "{message}");
+        assert!(message.contains("WRONG"), "缺期望内容：{message}");
+        assert!(message.contains("beta"), "缺实际内容：{message}");
+        assert!(message.contains("next_steps"), "缺可执行下一步：{message}");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "alpha\nbeta\ngamma\n",
+            "冲突时不得写盘"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.4：CRLF 文件按原 EOL 写回，不被 patch 的 LF 行尾带跑。
+    #[tokio::test]
+    async fn patch_mode_preserves_crlf() {
+        let (ctx, dir) = ctx_with_content("crlf", "alpha\r\nbeta\r\ngamma\r\n");
+        let file = dir.join("f.txt");
+        run(
+            &json!({
+                "path": file.to_str().unwrap(),
+                "patch": "@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n"
+            }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(after, "alpha\r\nBETA\r\ngamma\r\n");
+        assert_eq!(after.matches("\r\n").count(), 3, "三处 CRLF 都要在");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.4 共同前置：写前快照保留改前内容。
+    #[tokio::test]
+    async fn patch_mode_creates_snapshot() {
+        let (ctx, dir) = ctx_with_content("snapshot", "alpha\nbeta\n");
+        let file = dir.join("f.txt");
+        let resp = run(
+            &json!({
+                "path": file.to_str().unwrap(),
+                "patch": "@@ -1,2 +1,2 @@\n alpha\n-beta\n+BETA\n"
+            }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let snapshot = resp.meta["snapshot"].as_str().expect("应有快照路径");
+        assert_eq!(std::fs::read_to_string(snapshot).unwrap(), "alpha\nbeta\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.4：三种模式互斥，多于一个或一个都没有都要给可行动错误。
+    #[tokio::test]
+    async fn modes_are_mutually_exclusive() {
+        let (ctx, dir) = ctx_with_file("exclusive").await;
+        let file = dir.join("f.txt");
+        let err = run(
+            &json!({
+                "path": file.to_str().unwrap(),
+                "edits": [{ "oldText": "beta", "newText": "BETA" }],
+                "patch": "@@ -1,1 +1,1 @@\n-alpha\n+A\n"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{err:?}");
+        assert!(message.contains("三选一"), "{message}");
+        assert!(
+            message.contains("edits") && message.contains("patch"),
+            "{message}"
+        );
+
+        let err = run(&json!({ "path": file.to_str().unwrap() }), &ctx)
+            .await
+            .unwrap_err();
+        let message = format!("{err:?}");
+        assert!(
+            message.contains("edits") && message.contains("anchor") && message.contains("patch"),
+            "{message}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.4：patch 模式未给 path 时从 ---/+++ 文件头推断。
+    #[tokio::test]
+    async fn patch_mode_infers_path_from_header() {
+        let (ctx, dir) = ctx_with_content("infer", "alpha\nbeta\n");
+        let resp = run(
+            &json!({
+                "patch": "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+BETA\n"
+            }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "alpha\nBETA\n"
+        );
+        assert_eq!(resp.meta["changed"], json!(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.4：既没 path 也没有可用文件头时明确要求补 path。
+    #[tokio::test]
+    async fn patch_mode_without_path_or_header_is_rejected() {
+        let (ctx, dir) = ctx_with_file("no-path").await;
+        let err = run(&json!({ "patch": "@@ -1,1 +1,1 @@\n-alpha\n+A\n" }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("path"), "{err:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.4 / §18.5：写前复核指纹——读后被改动的文件一律拒绝写回。
+    #[tokio::test]
+    async fn stale_file_is_refused_before_write() {
+        let dir = std::env::temp_dir().join(format!("tg-edit-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("f.txt");
+        std::fs::write(&file, "alpha\n").expect("write");
+        let stamp = FileStamp::capture(&file, b"alpha\n")
+            .await
+            .expect("capture");
+        // 读后另一个进程改了文件。
+        std::fs::write(&file, "ALPHA\n").expect("rewrite");
+        let err = stamp.verify(&file).await.unwrap_err();
+        assert!(format!("{err:?}").contains("读取后被"), "{err:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1141,6 +1141,7 @@ fn systemone_config() -> ResolvedConfig {
             },
         }],
         slots: BTreeMap::new(),
+        paths: Default::default(),
         slm: SlmConfig {
             mode: None,
             probe: None,
