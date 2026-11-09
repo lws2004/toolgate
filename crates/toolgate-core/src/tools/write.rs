@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use super::{ToolContext, ToolResponse, ToolSpec, required_str};
 use crate::ToolError;
 use crate::compat::{CompatConfig, resolve_intent};
+use crate::locale::{t, tformat};
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -36,6 +37,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     // §13.3 / §18.9：intent 对所有调用统一校验，非法值 fail loud。
     // write 不产生可协商的大块内容（§4.0），所以只校验、不改输出形态。
     resolve_intent(args, &CompatConfig::default()).map_err(ToolError::bad_argument)?;
+    let lang = ctx.language;
     let path = ctx.resolve(required_str(args, "path")?);
     let content = required_str(args, "content")?;
 
@@ -74,17 +76,22 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         .map(|s| json!(s.path.display().to_string()))
         .unwrap_or(json!(null));
 
-    let mut body = format!(
+    let verb = t(lang, if existed { "已覆盖" } else { "已创建" });
+    let mut body = tformat(
+        lang,
         "{} {}（{} 行 / {} 字节）",
-        if existed { "已覆盖" } else { "已创建" },
-        path.display(),
-        lines,
-        content.len()
+        &[
+            verb.into_owned(),
+            path.display().to_string(),
+            lines.to_string(),
+            content.len().to_string(),
+        ],
     );
     if let Some(s) = &snapshot {
-        body.push_str(&format!(
+        body.push_str(&tformat(
+            lang,
             "\n旧内容已快照：{}（需要回滚时读它再写回）",
-            s.path.display()
+            &[s.path.display().to_string()],
         ));
     }
 

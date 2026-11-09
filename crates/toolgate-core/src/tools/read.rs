@@ -13,6 +13,7 @@ use super::{
 use crate::ToolError;
 use crate::compat::{CompatConfig, resolve_intent};
 use crate::hashline::render_anchored;
+use crate::locale::{tf, tformat};
 use crate::media;
 use crate::media::image_pipeline;
 use crate::notice::budgeted_notices;
@@ -62,6 +63,7 @@ pub fn spec() -> ToolSpec {
 }
 
 pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolError> {
+    let lang = ctx.language;
     let raw_path = required_str(args, "path")?;
     let path = ctx.resolve(raw_path);
 
@@ -145,16 +147,25 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     if truncation.truncated {
         let next = offset + shown.len();
         let reason = match truncation.truncated_by {
-            Some(crate::truncate::TruncatedBy::Bytes) => {
-                format!(
-                    "已截断到 {}（字节上限）",
-                    format_size(truncation.output_bytes)
-                )
-            }
-            _ => format!("已截断到 {} 行（行数上限）", shown.len()),
+            Some(crate::truncate::TruncatedBy::Bytes) => tformat(
+                lang,
+                "已截断到 {}（字节上限）",
+                &[format_size(truncation.output_bytes)],
+            ),
+            _ => tformat(
+                lang,
+                "已截断到 {} 行（行数上限）",
+                &[shown.len().to_string()],
+            ),
         };
-        out.push_str(&format!(
-            "\n[{reason}。用 offset={next} 继续读取，文件共 {total_lines} 行。]"
+        out.push_str(&tf(
+            lang,
+            "\n[{reason}。用 offset={next} 继续读取，文件共 {total_lines} 行。]",
+            &[
+                ("reason", reason),
+                ("next", next.to_string()),
+                ("total_lines", total_lines.to_string()),
+            ],
         ));
     }
 

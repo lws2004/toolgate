@@ -22,13 +22,16 @@ pub struct SpillRef {
 }
 
 impl SpillRef {
-    /// 给模型看的一行指针说明。
-    pub fn hint(&self) -> String {
-        format!(
+    /// 给模型看的一行指针说明（§18.1b 按用户语言）。
+    pub fn hint(&self, lang: crate::locale::Language) -> String {
+        crate::locale::tformat(
+            lang,
             "完整输出已落盘：{}（{} 行 / {} 字节），需要时用 read 按段读取。",
-            self.path.display(),
-            self.lines,
-            crate::truncate::format_size(self.bytes)
+            &[
+                self.path.display().to_string(),
+                self.lines.to_string(),
+                crate::truncate::format_size(self.bytes),
+            ],
         )
     }
 }

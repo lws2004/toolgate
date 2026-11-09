@@ -25,6 +25,7 @@ use crate::edit_path::{
     mechanical_attribution, nearby_build_files, plan_edit,
 };
 use crate::hashline::{line_anchor, parse_anchor};
+use crate::locale::t;
 use crate::notice::{Notice, budgeted_notices};
 use crate::read_path::display_path;
 
@@ -71,6 +72,7 @@ pub fn spec() -> ToolSpec {
 }
 
 pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolError> {
+    let lang = ctx.language;
     // §13.3 / §18.9：intent 对所有调用统一校验，非法值 fail loud。
     // edit 不产生可协商的大块内容（§4.0），所以只校验、不改输出形态。
     resolve_intent(args, &CompatConfig::default()).map_err(ToolError::bad_argument)?;
@@ -112,7 +114,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     };
 
     if updated == original {
-        return Ok(ToolResponse::text("内容未变化，未写入。"));
+        return Ok(ToolResponse::text(t(lang, "内容未变化，未写入。")));
     }
 
     // 落盘前留一份原文，供回滚。

@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use super::{ToolContext, ToolResponse, ToolSpec, optional_str, optional_usize, required_str};
 use crate::ToolError;
 use crate::bash_path::intent_tag;
+use crate::locale::tf;
 use crate::notice::budgeted_notices;
 use crate::search_path::{SearchShape, plan_search, resolve_search_intent, structured_facts};
 use crate::truncate::{MAX_MATCH_LINE_LENGTH, truncate_head};
@@ -58,6 +59,7 @@ pub fn spec() -> ToolSpec {
 }
 
 pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolError> {
+    let lang = ctx.language;
     let mode = required_str(args, "mode")?;
     let query = required_str(args, "query")?;
     let root = ctx.resolve(optional_str(args, "path").unwrap_or("."));
@@ -79,10 +81,14 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
 
     if truncation.truncated {
         let spill = ctx.spill.persist(&format!("search-{mode}"), &raw)?;
-        body.push_str(&format!(
-            "\n[结果已截断：命中 {hit_count} 处，仅展示前 {} 行。{}]",
-            truncation.output_lines,
-            spill.hint()
+        body.push_str(&tf(
+            lang,
+            "\n[结果已截断：命中 {hits} 处，仅展示前 {shown} 行。{hint}]",
+            &[
+                ("hits", hit_count.to_string()),
+                ("shown", truncation.output_lines.to_string()),
+                ("hint", spill.hint(lang)),
+            ],
         ));
         spilled = json!({
             "path": spill.path.display().to_string(),

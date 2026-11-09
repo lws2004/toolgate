@@ -18,6 +18,7 @@ use crate::ToolError;
 use crate::bash_path::{
     BashMode, estimate_tokens, intent_tag, plan_bash, resolve_bash_intent, structured_facts,
 };
+use crate::locale::{t, tformat};
 use crate::notice::budgeted_notices;
 use crate::truncate::{format_size, truncate_tail};
 
@@ -60,6 +61,7 @@ pub fn spec() -> ToolSpec {
 }
 
 pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolError> {
+    let lang = ctx.language;
     let binary = required_str(args, "binary")?;
     reject_shell(binary)?;
 
@@ -130,12 +132,15 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
 
     if truncation.truncated {
         let spill = ctx.spill.persist("bash", &combined)?;
-        body.push_str(&format!(
+        body.push_str(&tformat(
+            lang,
             "\n[输出已截断：共 {} 行 / {}，仅展示尾部 {} 行。{}]",
-            truncation.total_lines,
-            format_size(truncation.total_bytes),
-            truncation.output_lines,
-            spill.hint()
+            &[
+                truncation.total_lines.to_string(),
+                format_size(truncation.total_bytes),
+                truncation.output_lines.to_string(),
+                spill.hint(lang),
+            ],
         ));
         spill_meta = json!({
             "path": spill.path.display().to_string(),
@@ -145,7 +150,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     }
 
     if body.trim().is_empty() {
-        body.push_str("(无输出)");
+        body.push_str(&t(lang, "(无输出)"));
     }
 
     let code = status.code();

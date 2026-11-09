@@ -392,6 +392,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_language_controls_tool_content() {
+        let mut s = test_server();
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+                "params": {
+                    "name": "write",
+                    "arguments": { "path": "i18n.txt", "content": "hi" },
+                    "_meta": { "toolgate/language": "en" }
+                }
+            }),
+        )
+        .await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.starts_with("Created"),
+            "工具 content 未按用户语言切换: {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn unknown_tool_returns_is_error() {
         let mut s = test_server();
         let resp = call(

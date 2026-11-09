@@ -164,6 +164,96 @@ fn en(zh: &str) -> Option<&'static str> {
         "是否给每行附加 行号#短哈希 锚点，供 edit 的锚点模式使用。大文件反复编辑时开启可省 token，其余场景建议关闭。默认 false" => {
             "Attach line#hash anchors to each line for edit's anchor mode; saves tokens on large files, otherwise off by default"
         }
+        // 工具 content 与落盘提示（§4.7）
+        "(无输出)" => "(no output)",
+        "(暂无输出)" => "(no output yet)",
+        "(无匹配)\n" => "(no matches)\n",
+        "已创建" => "Created",
+        "已覆盖" => "Overwritten",
+        "{} {}（{} 行 / {} 字节）" => "{} {} ({} lines / {} bytes)",
+        "\n旧内容已快照：{}（需要回滚时读它再写回）" => {
+            "\nOld content snapshotted: {} (read it and write back to roll back)"
+        }
+        "\n[输出已截断：共 {} 行 / {}，仅展示尾部 {} 行。{}]" => {
+            "\n[Output truncated: {} lines / {}, showing last {} lines. {}]"
+        }
+        "\n[输出已截断：共 {}，仅展示尾部 {} 行。{}]" => {
+            "\n[Output truncated: {}, showing last {} lines. {}]"
+        }
+        "\n[结果已截断：命中 {hits} 处，仅展示前 {shown} 行。{hint}]" => {
+            "\n[Results truncated: {hits} hits, showing first {shown} lines. {hint}]"
+        }
+        "\n[{reason}。用 offset={next} 继续读取，文件共 {total_lines} 行。]" => {
+            "\n[{reason}. Continue with offset={next}; file has {total_lines} lines.]"
+        }
+        "已截断到 {}（字节上限）" => "Truncated to {} (byte limit)",
+        "已截断到 {} 行（行数上限）" => "Truncated to {} lines (line limit)",
+        "{} 是目录。用 search 的 files 模式列目录内容。" => {
+            "{} is a directory. Use search in files mode to list it."
+        }
+        "{} 是二进制文件（{} 字节），不能按文本读取。若需处理请用 bash 调用专用工具。" => {
+            "{} is a binary file ({} bytes) and cannot be read as text. Use bash with a dedicated tool if needed."
+        }
+        "起始行 {offset} 超过文件总行数 {total_lines}。" => {
+            "Start line {offset} exceeds the file's {total_lines} lines."
+        }
+        "完整输出已落盘：{}（{} 行 / {} 字节），需要时用 read 按段读取。" => {
+            "Full output spilled: {} ({} lines / {} bytes); use read with segments if needed."
+        }
+        "内容未变化，未写入。" => "Content unchanged; nothing written.",
+        "需要提供 edits 数组（文本匹配模式），或 anchor + newText（行锚点模式）" => {
+            "Provide either an edits array (text-match mode) or anchor + newText (anchor mode)"
+        }
+        "edits 不能为空" => "edits must not be empty",
+        "edits[{i}] 缺少 oldText" => "edits[{i}] is missing oldText",
+        "edits[{i}] 缺少 newText" => "edits[{i}] is missing newText",
+        "edits 存在重叠区间，请合并成一笔编辑" => {
+            "edits contain overlapping ranges; merge them into one edit"
+        }
+        "oldText 不能为空" => "oldText must not be empty",
+        "在文件中匹配到 {n} 处，无法确定改哪一处。请扩大 oldText 的上下文使其唯一。" => {
+            "Matched {n} places in the file; cannot decide which to change. Add more context to make oldText unique."
+        }
+        "归一化匹配到 {n} 处，请扩大 oldText 上下文使其唯一。" => {
+            "Normalized matching found {n} places; add more context to make oldText unique."
+        }
+        "未找到 oldText（机械归因：{}）。原文片段：{}\n请重新 read 确认当前内容。" => {
+            "oldText not found (mechanical attribution: {}). Original excerpt: {}\nRe-read to confirm current content."
+        }
+        "锚点行号 {} 超出文件行数 {}" => "Anchor line {} exceeds the file's {} lines",
+        "当前没有后台任务。" => "No background tasks.",
+        "已请求终止任务 {task_id}。" => "Requested termination of task {task_id}.",
+        "已退出（{code}）" => "Exited ({code})",
+        "运行中" => "Running",
+        "{id}  pid={pid}  {state}  {label} 已运行 {secs}s\n" => {
+            "{id}  pid={pid}  {state}  {label} running for {secs}s\n"
+        }
+        "[状态] processState={state} exitCode={code} elapsedSecs={elapsed} outputBytes={bytes} truncated={truncated}" => {
+            "[State] processState={state} exitCode={code} elapsedSecs={elapsed} outputBytes={bytes} truncated={truncated}"
+        }
+        "已启动后台任务 {task_id}：{label}（pid {pid}）。用 action=read 查看输出，action=kill 终止。" => {
+            "Started background task {task_id}: {label} (pid {pid}). Use action=read to view output, action=kill to terminate."
+        }
+        "没有这个任务：{task_id}" => "No such task: {task_id}",
+        "终止失败：{e}" => "Failed to terminate: {e}",
+        "action 只能是 start / read / kill / list，收到 {other}" => {
+            "action must be start / read / kill / list, got {other}"
+        }
+        "无法启动 {binary}：{e}" => "Cannot start {binary}: {e}",
+        "等待进程失败：{e}" => "Failed to wait for process: {e}",
+        "命令超时（{} 秒）已被终止：{binary} {}" => {
+            "Command timed out ({} s) and was terminated: {binary} {}"
+        }
+        "正则无效：{e}" => "Invalid regex: {e}",
+        "通配符无效：{e}" => "Invalid glob: {e}",
+        "mode 只能是 content 或 files，收到 {other}" => {
+            "mode must be content or files, got {other}"
+        }
+        "无法访问 {}：{e}" => "Cannot access {}: {e}",
+        "无法读取 {}：{e}" => "Cannot read {}: {e}",
+        "{} 写入失败：{e}" => "Failed to write {}: {e}",
+        "{} 写回失败：{e}" => "Failed to write back {}: {e}",
+        "图片解码失败（{mime}）：{e}" => "Image decode failed ({mime}): {e}",
         _ => return None,
     })
 }
@@ -184,6 +274,16 @@ pub fn tf(lang: Language, tmpl: &str, args: &[(&str, String)]) -> String {
     let mut s = t(lang, tmpl).into_owned();
     for (key, value) in args {
         s = s.replace(&format!("{{{key}}}"), value);
+    }
+    s
+}
+
+/// 匿名占位符模板：按出现顺序替换 {}；英文译文保留相同数量的 {}。
+/// 用于含插值的工具 content（Rust 的 format! 要求编译期格式串，故在返回层替换）。
+pub fn tformat(lang: Language, tmpl: &str, args: &[String]) -> String {
+    let mut s = t(lang, tmpl).into_owned();
+    for a in args {
+        s = s.replacen("{}", a.as_str(), 1);
     }
     s
 }
@@ -232,6 +332,34 @@ mod tests {
         assert_eq!(
             tf(Language::Zh, "JSON 解析失败：{e}", &args),
             "JSON 解析失败：boom"
+        );
+    }
+
+    #[test]
+    fn tformat_replaces_anonymous_placeholders_in_order() {
+        assert_eq!(
+            tformat(
+                Language::En,
+                "{} 是目录。用 search 的 files 模式列目录内容。",
+                &["/tmp/a".to_owned()]
+            ),
+            "/tmp/a is a directory. Use search in files mode to list it."
+        );
+        assert_eq!(
+            tformat(
+                Language::Zh,
+                "已截断到 {} 行（行数上限）",
+                &["5".to_owned()]
+            ),
+            "已截断到 5 行（行数上限）"
+        );
+        assert_eq!(
+            tformat(
+                Language::En,
+                "已截断到 {} 行（行数上限）",
+                &["5".to_owned()]
+            ),
+            "Truncated to 5 lines (line limit)"
         );
     }
 

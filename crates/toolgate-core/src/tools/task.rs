@@ -22,6 +22,7 @@ use super::{ToolContext, ToolResponse, ToolSpec, optional_str, required_str};
 use crate::ToolError;
 use crate::bash_path::{estimate_tokens, intent_tag};
 use crate::decision::Intent;
+use crate::locale::{Language, t, tf, tformat};
 use crate::notice::budgeted_notices;
 use crate::task_path::{TaskMode, plan_task, resolve_task_intent, structured_facts};
 use crate::truncate::{format_size, truncate_tail};
@@ -81,11 +82,12 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     // intent 对所有 action 统一校验（§18.9 结构错误 fail loud）；
     // 协商只在 action=read 生效（§5.5 L2）。
     let intent = resolve_task_intent(args).map_err(ToolError::bad_argument)?;
+    let lang = ctx.language;
     match required_str(args, "action")? {
         "start" => start(args, ctx).await,
         "read" => read_output(args, ctx, intent),
-        "kill" => kill(args).await,
-        "list" => list(),
+        "kill" => kill(args, lang).await,
+        "list" => list(lang),
         other => Err(ToolError::bad_argument(format!(
             "action 只能是 start / read / kill / list，收到 {other}"
         ))),
@@ -184,8 +186,14 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
             },
         );
 
-    Ok(ToolResponse::text(format!(
-        "已启动后台任务 {task_id}：{label}（pid {pid}）。用 action=read 查看输出，action=kill 终止。"
+    Ok(ToolResponse::text(tf(
+        ctx.language,
+        "已启动后台任务 {task_id}：{label}（pid {pid}）。用 action=read 查看输出，action=kill 终止。",
+        &[
+            ("task_id", task_id.clone()),
+            ("label", label.clone()),
+            ("pid", pid.to_string()),
+        ],
     ))
     .with_meta(json!({ "taskId": task_id, "pid": pid, "label": label })))
 }
@@ -212,16 +220,19 @@ fn read_output(args: &Value, ctx: &ToolContext, intent: Intent) -> Result<ToolRe
     let mut spill_meta = Value::Null;
     if truncation.truncated {
         let spill = ctx.spill.persist("task", &raw)?;
-        body.push_str(&format!(
+        body.push_str(&tformat(
+            ctx.language,
             "\n[输出已截断：共 {}，仅展示尾部 {} 行。{}]",
-            format_size(truncation.total_bytes),
-            truncation.output_lines,
-            spill.hint()
+            &[
+                format_size(truncation.total_bytes),
+                truncation.output_lines.to_string(),
+                spill.hint(ctx.language),
+            ],
         ));
         spill_meta = json!({ "path": spill.path.display().to_string(), "lines": spill.lines });
     }
     if body.trim().is_empty() {
-        body.push_str("(暂无输出)");
+        body.push_str(&t(ctx.language, "(暂无输出)"));
     }
 
     let spill_path = spill_meta["path"].as_str().map(str::to_owned);
@@ -243,7 +254,13 @@ fn read_output(args: &Value, ctx: &ToolContext, intent: Intent) -> Result<ToolRe
         TaskMode::Raw => {}
         TaskMode::StateDegraded | TaskMode::SummaryDegraded => {
             content.push('\n');
-            content.push_str(&state_line(exit, elapsed, raw.len(), truncation.truncated));
+            content.push_str(&state_line(
+                ctx.language,
+                exit,
+                elapsed,
+                raw.len(),
+                truncation.truncated,
+            ));
             content.push('\n');
             let ch = budgeted_notices(plan.notices.clone());
             content.push_str(&ch.text);
@@ -266,17 +283,31 @@ fn read_output(args: &Value, ctx: &ToolContext, intent: Intent) -> Result<ToolRe
 }
 
 /// 机械可观测的进程状态行（§4.7：只给事实，不给判断）。
-fn state_line(exit: Option<i32>, elapsed: u64, bytes: usize, truncated: bool) -> String {
+fn state_line(
+    lang: Language,
+    exit: Option<i32>,
+    elapsed: u64,
+    bytes: usize,
+    truncated: bool,
+) -> String {
     let state = if exit.is_some() { "exited" } else { "running" };
     let code = exit
         .map(|c| c.to_string())
         .unwrap_or_else(|| "null".to_owned());
-    format!(
-        "[状态] processState={state} exitCode={code} elapsedSecs={elapsed} outputBytes={bytes} truncated={truncated}"
+    tf(
+        lang,
+        "[状态] processState={state} exitCode={code} elapsedSecs={elapsed} outputBytes={bytes} truncated={truncated}",
+        &[
+            ("state", state.to_owned()),
+            ("code", code),
+            ("elapsed", elapsed.to_string()),
+            ("bytes", bytes.to_string()),
+            ("truncated", truncated.to_string()),
+        ],
     )
 }
 
-async fn kill(args: &Value) -> Result<ToolResponse, ToolError> {
+async fn kill(args: &Value, lang: Language) -> Result<ToolResponse, ToolError> {
     let task_id = required_str(args, "task_id")?;
     let child = {
         let reg = registry()
@@ -292,31 +323,39 @@ async fn kill(args: &Value) -> Result<ToolResponse, ToolError> {
         .kill()
         .await
         .map_err(|e| ToolError::failed(format!("终止失败：{e}")))?;
-    Ok(ToolResponse::text(format!("已请求终止任务 {task_id}。"))
-        .with_meta(json!({ "taskId": task_id })))
+    Ok(ToolResponse::text(tf(
+        lang,
+        "已请求终止任务 {task_id}。",
+        &[("task_id", task_id.to_owned())],
+    ))
+    .with_meta(json!({ "taskId": task_id })))
 }
 
-fn list() -> Result<ToolResponse, ToolError> {
+fn list(lang: Language) -> Result<ToolResponse, ToolError> {
     let reg = registry()
         .lock()
         .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?;
     if reg.is_empty() {
-        return Ok(ToolResponse::text("当前没有后台任务。"));
+        return Ok(ToolResponse::text(t(lang, "当前没有后台任务。")));
     }
     let mut out = String::new();
     let mut items = Vec::new();
     for (id, job) in reg.iter() {
         let exit = job.exit.lock().ok().and_then(|g| *g);
         let state = match exit {
-            Some(code) => format!("已退出（{code}）"),
-            None => "运行中".to_owned(),
+            Some(code) => tf(lang, "已退出（{code}）", &[("code", code.to_string())]),
+            None => t(lang, "运行中").into_owned(),
         };
-        out.push_str(&format!(
-            "{id}  pid={}  {}  {} 已运行 {}s\n",
-            job.pid,
-            state,
-            job.label,
-            job.started.elapsed().as_secs()
+        out.push_str(&tf(
+            lang,
+            "{id}  pid={pid}  {state}  {label} 已运行 {secs}s\n",
+            &[
+                ("id", id.to_owned()),
+                ("pid", job.pid.to_string()),
+                ("state", state),
+                ("label", job.label.clone()),
+                ("secs", job.started.elapsed().as_secs().to_string()),
+            ],
         ));
         items.push(json!({ "taskId": id, "pid": job.pid, "exitCode": exit, "label": job.label }));
     }
