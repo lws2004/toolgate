@@ -174,7 +174,7 @@ pub fn plan_image(
             ImagePlan {
                 outcome: ImageOutcome::TextUnderstanding,
                 task: Some(task.unwrap_or(VisionTask::Describe)),
-                need_pixels,
+                need_pixels: None,
                 notices,
             }
         } else {
@@ -203,7 +203,7 @@ pub fn plan_image(
                 ImagePlan {
                     outcome: ImageOutcome::TextUnderstanding,
                     task: Some(task.unwrap_or(VisionTask::Describe)),
-                    need_pixels,
+                    need_pixels: None,
                     notices: if facts.is_none() {
                         vec![slot_unavailable("decide", SlotFallback::Text)]
                     } else {
@@ -273,6 +273,17 @@ pub fn need_pixels_gate(p: f32) -> NeedPixels {
         NeedPixels::StructuredOnly
     } else {
         NeedPixels::Both
+    }
+}
+
+impl NeedPixels {
+    /// 机器可读形态：短枚举，供 meta 直接消费（比原始概率更贴近决策结果）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NeedPixels::OriginalOnly => "original_only",
+            NeedPixels::StructuredOnly => "structured_only",
+            NeedPixels::Both => "both",
+        }
     }
 }
 

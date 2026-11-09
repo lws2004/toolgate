@@ -369,7 +369,9 @@ async fn image_response(
     if let Some(ruling) = ruling {
         resp.meta["imageKind"] = json!(ruling.facts.kind.as_str());
         resp.meta["hasText"] = json!(ruling.facts.has_text);
-        resp.meta["needPixels"] = json!(round2(ruling.facts.need_pixels as f64));
+        if let Some(need_pixels) = plan.need_pixels {
+            resp.meta["needPixels"] = json!(need_pixels.as_str());
+        }
         resp.meta["confidence"] = json!(round2(ruling.confidence));
     }
     Ok(resp)
@@ -872,8 +874,8 @@ mod tests {
             "vision 失败时 Both 应退回原图"
         );
         assert_eq!(resp.meta["imageKind"], json!("chart"));
-        // 概率类字段只保留两位小数（§4.7 输出密度）。
-        assert_eq!(resp.meta["needPixels"], json!(0.71));
+        // needPixels 输出决策档位，confidence 只保留两位小数（§4.7 输出密度）。
+        assert_eq!(resp.meta["needPixels"], json!("both"));
         assert_eq!(resp.meta["confidence"], json!(0.78));
         let _ = std::fs::remove_dir_all(ctx.cwd);
     }
