@@ -408,6 +408,11 @@ fn by_render_order(a: &Notice, b: &Notice) -> std::cmp::Ordering {
         })
 }
 
+/// 按 §4.4b 固定渲染顺序原地排序（供 §4.5 finalize_notices 复用）。
+pub fn sort_notices(notices: &mut [Notice]) {
+    notices.sort_by(by_render_order);
+}
+
 /// content 通道：按固定顺序渲染，每条一行，用换行拼接（§4.4b:190-200）。
 pub fn render_notices(notices: &[Notice]) -> String {
     let mut sorted: Vec<&Notice> = notices.iter().collect();
