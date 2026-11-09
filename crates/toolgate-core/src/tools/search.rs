@@ -15,17 +15,20 @@ use super::{ToolContext, ToolResponse, ToolSpec, optional_str, optional_usize, r
 use crate::ToolError;
 use crate::bash_path::intent_tag;
 use crate::locale::tf;
-use crate::notice::budgeted_notices;
-use crate::search_path::{SearchShape, plan_search, resolve_search_intent, structured_facts};
+use crate::notice::{Notice, SlotFallback, budgeted_notices};
+use crate::search_path::{
+    RerankState, SearchShape, apply_rerank, plan_search, resolve_search_intent, structured_facts,
+};
+use crate::slots::{RerankInput, SlotKind};
 use crate::truncate::{MAX_MATCH_LINE_LENGTH, truncate_head};
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "search",
         description: "能做什么：按正则检索文件内容或按通配符枚举文件路径；结果超过 2000 行 / 50KB 保留头部并落盘。 \
-                      不能做什么：不解析网页 JS；不返回图片；rerank 槽位不可用时按命中顺序返回并告知（§3.8）。 \
+                      不能做什么：不解析网页 JS；不返回图片；rerank 槽位可用时按相关度重排，不可用时按命中顺序返回并告知（§3.8）。 \
                       什么时候用别的工具：已知路径读全文用 read；修改用 edit / write；跑命令用 bash。",
-        description_en: "Can: regex content search or glob file enumeration; head-truncates past 2000 lines / 50KB and spills. Cannot: run page JS or return images; when rerank is unavailable it keeps hit order and says so (§3.8). Use instead: read for a known path, edit / write to modify, bash to run commands.",
+        description_en: "Can: regex content search or glob file enumeration; head-truncates past 2000 lines / 50KB and spills; reorders hits by relevance when the rerank slot is available. Cannot: run page JS or return images; when rerank is unavailable it keeps hit order and says so (§3.8). Use instead: read for a known path, edit / write to modify, bash to run commands.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -50,7 +53,7 @@ pub fn spec() -> ToolSpec {
                 "intent": {
                     "type": "string",
                     "enum": ["raw", "summary", "structured", "visual", "auto"],
-                    "description": "协商层输出形态：raw 全部命中（默认）/ structured 结构化候选列表 / auto 与 summary 仅在命中超过 20 条时需要 rerank，槽位不可用则按命中顺序返回并告知 / visual 不适用"
+                    "description": "协商层输出形态：raw 全部命中（默认）/ structured 结构化候选列表 / auto 与 summary 仅在命中超过 20 条时尝试 rerank，槽位可用则按相关度重排、不可用则按命中顺序返回并告知 / visual 不适用"
                 }
             },
             "required": ["mode", "query"]
@@ -75,6 +78,56 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         }
     };
 
+    let intent = resolve_search_intent(args).map_err(ToolError::bad_argument)?;
+    // §3.10：槽位可用性按绑定 + 能力矩阵真实判定，不硬编码（§7.3 状态要真实）。
+    let rerank_available = ctx.slm.as_ref().is_some_and(|client| {
+        client.is_bound(SlotKind::Rerank)
+            && client
+                .source_for_slot(SlotKind::Rerank)
+                .map(|source| {
+                    crate::capability::source_slot_capability(source, SlotKind::Rerank).grade
+                        != crate::capability::CapabilityGrade::Unavailable
+                })
+                .unwrap_or(true)
+    });
+    let mut plan =
+        plan_search(intent, hit_count, rerank_available).map_err(ToolError::bad_argument)?;
+
+    // §5.2：只有 TopK 路径真实调用 rerank；失败按 §3.8 退到命中顺序并告知，
+    // 绝不谎报 applied（§4.6）。
+    let mut rerank_order: Option<Vec<usize>> = None;
+    if plan.shape == SearchShape::TopK {
+        let documents: Vec<String> = raw.lines().map(str::to_owned).collect();
+        let input = RerankInput {
+            query: query.to_owned(),
+            documents,
+            top_n: None,
+        };
+        let attempted = match ctx.slm.as_ref() {
+            Some(client) => client.rerank(&input).await.ok(),
+            None => None,
+        };
+        match attempted {
+            Some(outcome) => {
+                rerank_order = Some(outcome.output.results.iter().map(|r| r.index).collect());
+            }
+            None => {
+                plan.rerank = RerankState::Unavailable;
+                plan.shape = SearchShape::All;
+                plan.notices.push(Notice::SlotUnavailable {
+                    slot: "rerank".to_owned(),
+                    fallback: SlotFallback::Mechanical,
+                });
+            }
+        }
+    }
+
+    // 重排命中后再做确定性截断：返回、落盘与结构化事实共用同一份顺序。
+    let raw = match &rerank_order {
+        Some(order) => apply_rerank(&raw, order),
+        None => raw,
+    };
+
     let truncation = truncate_head(&raw, ctx.limits);
     let mut body = truncation.content.clone();
     let mut spilled = Value::Null;
@@ -96,10 +149,6 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
             "lines": spill.lines,
         });
     }
-
-    let intent = resolve_search_intent(args).map_err(ToolError::bad_argument)?;
-    // rerank 槽位当前不可用（可选层未接入，§3.3）。
-    let plan = plan_search(intent, hit_count, false).map_err(ToolError::bad_argument)?;
 
     let mut meta = json!({
         "mode": mode,
@@ -310,6 +359,33 @@ mod tests {
         .expect("run ok");
         assert_eq!(resp.meta["rerank"], json!("skipped"));
         assert!(resp.meta.get("notices").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// §5.2：槽位绑定但调用失败时降级为 unavailable + 告知，不谎报 applied（§4.6）。
+    #[tokio::test]
+    async fn bound_rerank_failure_degrades_without_faking_applied() {
+        let (mut ctx, dir) = ctx_with_hits("rerank-bound", 25);
+        let cfg = crate::config::parse_config(
+            "models:
+  llm:
+    source: openai
+    base_url: http://127.0.0.1:8090/v1
+    model: demo
+    serves: [rerank]
+",
+            "test.yaml",
+        )
+        .expect("配置应当解析成功");
+        ctx.slm = Some(std::sync::Arc::new(crate::slm::SlotClient::new(cfg)));
+        let resp = run(
+            &json!({ "mode": "content", "query": "hit", "intent": "auto" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        assert_eq!(resp.meta["rerank"], json!("unavailable"));
+        assert_eq!(resp.meta["notices"].as_array().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -141,6 +141,20 @@ pub fn search_chain() -> Vec<ChainNode> {
     ]
 }
 
+/// §5.2：按 rerank 结果重排命中行。order 已按 score 降序、index 指向原始位置；
+/// 越界 index 忽略（形状由 RerankOutput::validate 校验，这里只做兜底）。
+pub fn apply_rerank(raw: &str, order: &[usize]) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut out = String::new();
+    for index in order {
+        if let Some(line) = lines.get(*index) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// §5.2 structured 路径的结构化事实。
 pub fn structured_facts(
     hits: usize,
@@ -161,6 +175,15 @@ mod tests {
     use super::*;
     use crate::notice::render_notices;
     use crate::understanding::{MAX_PARALLEL, MAX_STEPS, schedule, validate_chain};
+
+    /// §5.2：按 rerank 结果重排，越界 index 忽略。
+    #[test]
+    fn apply_rerank_follows_order_and_ignores_out_of_range() {
+        let raw = "a\nb\nc\n";
+        assert_eq!(apply_rerank(raw, &[2, 0, 1]), "c\na\nb\n");
+        assert_eq!(apply_rerank(raw, &[2, 99]), "c\n");
+        assert_eq!(apply_rerank(raw, &[]), "");
+    }
 
     #[test]
     fn threshold_is_twenty() {
