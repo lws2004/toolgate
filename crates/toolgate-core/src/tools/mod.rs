@@ -41,6 +41,8 @@ pub struct ToolContext {
     pub upstream_vision: bool,
     /// 请求级用户语言（§18.1b）：由传输层按 _meta / 环境注入。
     pub language: Language,
+    /// §22 可丢弃预热缓存；Arc 共享，clear() 后行为不变。
+    pub warm: crate::warm::WarmCache,
 }
 
 impl ToolContext {
@@ -56,6 +58,7 @@ impl ToolContext {
             limits: TruncationOptions::default(),
             upstream_vision: false,
             language: Language::default(),
+            warm: crate::warm::WarmCache::default(),
         })
     }
 

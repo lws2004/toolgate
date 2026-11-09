@@ -90,11 +90,41 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         return image_response(&path, &mime, &meta, &plan, ctx).await;
     }
 
-    let bytes = tokio::fs::read(&path).await?;
+    // §22：按 intent 的确定性预判决定要不要预热；缓存可丢弃，
+    // 命中只省 IO 与解码，不改变任何返回内容（§22.6）。
+    let intent = resolve_intent(args, &CompatConfig::default()).map_err(ToolError::bad_argument)?;
+    let warm_key = crate::warm::FileKey::of(meta.modified().ok(), meta.len());
+    let warm_enabled = crate::warm::predict("read", intent) == crate::warm::PreheatAction::Full
+        && crate::warm::should_warm(meta.len());
+    let cached = if warm_enabled {
+        ctx.warm.get(&path, warm_key)
+    } else {
+        None
+    };
+
+    let (bytes, encoding_name, text, had_decode_errors) = if let Some(w) = cached {
+        (w.bytes, w.encoding_name, w.text, w.had_decode_errors)
+    } else {
+        let bytes = tokio::fs::read(&path).await?;
+        let encoding = crate::encoding::FileEncoding::detect(&bytes);
+        let (text, had) = encoding.decode(&bytes);
+        if warm_enabled {
+            ctx.warm.put(
+                path.clone(),
+                crate::warm::WarmText {
+                    key: warm_key,
+                    bytes: bytes.clone(),
+                    text: text.clone(),
+                    encoding_name: encoding.name(),
+                    had_decode_errors: had,
+                },
+            );
+        }
+        (bytes, encoding.name(), text, had)
+    };
 
     // 先认编码：UTF-16 文件天然含 NUL 字节，不能按「有 NUL 即二进制」拦下。
-    let encoding = crate::encoding::FileEncoding::detect(&bytes);
-    let is_wide = encoding.name().starts_with("UTF-16");
+    let is_wide = encoding_name.starts_with("UTF-16");
     if !is_wide && media::looks_binary(&bytes) {
         return Err(ToolError::failed(format!(
             "{} 是二进制文件（{} 字节），不能按文本读取。若需处理请用 bash 调用专用工具。",
@@ -103,9 +133,8 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         )));
     }
 
-    // 按检测出的编码解码。had_errors 为真说明有字节无法在该编码下解释，
+    // had_decode_errors 为真说明有字节无法在该编码下解释，
     // 此时显示内容里的替换字符不是原文，必须告知调用方。
-    let (text, had_decode_errors) = encoding.decode(&bytes);
     let total_lines = text.lines().count();
 
     let offset = optional_usize(args, "offset").unwrap_or(1).max(1);
@@ -141,7 +170,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         out.push_str(&format!(
             "\n[警告：此文件按 {} 解码时出现无法解释的字节，\
              显示内容里的问号方块（U+FFFD）是替换字符，不是原文。]",
-            encoding.name()
+            encoding_name
         ));
     }
     if truncation.truncated {
@@ -176,7 +205,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "shownLines": shown.len(),
         "truncated": truncation.truncated,
         "anchored": with_anchor,
-        "encoding": encoding.name(),
+        "encoding": encoding_name,
         "decodeErrors": had_decode_errors,
     })))
 }
@@ -249,6 +278,47 @@ pub fn limits(max_lines: usize, max_bytes: usize) -> TruncationOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn warm_dir(suffix: &str) -> (ToolContext, std::path::PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("tg-read-warm-{}-{suffix}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("a.txt"), "alpha\nbeta\ngamma\n").expect("write");
+        let ctx = ToolContext::new(&dir).expect("ctx");
+        (ctx, dir)
+    }
+
+    /// §22.6：预热只省 IO/解码，命中缓存与丢弃缓存后返回必须逐字一致。
+    #[tokio::test]
+    async fn warm_cache_does_not_change_return() {
+        let (ctx, dir) = warm_dir("hit");
+        let args = json!({ "path": "a.txt", "intent": "raw" });
+        let first = run(&args, &ctx).await.expect("first read");
+        assert_eq!(ctx.warm.len(), 1, "read + raw 应预热");
+        let second = run(&args, &ctx).await.expect("second read");
+        assert_eq!(
+            format!("{:?}", first.content),
+            format!("{:?}", second.content)
+        );
+        ctx.warm.clear();
+        let third = run(&args, &ctx).await.expect("read after cache drop");
+        assert_eq!(
+            format!("{:?}", first.content),
+            format!("{:?}", third.content)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §22.4：read + summary 不预热。
+    #[tokio::test]
+    async fn summary_intent_does_not_warm() {
+        let (ctx, dir) = warm_dir("summary");
+        let _ = run(&json!({ "path": "a.txt", "intent": "summary" }), &ctx)
+            .await
+            .expect("summary read");
+        assert!(ctx.warm.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use crate::tools::Content;
     use std::io::Write;
 
