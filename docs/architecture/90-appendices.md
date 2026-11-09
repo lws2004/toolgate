@@ -88,19 +88,20 @@
 
 ```yaml
 slots:
-  summarize: { model: lfm3-1.7b }
+  summarize: lfm3-1.7b
 ```
 
 ### 常用覆盖
 
 ```yaml
 slots:
-  summarize: { model: lfm3-1.7b }
+  summarize: lfm3-1.7b
 slm:
   mode: http                 # 多客户端共享模型服务时
-fetch:
-  provider: dsh-web-fetch    # 需要 web 内容经过 toolgate 治理时；默认 none
 ```
+
+`slots.<name>` 的值是模型 id 字符串（§3.10 的显式覆盖），不是 `{model: ...}` 对象。
+`fetch.provider` 等段当前尚未接线，配了会被拒绝（见下节）。
 
 ### 默认值
 
@@ -125,7 +126,7 @@ fetch:
 | `slots` | 空 | 显式覆盖槽位绑定；默认空 = 按 serves 自动解析（§3.10） |
 | `slots.<name>` | 自动 | 槽位 → 模型 id 的显式覆盖（§3.10） |
 | `slm.mode` | `auto` | 按槽位分档选择 embedded/http（§18.1） |
-| `slm.probe` | `first-use` | 能力校验时机：first-use / startup / off（§3.11） |
+| `slm.probe` | `first_use` | 能力校验时机：first_use / startup / off（§3.11） |
 | `slm.disable_after_failures` | `3` | 连续失败多少次禁用槽位（§3.11） |
 | `slm.embedded.backend` | `macOS mlx`（第一期） | 第一期只实现 macOS/MLX；Linux / Windows 见 §19.7 |
 | `slm.embedded.model_dir` | `~/.toolgate/models` | 模型权重目录 |
@@ -157,6 +158,24 @@ fetch:
 | `govern.timeout_ms` | `30000` | 治理请求超时 |
 | `govern.max_concurrency` | `min(CPU×2, 16)` | 治理请求并发上限 |
 | `govern.fail_open` | `false` | 治理不可用时默认拒绝，不静默放行 |
+
+### 本版本已实现的配置段
+
+上表是**完整配置面**（架构的最终形态）；但**当前版本只实现并消费其中三段**。
+分段状态如下：
+
+| 配置段 | 状态 | 说明 |
+|---|---|---|
+| `models` | **已实现** | 模型清单解析：`source` / `path` / `base_url` / `model` / `api_key_env` / `allow_remote` / `serves` / `adapter`（§18.1、§3.10） |
+| `slots` | **已实现** | 槽位绑定解析：显式覆盖优先，否则按 `serves` 推导（§3.10） |
+| `slm` | **已实现** | 槽位运行参数：`mode` / `probe` / `disable_after_failures` / `embedded.*` / `http.base_url`（§18.1、§3.11） |
+| `intent` / `isolation` / `paths` / `limits` / `spill` / `snapshot` / `cache` / `logging` / `fetch` / `govern` | **配置参考，尚未接线** | 这些段目前只有架构定义，还没有被运行时消费 |
+
+**未接线段配了会被明确拒绝**：写入上表标记为「尚未接线」的段，配置校验按
+§18.9 的结构层失败处理，报出该段名并说明「当前版本未实现该配置段」的可行动
+错误，**不静默忽略**。理由与 §18.9 的未知字段拒绝同源：静默忽略会让用户以为配
+了会生效——配置幻觉（§18.9）。用户要这些能力时，先不写该段；等该段接线后自然
+生效，期间用架构正文记录的目标行为（默认值表）理解其语义。
 
 **加载顺序**：CLI 参数 > 环境变量 `TOOLGATE_*` > 配置文件（`--config`，默认 `~/.toolgate/config.yaml`）> 内置默认。
 **缺省**：配置文件不存在时全部使用内置默认，不视为错误；存在但字段非法才 fail loud。

@@ -357,8 +357,15 @@ DSH 生态里的 **dsh-ledger-compact** 是会话层压缩插件：它不碰工�
 > 正文 §19.6 的台账依据。数字随依赖版本变化，只作量级参考；审计时以现场
 > `cargo tree` 输出为准。
 
-**基线（2026-11-08，完成未使用声明清退后）**：`Cargo.lock` 共 89 个包
-（含 3 个 workspace crate），`[workspace.dependencies]` 直接依赖 15 个。
+**基线（2026-11-09，配置层接入 `noyalib` + CLI 重新声明 `tracing` 后）**：
+`Cargo.lock` 共 98 个包（含 3 个 workspace crate），`[workspace.dependencies]`
+直接依赖 17 个；默认构建依赖规模（`cargo tree --prefix none | sort -u | wc -l`）
+为 109 行。
+
+**两个数字不同源，别混用**：96 是 `Cargo.lock` 的包条目数；106 是上面那条
+`cargo tree` 命令的去重行数——`cargo tree` 会给重复展开的子树打 `(*)` 标记，
+这些标记行也占行数，所以 106 与 96 不是同一个口径的两个版本，比较时不要拿
+它们互相验证。
 
 **各直接依赖的传递依赖数**（`cargo tree -p <crate> --prefix none | sort -u | wc -l`，含自身）：
 
@@ -371,7 +378,8 @@ DSH 生态里的 **dsh-ledger-compact** 是会话层压缩插件：它不碰工�
 | thiserror | 8 | ignore | 15 |
 | tracing-subscriber | 20 | regex | 6 |
 | sha2 | 11 | image | 23 |
-| hex | 1 | — | — |
+| hex | 1 | noyalib | 19 |
+| — | — | tracing | 11 |
 
 **审计命令**：
 
@@ -381,13 +389,57 @@ cargo tree --prefix none | sort -u | wc -l    # 默认构建依赖规模
 cargo tree -p <crate> --prefix none | sort -u | wc -l   # 单个依赖的子树
 ```
 
-**2026-11-08 现状**：`--duplicates` 只剩一组同名多版本（`miniz_oxide`
-0.8.9/0.9.1），来自 png 解码链的内部选择，不在直接控制范围。
+**2026-11-09 现状**：`--duplicates` 有两组同名多版本：
+
+| 组 | 版本 | 来源 |
+|---|---|---|
+| `miniz_oxide` | 0.8.9 / 0.9.1 | png 解码链的内部选择，不在直接控制范围；2026-11-08 基线即存在，未新增 |
+| `syn` | 2.0.119 / 3.0.9 | 2.0.119 由 `tracing-attributes`（`tracing` 的 proc-macro 依赖）引入；3.0.9 由 `serde_derive` / `thiserror-impl` / `tokio-macros` 引入 |
+
+`syn` 这组是 2026-11-09 新增的：CLI 重新声明 `tracing` 后，`tracing-attributes`
+首次进入锁文件并拉入 `syn` 2.x，而既有的 serde / thiserror / tokio 宏链用的是
+`syn` 3.x。两条链的 proc-macro 依赖不兼容，`cargo` 不做版本合并——这是「重新
+声明一个传递依赖」的代价，如实记录在此。
 
 **结论**：`image`（23）与 `tracing-subscriber`（20）是两棵最大的子树——前者是
 图片能力的必要成本，后者只允许出现在 CLI crate；`ignore`（15）是搜索语义的
-必要成本。其余直接依赖的子树均 ≤ 14，没有可轻易替换的大依赖。若未来默认层
-出现新的超过 10 个子依赖的直接依赖，应按 §1.5 准入四问重新论证。
+必要成本；`noyalib`（19）是配置解析的必要成本，与 `ignore` 同量级；`tracing`（11）
+是日志调用门面，其子树与 `tracing-subscriber` 的子树高度重叠（两者共享
+`proc-macro2` / `quote` / `unicode-ident`），不是一棵独立的新成本。其余直接依赖
+的子树均 ≤ 14，没有可轻易替换的大依赖。若未来默认层出现新的超过 10 个子依赖
+的直接依赖，应按 §1.5 准入四问重新论证。
+
+### YAML 解析库的选型证据
+
+配置层需要解析 `~/.toolgate/config.yaml`（§18.9、附录 D）。三个候选的
+crates.io 元数据（2026-11-09 查 crates.io API 与 `cargo info`）：
+
+| 候选 | crates.io 最新版 | updated_at | 维护状态 |
+|---|---|---|---|
+| `serde_yaml` | 0.9.34+deprecated | 2024-03-25 | 官方仓库已归档停更；版本号本身已带 `+deprecated` 后缀 |
+| `serde_yml` | 0.0.13 | 2026-05-27 | crates.io 描述首行即「DEPRECATED — `serde_yml` is unmaintained」，并说明它是转发到 `noyalib` 的兼容壳 |
+| `noyalib` | 0.0.58 | 2026-10-15 | 活跃维护；YAML 1.2；纯 Rust、`#![forbid(unsafe_code)]`、serde 集成完整 |
+
+**结论**：默认层用 `noyalib`，不用 `serde_yaml` / `serde_yml`。前者已停更，后者在
+自己的描述里声明自己是转发到 `noyalib` 的兼容壳——用后者的路径最终也是
+`noyalib`，不如直接依赖它。
+
+**子树的实际构成**（`cargo tree -p noyalib --prefix none | sort -u | wc -l` 实测
+19 个）：`serde` / `serde_core` / `serde_derive`（proc-macro）、`serde_ignored`、
+`indexmap` / `hashbrown` / `equivalent`、`smallvec`、`itoa` / `ryu`、`memchr`、
+`rustc-hash`、`proc-macro2` / `quote` / `syn` / `unicode-ident`。多数（serde 系与
+proc-macro 系）已是默认层既有依赖，新增成本集中在 YAML 解析器自身与
+`indexmap` / `smallvec` / `itoa` / `ryu` 这几个小工具库。
+
+**版本口径**：`Cargo.lock` 当前锁 `noyalib` 0.0.15，crates.io 最新为 0.0.58。
+**不是漏升级，是 MSRV 约束**：0.0.58 的 `rust-version` 是 1.89.0，0.0.15 的是
+1.85.0，而本仓库 `rust-version = "1.85"`（§19.6 的「禁止版本通配」按主版本
+约束，精确版本交给 `Cargo.lock`）。cargo 的 MSRV 感知解析因此选到 0.0.15。
+升级路径是抬 `rust-version` 后单独提交 `cargo update`，按 §19.6 的「`cargo update`
+单独提交，不与功能改动混在一起」纪律走。
+
+**选型落点**：§19.6 默认层台账的一行，准入四问逐条回答见
+[architecture-review-2026-11-09-config-layer.md](../architecture-review-2026-11-09-config-layer.md)。
 
 ---
 

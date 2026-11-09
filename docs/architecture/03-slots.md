@@ -375,8 +375,27 @@ slots:
 | `text` | 纯文本或 JSON 直接映射 | 无概率 | summarize / vision |
 | `ordered` | 输出排序列表或分数 | 排序可用、分数非校准 | rerank |
 
-默认 `adapter: auto`：`source: local` 且模型在参考实现清单 → `native`；外部协议 →
-按槽位选 `json` / `text` / `ordered`；无法判断 → `json`。
+默认 `adapter: auto`，规则只依据**配置里能判定的事实**（`source` 与目标槽位）：
+
+| 条件 | adapter |
+|---|---|
+| `source: local` | `native` |
+| 外部协议（`openai` / `anthropic` / `responses`）→ 槽位 `classify` / `decide` | `json` |
+| 外部协议 → 槽位 `summarize` / `vision` | `text` |
+| 外部协议 → 槽位 `rerank` | `ordered` |
+| 无法判断 | `json` |
+
+`source: auto` 先按 §18.1 的判定顺序推断成具体来源，再套用本表（推断出 `local`
+走 `native`）；推断不出来按最后一行处理。
+
+**为什么不再写「模型在参考实现清单」**：参考实现清单（附件 E.2）是文档里的模型族
+名单，配置层读不到「这个模型是不是 jev」——它只知道 `source` 与 `serves`。按
+清单判 `native` 意味着解析器要维护一份模型名单并猜测用户填的路径对应谁，猜错
+就把非原生模型按 `native` 调用，拿不到校准概率还丢掉 §4.4b 的 `UNCALIBRATED`
+告知。改为按 `source` 判定后，规则可由配置本身判定，无需外部名单。
+
+`native` 是**初值不是保证**：模型是否真的按槽位契约输出，由首次使用的形状校验
+确定，不符则按 §3.11 降级或禁用并告警（§18.9 的「能力不符」层）。
 
 **非校准概率必须标注**：`json` 适配器产出的 probability 是模型自报值，不是校准
 概率。返回的 structuredContent 带 `calibrated: false`（程序字段，与 §4.4b 的 `UNCALIBRATED` 同源），content 按 §4.4b 的

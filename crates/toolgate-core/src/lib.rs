@@ -5,6 +5,7 @@
 
 pub mod bash_path;
 pub mod compat;
+pub mod config;
 pub mod decision;
 pub mod edit_path;
 pub mod encoding;

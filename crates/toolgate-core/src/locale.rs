@@ -363,6 +363,30 @@ fn en(zh: &str) -> Option<&'static str> {
         "{notices}\n[图片文件] {file_name} · {mime}{dims} · {size}\n路径：{path}\n\n无法提供图片内容：vision 槽位未配置，上游模型也不接受图片输入。\n可选路径：\n- 若你能通过其他方式查看该文件，用上面的路径\n- 配置 vision 槽位后重试\n- 若只需要文件名与尺寸，以上信息已足够" => {
             "{notices}\n[Image] {file_name} · {mime}{dims} · {size}\nPath: {path}\n\nCannot provide image content: the vision slot is not configured and the upstream model does not accept images.\nOptions:\n- If you can view the file another way, use the path above\n- Configure the vision slot and retry\n- File name and dimensions are enough if that is all you need"
         }
+        // CLI 侧（§18.9 配置层）：配置检查与槽位绑定的输出文案
+        "未找到配置文件，使用内置默认（五个槽位全空）" => {
+            "No config file found; using built-in defaults (all five slots empty)"
+        }
+        "配置检查通过" => "Config check passed",
+        "槽位绑定（§3.10）：" => "Slot bindings (§3.10):",
+        "模型={v}" => "model={v}",
+        "来源={v}" => "source={v}",
+        "模式={v}" => "mode={v}",
+        "适配器={v}" => "adapter={v}",
+        "绑定={v}" => "binding={v}",
+        "未绑定" => "unbound",
+        "显式" => "explicit",
+        "自动" => "auto",
+        "配置有误：" => "Config errors:",
+        "存在的配置文件路径" => "path to an existing config file",
+        "检查路径或先创建文件" => "Check the path, or create the file first",
+        "未知参数：{other}" => "Unknown argument: {other}",
+        "--config 需要一个路径参数。" => "--config requires a path argument.",
+        "config 需要子命令（当前只有 check）。" => {
+            "config requires a subcommand (only check exists)."
+        }
+        "未知 config 子命令：{other}" => "Unknown config subcommand: {other}",
+        "槽位绑定：{summary}" => "Slot bindings: {summary}",
         _ => return None,
     })
 }
