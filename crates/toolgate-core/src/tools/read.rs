@@ -106,6 +106,8 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
                 && client
                     .source_for_slot(SlotKind::Decide)
                     .map(|source| {
+                        // 图片判定需要多模态 decide：systemone 的 images 可用；
+                        // 通用 LLM 的 json 适配器不接收 images（§3.10），不能用于这里。
                         crate::capability::source_slot_capability(source, SlotKind::Decide).grade
                             == crate::capability::CapabilityGrade::Available
                     })

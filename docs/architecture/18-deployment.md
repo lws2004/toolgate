@@ -165,16 +165,18 @@ systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，�
 前置准入的唯一可执行落点——文档表是权威，代码判定与它逐格一致。不因配置里写了
 `serves` 就认为能力成立（§3.11）。
 
-#### json 适配器：通用 chat 端点的 classify 形状
+#### json 适配器：通用 chat 端点的 classify / decide 形状
 
-`classify` 走 §3.10 的 `json` 适配器，与 text 适配器共用同一个 chat 端点与请求/响应结构，差别在 prompt 与输出形状：
+`classify` 与 `decide` 走 §3.10 的 `json` 适配器，与 text 适配器共用同一个 chat 端点与请求/响应结构，差别在 prompt 与输出形状：
 
 | 方向 | 形状 |
 |---|---|
-| 槽位 → 协议 | `temperature = 0`；system 要求只输出一个 JSON 对象；user 给出标签集与待分类文本，要求输出 `{"scores": {"<label>": <0 到 1 的分数>, ...}}` |
-| 协议 → 槽位 | `choices[0].message.content` 解析成 `ClassifyOutput.scores`，再按 §3.2 校验：scores 的 key 集合等于 labels、每个分数在 [0,1]；兼容纯对象与 Markdown 围栏两种常见外壳 |
+| classify：槽位 → 协议 | `temperature = 0`；system 要求只输出一个 JSON 对象；user 给出标签集与待分类文本，要求输出 `{"scores": {"<label>": <0 到 1 的分数>, ...}}` |
+| classify：协议 → 槽位 | `choices[0].message.content` 解析成 `ClassifyOutput.scores`，再按 §3.2 校验：scores 的 key 集合等于 labels、每个分数在 [0,1]；兼容纯对象与 Markdown 围栏两种常见外壳 |
+| decide：槽位 → 协议 | `temperature = 0`；user 放 state 的 JSON 与编号问题（q0…qN）；system 要求只输出 JSON；`images` 非空时拒绝（带图判定走 systemone） |
+| decide：协议 → 槽位 | `choices[0].message.content` 解析成 `{"answers":{"q0":{"probability":...}}}`，按 q0… 还原为输入问题原文的键，再按 §3.2 校验 |
 
-分数是模型自报值、非校准（§3.10 的 json 适配器行）；返回需标 `calibrated: false`，
+两类分数都是模型自报值、非校准（§3.10 的 json 适配器行）；返回需标 `calibrated: false`，
 高风险场景用原生实现或云端复核（§7.2）。形状不符按 §3.11 降级。
 
 #### text 适配器：通用 chat 端点的协议形状

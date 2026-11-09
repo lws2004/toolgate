@@ -10,7 +10,7 @@ use std::sync::Mutex;
 #[cfg(feature = "external-protocols")]
 use std::time::Instant;
 
-use crate::config::{ModelSource, ResolvedConfig};
+use crate::config::{Adapter, ModelSource, ResolvedConfig};
 #[cfg(feature = "external-protocols")]
 use crate::slot_state::FailureKind;
 use crate::slot_state::{DEFAULT_MAX_FAILURES, SlotHealth, SlotHealthMap};
@@ -21,7 +21,9 @@ use crate::slots::{
 };
 
 #[cfg(feature = "external-protocols")]
-use super::{classify_protocol, ordered_protocol, systemone, text_protocol, vision_protocol};
+use super::{
+    classify_protocol, decide_protocol, ordered_protocol, systemone, text_protocol, vision_protocol,
+};
 
 /// 单次外部协议请求的超时（架构暂无该项配置，先用常量）。
 pub const REQUEST_TIMEOUT_SECONDS: u64 = 30;
@@ -201,14 +203,29 @@ impl SlotClient {
             None => return Err(SlotCallError::NotBound { slot }),
         };
         let source = binding.and_then(|b| b.source).unwrap_or(ModelSource::Auto);
-        // §3.10 准入：能力矩阵是唯一事实源，不在客户端里再写一份「支持哪些来源」。
-        let capability = crate::capability::source_slot_capability(source, slot);
-        if capability.grade != crate::capability::CapabilityGrade::Available {
+        let adapter = binding.and_then(|b| b.adapter).unwrap_or(match source {
+            ModelSource::SystemOne | ModelSource::Local => Adapter::Native,
+            _ => Adapter::Json,
+        });
+        // §3.10 准入：能力矩阵 + 适配器组合共同决定。当前实现支持
+        // systemone/native（校准概率）与通用 LLM 的 json（自报概率、非校准）；
+        // 其余组合属「形状可转换但适配未落」，fail loud 并给可行动理由。
+        let supported = matches!(
+            (source, adapter),
+            (ModelSource::SystemOne, Adapter::Native)
+                | (
+                    ModelSource::Openai | ModelSource::Anthropic | ModelSource::Responses,
+                    Adapter::Json
+                )
+        );
+        if !supported {
+            let capability = crate::capability::source_slot_capability(source, slot);
             return Err(SlotCallError::ClientUnavailable {
                 slot,
                 reason: format!(
-                    "source {} 的 decide 槽位能力={}：{}；当前只实现 systemone 客户端（§18.1 / §19.6）",
+                    "source {} + adapter {} 的 decide 组合不可用（能力档={}：{}）；改用 source: systemone / adapter: native，或通用 LLM 的 adapter: json",
                     source.as_str(),
+                    adapter.as_str(),
                     capability.grade.as_str(),
                     capability.reason
                 ),
@@ -227,6 +244,9 @@ impl SlotClient {
                 });
             }
         };
+        let model_name = model
+            .and_then(|m| m.config.model.clone())
+            .unwrap_or(model_id);
         let api_key_env = model.and_then(|m| m.config.api_key_env.clone());
 
         // 连续失败达上限后不再尝试（§3.11）。
@@ -248,12 +268,30 @@ impl SlotClient {
                     });
                 }
             };
-            self.decide_over_http(http, input, &base_url, api_key_env.as_deref())
-                .await
+            match adapter {
+                Adapter::Native => {
+                    self.decide_over_http(http, input, &base_url, api_key_env.as_deref())
+                        .await
+                }
+                Adapter::Json => {
+                    self.decide_json_over_http(
+                        http,
+                        input,
+                        &base_url,
+                        &model_name,
+                        api_key_env.as_deref(),
+                    )
+                    .await
+                }
+                _ => Err(SlotCallError::ClientUnavailable {
+                    slot,
+                    reason: "decide 的适配器组合不可用".to_owned(),
+                }),
+            }
         }
         #[cfg(not(feature = "external-protocols"))]
         {
-            let _ = (input, base_url, api_key_env);
+            let _ = (input, base_url, model_name, api_key_env);
             Err(SlotCallError::ClientUnavailable {
                 slot,
                 reason:
@@ -964,6 +1002,87 @@ impl SlotClient {
         })
     }
 
+    /// json 适配器的 decide HTTP 调用（通用 LLM；自报概率非校准，§3.10 / §19.6）。
+    #[cfg(feature = "external-protocols")]
+    async fn decide_json_over_http(
+        &self,
+        http: &reqwest::Client,
+        input: &DecideInput,
+        base_url: &str,
+        model: &str,
+        api_key_env: Option<&str>,
+    ) -> Result<DecideOutcome, SlotCallError> {
+        let slot = SlotKind::Decide;
+        let request = match decide_protocol::build_request(input, model) {
+            Ok(request) => request,
+            Err(violation) => {
+                return Err(SlotCallError::Contract {
+                    slot,
+                    reason: format!("请求构造失败（输入形态问题）：{}", violation.fact),
+                });
+            }
+        };
+        let url = text_protocol::endpoint(base_url);
+        let mut builder = http.post(&url).json(&request);
+        if let Some(env_name) = api_key_env
+            && let Ok(value) = std::env::var(env_name)
+        {
+            builder = builder.bearer_auth(value);
+        }
+        let started = Instant::now();
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(err) => {
+                let reason = format!("请求 {url} 失败：{err}");
+                self.record_failure(slot, reason.clone(), FailureKind::Transient);
+                return Err(SlotCallError::Transport { slot, reason });
+            }
+        };
+        let status = response.status();
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(err) => {
+                let reason = format!("读取 {url} 响应失败：{err}");
+                self.record_failure(slot, reason.clone(), FailureKind::Transient);
+                return Err(SlotCallError::Transport { slot, reason });
+            }
+        };
+        if !status.is_success() {
+            let reason = format!("上游返回 {status}：{}", summarize(&body));
+            self.record_failure(slot, reason.clone(), FailureKind::Transient);
+            return Err(SlotCallError::Transport { slot, reason });
+        }
+        let parsed: text_protocol::ChatResponse = match serde_json::from_str(&body) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                let reason = format!("响应不是合法 JSON：{err}");
+                self.record_failure(slot, reason.clone(), FailureKind::ShapeMismatch);
+                return Err(SlotCallError::Contract { slot, reason });
+            }
+        };
+        let output = match decide_protocol::parse_output(&parsed, input) {
+            Ok(output) => output,
+            Err(violation) => {
+                let reason = violation.fact.clone();
+                self.record_failure(slot, reason.clone(), FailureKind::ShapeMismatch);
+                return Err(SlotCallError::Contract { slot, reason });
+            }
+        };
+        if let Err(violation) = output.validate(input) {
+            let reason = violation.fact.clone();
+            self.record_failure(slot, reason.clone(), FailureKind::ShapeMismatch);
+            return Err(SlotCallError::Contract { slot, reason });
+        }
+        self.record_success(slot);
+        let gate = gate_for_output(&output);
+        Ok(DecideOutcome {
+            output,
+            gate,
+            latency_ms: started.elapsed().as_millis() as u64,
+            calibrated: false,
+        })
+    }
+
     /// 记一次成功：首次真实调用即视为校验通过（§3.11）。
     #[cfg(feature = "external-protocols")]
     fn record_success(&self, slot: SlotKind) {
@@ -1376,11 +1495,13 @@ mod tests {
         }
     }
 
-    /// 来源不是 systemone 时返回 ClientUnavailable，并写清原因。
+    /// §3.10：通用 LLM + json 适配器可用（受限但可转）；默认构建只到 feature 边界。
+    #[cfg(not(feature = "external-protocols"))]
     #[tokio::test]
-    async fn decide_with_unsupported_source_reports_client_unavailable() {
+    async fn decide_with_openai_json_adapter_reports_missing_feature() {
         let mut cfg = systemone_config();
         cfg.bindings[0].source = Some(ModelSource::Openai);
+        cfg.bindings[0].adapter = Some(Adapter::Json);
         let client = SlotClient::new(cfg);
         let input = DecideInput {
             state: json!("一段日志"),
@@ -1390,7 +1511,29 @@ mod tests {
         match client.decide(&input).await {
             Err(SlotCallError::ClientUnavailable { slot, reason }) => {
                 assert_eq!(slot, SlotKind::Decide);
-                assert!(reason.contains("openai"), "{reason}");
+                assert!(reason.contains("external-protocols"), "{reason}");
+            }
+            other => panic!("应当是 ClientUnavailable：{other:?}"),
+        }
+    }
+
+    /// §3.10：不支持的 adapter 组合 fail loud，并给可行动下一步。
+    #[tokio::test]
+    async fn decide_with_unsupported_adapter_combo_is_rejected() {
+        let mut cfg = systemone_config();
+        cfg.bindings[0].source = Some(ModelSource::Openai);
+        cfg.bindings[0].adapter = Some(Adapter::Native);
+        let client = SlotClient::new(cfg);
+        let input = DecideInput {
+            state: json!("一段日志"),
+            images: None,
+            questions: vec!["有错吗".to_owned()],
+        };
+        match client.decide(&input).await {
+            Err(SlotCallError::ClientUnavailable { slot, reason }) => {
+                assert_eq!(slot, SlotKind::Decide);
+                assert!(reason.contains("native"), "{reason}");
+                assert!(reason.contains("json"), "{reason}");
             }
             other => panic!("应当是 ClientUnavailable：{other:?}"),
         }
