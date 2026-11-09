@@ -193,6 +193,23 @@ impl SlotClient {
             .clone()
     }
 
+    /// §15.2 判定日志：decide 槽位绑定模型的上游模型名，未声明时用模型 id。
+    /// 与 `decide` 里解析 model_name 的口径一致（§18.1）。
+    pub fn decide_model_name(&self) -> Option<String> {
+        let binding = self
+            .cfg
+            .bindings
+            .iter()
+            .find(|b| b.slot == SlotKind::Decide)?;
+        let model_id = binding.model_id.as_ref()?;
+        let model = self.cfg.models.iter().find(|m| &m.id == model_id);
+        Some(
+            model
+                .and_then(|m| m.config.model.clone())
+                .unwrap_or_else(|| model_id.clone()),
+        )
+    }
+
     /// decide 槽位调用：绑定 → 构造 → 发送 → 解析 → 契约校验 → 门控。
     pub async fn decide(&self, input: &DecideInput) -> Result<DecideOutcome, SlotCallError> {
         let slot = SlotKind::Decide;

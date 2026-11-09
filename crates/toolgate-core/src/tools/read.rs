@@ -425,6 +425,15 @@ async fn image_ruling(
         Intent::Structured | Intent::Summary => facts.kind_confidence as f64,
         Intent::Raw | Intent::Visual => return None,
     };
+    // §15.2 判定日志：confidence 按 §7.3 口径，在归并结论后传入。
+    let _ = crate::decision_log::append(
+        "read",
+        Some(confidence),
+        client.decide_model_name().as_deref(),
+        &decide_input,
+        &outcome,
+    )
+    .await;
     Some(ImageRuling {
         facts,
         confidence,
@@ -452,9 +461,18 @@ async fn text_ruling(text: &str, ctx: &ToolContext) -> Option<TextRuling> {
     };
     let outcome = client.decide(&input).await.ok()?;
     let facts = merge_text_answers(&outcome.output.answers)?;
+    let confidence = facts.kind_confidence.min(facts.view_confidence) as f64;
+    let _ = crate::decision_log::append(
+        "read",
+        Some(confidence),
+        client.decide_model_name().as_deref(),
+        &input,
+        &outcome,
+    )
+    .await;
     Some(TextRuling {
         facts,
-        confidence: facts.kind_confidence.min(facts.view_confidence) as f64,
+        confidence,
         calibrated: outcome.calibrated,
     })
 }

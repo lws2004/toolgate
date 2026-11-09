@@ -567,6 +567,14 @@ impl EditDecider for SlotDecider<'_> {
     fn decide<'a>(&'a self, input: &'a DecideInput) -> EditFuture<'a> {
         Box::pin(async move {
             let outcome = self.client.decide(input).await.ok()?;
+            let _ = crate::decision_log::append(
+                "edit",
+                None,
+                self.client.decide_model_name().as_deref(),
+                input,
+                &outcome,
+            )
+            .await;
             let probs: BTreeMap<String, f64> = EDIT_QUESTION_KEYS
                 .iter()
                 .zip(EDIT_QUESTIONS.iter())

@@ -360,6 +360,15 @@ async fn run_decide(ctx: &ToolContext, body: &str) -> Option<DecideRun> {
         questions: L1_QUESTIONS.iter().map(|q| (*q).to_owned()).collect(),
     };
     let outcome = client.decide(&input).await.ok()?;
+    // §15.2 判定日志：写失败不影响工具结果（观测性不进主路径）。
+    let _ = crate::decision_log::append(
+        "bash",
+        None,
+        client.decide_model_name().as_deref(),
+        &input,
+        &outcome,
+    )
+    .await;
     // 按固定 key 归并：answers 的键是问题原文，先按顺序映射到稳定 key。
     let probs: BTreeMap<String, f64> = L1_QUESTION_KEYS
         .iter()

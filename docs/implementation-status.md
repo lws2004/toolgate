@@ -7,7 +7,7 @@
 > **更新纪律**：每次改动落地后更新对应行（状态 + 证据）。判断下一步只读本文件，
 > 不要重新扫描代码与架构正文——那既慢又容易与事实源漂移。
 >
-> 最后更新：2026-11-10（补 §15.2 判定日志落地口径；阶段 4 状态口径与「当前待办」已对齐）
+> 最后更新：2026-11-10（§15.2 判定日志落地并接线五个判定点；验证基线 441/435）
 
 ## 怎么用
 
@@ -20,7 +20,7 @@
 
 | 项 | 状态 | 架构依据 | 缺口 |
 |---|---|---|---|
-| §15.2 判定日志（decisions.jsonl） | 未做 | §15.2 / §15.6 / §3.11 | `crates/` 内零实现；§15.6 判定准确率、§15.4 抽样复核频率、§3.11 质量抽检均以它为采集点，是「等运行期采样数据」的前置条件。落地口径（记录层 / 字段来源 / 失败语义 / 默认构建边界）已补进 §15.2，待按该口径接五个判定点 |
+| §15.2 判定日志（decisions.jsonl） | 完成 | §15.2 / §15.6 / §3.11 | `decision_log.rs`（sha256 输入哈希 / RFC3339 时间戳 / JSONL 追加写）+ 五个判定点接线；3 个单测覆盖字段与脱敏、追加写与 null、时间戳基准。bash/edit/task 的归并函数未暴露 §7.3 数值，这三条路径 `confidence` 记 null（不编造） |
 | decide 批处理（方案 B，turn 内聚合） | 不实现（前提不成立） | §13.4 | 一次 decide 调用只读一个 state，不同工具的输出无法合并；可合并的「同一 state 多问题」在单次调用内已问完。论证与 turn 载体现状见 §13.4「实现状态」 |
 | 有损 WebP | 未做（条件触发） | §10.2b | 三条触发判据未出现，image_pipeline 只检测格式 |
 | 流式输出 | 不做 | §14 阶段 4 | MCP progress notification 不改变返回形态，已定不做 |
@@ -113,8 +113,8 @@
 
 | 命令 | 结果（2026-11-10 复测） |
 |---|---|
-| `cargo test --workspace` | 438 passed（默认构建；含 4 个阶段 5 集成用例与 1 个 MCP 握手序列用例） |
-| `cargo test --workspace --features external-protocols` | 432 passed（feature 构建；6 个默认构建专属的降级测试被 cfg 隔离） |
+| `cargo test --workspace` | 441 passed（默认构建；含 4 个阶段 5 集成用例、1 个 MCP 握手序列用例与 3 个判定日志单测） |
+| `cargo test --workspace --features external-protocols` | 435 passed（feature 构建；6 个默认构建专属的降级测试被 cfg 隔离，另含 3 个判定日志单测） |
 | `cargo clippy --workspace --all-targets` | No issues |
 | `cargo build --release` | 零警告 |
 | `./scripts/check-doc.sh` | 通过 |

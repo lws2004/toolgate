@@ -8,6 +8,7 @@ pub mod capability;
 pub mod compat;
 pub mod config;
 pub mod decision;
+pub mod decision_log;
 pub mod edit_path;
 pub mod encoding;
 pub mod error;
