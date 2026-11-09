@@ -714,6 +714,20 @@ decide 槽位契约是**二元形状**——「每个问题一个概率」，没
 `SLOT_UNAVAILABLE` 告知，`meta.confidence` 为 `null`。**不判错、不判类型**——
 把「判定不了」记成「判定为无错」是错的。
 
+#### L2 摘要的落地口径
+
+`intent=summary` 与 `auto`（输出 ≥ 500 token）在 L1 判定之后尝试 L2 摘要：
+
+- 摘要输入是**有界窗口**：输出尾部 8000 字符（与判定 state 同源，§6.4）加上
+  L1 判定事实（`errorKind` / `severity`），不把整份输出喂给生成模型；
+- 摘要成功时 `content` 只给摘要文本，判定事实在 `meta.decision`、完整输出在
+  `meta.spill`，**不重复上传原文**；`meta.summary` 同时给程序可读通道；
+- 摘要不可用（槽位未绑定 / feature 未开 / 调用失败）按 §3.8 降级：给原文 +
+  `SLOT_UNAVAILABLE` 告知，工具照常工作（§7.3），**不编造摘要**。
+
+上图中「has_error 且 severity=阻断」是 §9.2 对 L2 节点**自动展开**的触发判据；
+本轮的协商层接线按 intent 进入摘要路径，理解链的自动调度（§4.8）仍待落地。
+
 **结构化字段在判定不可用时的取值**：`errorKind` = `"unknown"`、`severity` =
 `"unknown"`、`failedItems` = 空数组（`exitCode` 与 `spillPath` 照常给真实值，
 它们不依赖模型）。**这与「判定为无错」是两回事**：`errorKind` 的 `"none"` 是

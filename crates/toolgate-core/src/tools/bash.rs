@@ -22,7 +22,7 @@ use crate::bash_path::{
 };
 use crate::locale::{t, tformat};
 use crate::notice::{Notice, SlotFallback, budgeted_notices};
-use crate::slots::{ConfidenceGate, DecideInput};
+use crate::slots::{ConfidenceGate, DecideInput, SummarizeInput};
 use crate::truncate::{format_size, truncate_tail};
 
 /// 默认超时：5 分钟。
@@ -204,7 +204,25 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         }
     }
 
+    // §5.1：L2 摘要只在协商层判定要摘要时跑；不可用只降级并告知，工具照常工作（§7.3）。
+    let mut summary_text: Option<String> = None;
+    if plan.should_summarize {
+        match run_summarize(ctx, &body, &decision_facts).await {
+            Some(text) => summary_text = Some(text),
+            None => notices.push(Notice::SlotUnavailable {
+                slot: "summarize".to_owned(),
+                fallback: SlotFallback::Mechanical,
+            }),
+        }
+    }
+
     let mut content = body;
+    if let Some(text) = &summary_text {
+        // §5.1：摘要成功时 content 只给摘要，判定事实在 meta.decision、原文在 meta.spill，
+        // 不重复上传原文；meta.summary 同时给程序可读通道。
+        content = text.clone();
+        meta["summary"] = json!(text);
+    }
     if !notices.is_empty() {
         let ch = budgeted_notices(notices);
         // structured 形态的 content 是纯事实 JSON，告知只进 structuredContent（§4.4b 两个通道）。
@@ -269,6 +287,43 @@ async fn run_decide(ctx: &ToolContext, body: &str) -> Option<DecideRun> {
         decision: merge_decision(&probs),
         gate: outcome.gate,
     })
+}
+
+/// 跑一次 L2 摘要；槽位不可用（未绑定 / feature 未开 / 调用失败）时返回 None，
+/// 由调用方降级（§7.3）。
+async fn run_summarize(
+    ctx: &ToolContext,
+    body: &str,
+    facts: &DecisionFacts,
+) -> Option<String> {
+    let client = ctx.slm.as_ref()?;
+    let input = build_summarize_input(body, facts);
+    let outcome = client.summarize(&input).await.ok()?;
+    outcome.output.text
+}
+
+/// §5.1：摘要输入是有界窗口（输出尾部 8000 字符，§6.4）+ L1 判定事实，
+/// 不把整份输出喂给生成模型。
+fn build_summarize_input(body: &str, facts: &DecisionFacts) -> SummarizeInput {
+    let tail: String = body
+        .chars()
+        .rev()
+        .take(DECISION_STATE_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let text = format!(
+        "判定事实：errorKind={} severity={}\n输出尾部：\n{}",
+        facts.error_kind.as_deref().unwrap_or("unknown"),
+        facts.severity.as_deref().unwrap_or("unknown"),
+        tail,
+    );
+    SummarizeInput {
+        text,
+        schema: None,
+        max_tokens: None,
+    }
 }
 
 /// 拒绝把 shell 解释器当作命令入口。
@@ -498,6 +553,24 @@ mod tests {
         assert!(resp.meta.get("confidence").is_none());
         assert_eq!(resp.meta["intent"], json!("summary"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.1：摘要输入有界，且带上 L1 判定事实。
+    #[test]
+    fn summarize_input_is_bounded_and_carries_decision() {
+        let body = "头部".to_owned() + &"x".repeat(DECISION_STATE_CHARS + 100) + "尾部";
+        let facts = DecisionFacts {
+            error_kind: Some("compile".to_owned()),
+            severity: Some("blocking".to_owned()),
+            ..Default::default()
+        };
+        let input = build_summarize_input(&body, &facts);
+        assert!(input.text.contains("errorKind=compile"));
+        assert!(input.text.contains("severity=blocking"));
+        assert!(input.text.contains("尾部"));
+        assert!(!input.text.contains("头部"));
+        assert!(input.schema.is_none());
+        assert!(input.max_tokens.is_none());
     }
 
     #[tokio::test]

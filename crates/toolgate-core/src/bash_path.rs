@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::compat::{CompatConfig, resolve_intent};
 use crate::decision::Intent;
-use crate::notice::{Notice, SlotFallback};
+use crate::notice::Notice;
 use crate::understanding::{ChainAction, ChainNode};
 
 /// 估算 token：按 §4.4b 的 4 字节/token 口径。
@@ -75,7 +75,7 @@ pub fn bash_chain() -> Vec<ChainNode> {
 pub enum BashMode {
     /// 截断原文 + 落盘指针（v1 行为）。
     Raw,
-    /// 槽位全空，按 §3.8 退到机械路径并告知（§7.3）。
+    /// 摘要路径：summarize 槽位可用时给摘要；不可用时按 §3.8 退到原文并告知（§7.3）。
     SummaryDegraded,
     /// 结构化事实 JSON（§5.1）。
     Structured,
@@ -89,15 +89,9 @@ pub struct BashPlan {
     /// §5.1/§9.2：输出 ≥ 500 token 才触发 L1 判定；低于门槛由 exitCode 机械判断。
     /// 由协商层单点产出，运行时不再另算一次门槛（避免双源）。
     pub should_decide: bool,
-}
-
-/// summarize 槽位不可用时的告知（§7.3）。decide 的告知由 bash.rs 运行时按
-/// 实际判定结果追加（判定不可用才加），所以这里不写死 decide。
-fn summarize_unavailable_notice() -> Vec<Notice> {
-    vec![Notice::SlotUnavailable {
-        slot: "summarize".to_owned(),
-        fallback: SlotFallback::Mechanical,
-    }]
+    /// §5.1：summary / auto 且输出 ≥ 500 token 时尝试 L2 摘要；告知由运行时按
+    /// 实际结果追加（与 decide 对称），这里不写死降级告知。
+    pub should_summarize: bool,
 }
 
 /// 协商层：按 intent 与输出体量决定返回形态。纯函数，同输入同输出。
@@ -106,6 +100,8 @@ fn summarize_unavailable_notice() -> Vec<Notice> {
 pub fn plan_bash(intent: Intent, tokens: usize) -> Result<BashPlan, String> {
     let should_decide = matches!(intent, Intent::Summary | Intent::Structured | Intent::Auto)
         && tokens >= AUTO_SUMMARY_TOKENS;
+    let should_summarize =
+        matches!(intent, Intent::Summary | Intent::Auto) && tokens >= AUTO_SUMMARY_TOKENS;
     let (mode, notices) = match intent {
         Intent::Raw => (BashMode::Raw, vec![]),
         Intent::Visual => {
@@ -118,15 +114,13 @@ pub fn plan_bash(intent: Intent, tokens: usize) -> Result<BashPlan, String> {
         Intent::Auto | Intent::Summary if tokens < AUTO_SUMMARY_TOKENS => {
             (BashMode::Raw, vec![])
         }
-        Intent::Summary | Intent::Auto => (
-            BashMode::SummaryDegraded,
-            summarize_unavailable_notice(),
-        ),
+        Intent::Summary | Intent::Auto => (BashMode::SummaryDegraded, vec![]),
     };
     Ok(BashPlan {
         mode,
         notices,
         should_decide,
+        should_summarize,
     })
 }
 
@@ -306,19 +300,15 @@ mod tests {
         assert!(plan.notices.is_empty());
     }
 
+    /// 到达门槛才进理解链；decide / summarize 的告知都由运行时按实际结果追加。
     #[test]
-    fn summary_degrades_with_summarize_notice_only() {
-        // 到达门槛才进理解链；低门槛的行为由下面的 below_threshold 测试覆盖。
+    fn summary_path_requests_both_slots_without_plan_notices() {
         let plan = plan_bash(Intent::Summary, AUTO_SUMMARY_TOKENS).unwrap();
         assert_eq!(plan.mode, BashMode::SummaryDegraded);
         assert!(plan.should_decide);
-        // decide 的告知由 bash.rs 运行时按实际判定结果追加，纯计划里只留 summarize。
-        assert_eq!(plan.notices.len(), 1);
-        let rendered = render_notices(&plan.notices);
-        assert!(!rendered.contains("slot=decide"));
-        assert!(rendered.contains("slot=summarize"));
-        assert!(rendered.contains("fallback=mechanical"));
-        assert_eq!(rendered.lines().count(), 1);
+        assert!(plan.should_summarize);
+        assert!(plan.notices.is_empty());
+        assert!(render_notices(&plan.notices).is_empty());
     }
 
     /// §5.1/§9.2：summary 低于 500 token 给机械结果（原文），不判定、不告知。
@@ -328,6 +318,7 @@ mod tests {
         assert_eq!(plan.mode, BashMode::Raw);
         assert!(plan.notices.is_empty());
         assert!(!plan.should_decide);
+        assert!(!plan.should_summarize);
     }
 
     /// §5.1：三种 intent 都到 500 token 门槛才触发判定；raw 永不判定。
@@ -346,6 +337,22 @@ mod tests {
             );
         }
         assert!(!plan_bash(Intent::Raw, 10_000).unwrap().should_decide);
+        assert!(!plan_bash(Intent::Structured, 10_000).unwrap().should_summarize);
+    }
+
+    /// §5.1：只有 summary / auto 且到门槛才尝试摘要；raw / structured 不摘要。
+    #[test]
+    fn summarize_triggered_only_for_summary_and_auto() {
+        for intent in [Intent::Summary, Intent::Auto] {
+            assert!(
+                !plan_bash(intent, AUTO_SUMMARY_TOKENS - 1)
+                    .unwrap()
+                    .should_summarize
+            );
+            assert!(plan_bash(intent, AUTO_SUMMARY_TOKENS).unwrap().should_summarize);
+        }
+        assert!(!plan_bash(Intent::Raw, 10_000).unwrap().should_summarize);
+        assert!(!plan_bash(Intent::Structured, 10_000).unwrap().should_summarize);
     }
 
     #[test]
@@ -368,6 +375,7 @@ mod tests {
         assert_eq!(plan.mode, BashMode::Structured);
         assert!(plan.notices.is_empty());
         assert!(!plan.should_decide);
+        assert!(!plan.should_summarize);
     }
 
     #[test]
