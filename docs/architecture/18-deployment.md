@@ -158,6 +158,13 @@ systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，�
 | decide | **受限** | **受限** | **受限** | **可用（给校准概率）** | systemone 的 `noul` = P(yes)，直接满足 §3.2 decide 契约与 §7.2 门控 |
 | rerank | **受限** | **受限** | **受限** | **不可用** | systemone 无排序接口 |
 
+**这张表是 §3.10「信息充分 ∧ 形状可转换」的判例**：每个「不可用」都能归到输入
+信息不足（systemone 不生成文本、无排序接口），每个「受限」归到输出形状可转但
+适配未落或概率非校准；`classify` 的「受限」不是信息不足，是 `choice` 映射未落
+（§3.10）。代码侧由 `capability` 模块按本表固化 `source × slot` 判定，作为运行时
+前置准入的唯一可执行落点——文档表是权威，代码判定与它逐格一致。不因配置里写了
+`serves` 就认为能力成立（§3.11）。
+
 **openai / anthropic / responses 是通用 LLM 的协议形态，jev 类判定模型不按 chat
 协议工作。** §3.4 的参考判定实现（StartLux / d3-nano）属 systemone 协议族，
 对它们只能走 `systemone`；上表 openai 列的 decide 标「受限」，对这类模型是

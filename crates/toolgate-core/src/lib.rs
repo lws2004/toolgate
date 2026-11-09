@@ -4,6 +4,7 @@
 //! 工具实现与治理规则。
 
 pub mod bash_path;
+pub mod capability;
 pub mod compat;
 pub mod config;
 pub mod decision;

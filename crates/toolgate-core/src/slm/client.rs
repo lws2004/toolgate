@@ -149,13 +149,17 @@ impl SlotClient {
             Some(model_id) => model_id.clone(),
             None => return Err(SlotCallError::NotBound { slot }),
         };
-        let source = binding.and_then(|b| b.source);
-        if source != Some(ModelSource::SystemOne) {
+        let source = binding.and_then(|b| b.source).unwrap_or(ModelSource::Auto);
+        // §3.10 准入：能力矩阵是唯一事实源，不在客户端里再写一份「支持哪些来源」。
+        let capability = crate::capability::source_slot_capability(source, slot);
+        if capability.grade != crate::capability::CapabilityGrade::Available {
             return Err(SlotCallError::ClientUnavailable {
                 slot,
                 reason: format!(
-                    "source {} 不支持 decide 调用（当前只实现 systemone）",
-                    source.map(|s| s.as_str()).unwrap_or("auto")
+                    "source {} 的 decide 槽位能力={}：{}；当前只实现 systemone 客户端（§18.1 / §19.6）",
+                    source.as_str(),
+                    capability.grade.as_str(),
+                    capability.reason
                 ),
             });
         }
