@@ -324,6 +324,13 @@ feature 默认关闭，默认构建下这条路径不可用（§19.6）。
 
 **说明**：这是兼容性验证，不是 toolgate 的功能阶段；是否值得做取决于调用方是否采用本地 agent。
 
+**进度记录（2026-11-09，实现状态）**：四项已落成集成测试
+`crates/toolgate-core/tests/agent_consumption.rs`（4 个用例）：raw 下六工具不调模型且
+`slmStatus` 全 `unavailable` / 五类错误带 code + nextSteps / write-edit-search-bash-read
+的结构化事实字段名稳定 / 告知同时进 content 与 structuredContent。**集成测试发现并修掉
+一个真实缺陷**：bash 截断告知此前只进 content，structuredContent 没有 `TRUNCATED` 条目
+（违反 §4.4b 两个通道）。
+
 ### 阶段 6（后续规划）：Windows / Linux
 
 - 进程管理（Job Object / POSIX）、快照数据面（FICLONE / ReFS）、路径与权限（ACL / 盘符）的移植（§19.7）

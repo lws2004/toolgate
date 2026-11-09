@@ -20,9 +20,7 @@
 
 | 项 | 状态 | 架构依据 | 缺口 |
 |---|---|---|---|
-
-| decide 批处理（方案 B，turn 内聚合） | 未做 | §13.4 | `_meta.toolgate/turn` 载体已解析（compat.rs / understanding.rs），跨请求聚合与丢弃未实现 |
-| 理解链并发调度调优 | 部分 | §4.8 | 有 MAX_PARALLEL 上限与确定性调度；链级并发调优未做 |
+| decide 批处理（方案 B，turn 内聚合） | 未做（方向待定） | §13.4 | `_meta.toolgate/turn` 载体已解析；但一次 decide 调用只读一个 state，不同工具的输出无法合并——「跨请求聚合」的收益前提不成立，方向待定（见 §13.4 的待澄清点） |
 | 有损 WebP | 未做（条件触发） | §10.2b | 三条触发判据未出现，image_pipeline 只检测格式 |
 | 流式输出 | 不做 | §14 阶段 4 | MCP progress notification 不改变返回形态，已定不做 |
 
@@ -75,8 +73,14 @@
 | L0 预热与 L1 预判 | 部分 | §22 | `warm.rs` + read 路径接入；其余工具未接 |
 | 质量阶梯标定 | 完成 | §10.2b | `examples/quality_calibration.rs` |
 | decide 批处理（方案 B） | 未做 | §13.4 | 见「当前待办」 |
-| 理解链并发调度调优 | 部分 | §4.8 | `understanding.rs` MAX_PARALLEL / MAX_STEPS |
+| 理解链并发调度调优 | 完成 | §4.8 | read 图片 `Both` 并发（`tokio::join!`）；`understanding.rs` 的分层调度仍用于校验与确定性 |
 | 有损 WebP | 未做（条件触发） | §10.2b | 见「当前待办」 |
+
+## 阶段 5（可选）：本地 agent 消费形态验证
+
+| 项 | 状态 | 架构依据 | 证据 |
+|---|---|---|---|
+| 四项行为校验（raw 不调模型 / 错误 code+nextSteps / 结构化字段稳定 / 告知两通道） | 完成 | §14 阶段 5、§21.7 | `crates/toolgate-core/tests/agent_consumption.rs`（4 个用例）；期间修掉 bash 截断告知只进 content 的缺陷 |
 
 ## §17.2 安全底线（v2 必须补）
 
@@ -108,7 +112,7 @@
 
 | 命令 | 结果（2026-11-09） |
 |---|---|
-| `cargo test --workspace` | 431 passed（默认构建；含 slmStatus 状态真实性修复） |
+| `cargo test --workspace` | 435 passed（默认构建；含 4 个阶段 5 集成用例） |
 | `cargo test --workspace --features external-protocols` | 425 passed（feature 构建；6 个默认构建专属的降级测试被 cfg 隔离） |
 | `cargo clippy --workspace --all-targets` | No issues |
 | `cargo build --release` | 零警告 |

@@ -211,9 +211,18 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
 
     let mut body = truncation.content.clone();
     let mut spill_meta = Value::Null;
+    // §4.4b：截断告知是一个事实源、两个通道——content 有可读提示，
+    // structuredContent 也必须有结构化条目，程序才能按 code 判断。
+    let mut truncation_notice: Option<Notice> = None;
 
     if truncation.truncated {
         let spill = ctx.spill.persist("bash", &combined)?;
+        truncation_notice = Some(Notice::Truncated {
+            kept: truncation.output_lines as u64,
+            total: truncation.total_lines as u64,
+            unit: crate::notice::TruncUnit::Lines,
+            pointer: Some(spill.path.display().to_string()),
+        });
         body.push_str(&tformat(
             lang,
             "\n[输出已截断：共 {} 行 / {}，仅展示尾部 {} 行。{}]",
@@ -253,6 +262,9 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     // 由 exitCode 机械判断）。判定不可用（未绑定 / feature 未开 / 调用失败）
     // 只降级并告知，工具照常工作（§7.3）。
     let mut notices = plan.notices.clone();
+    if let Some(notice) = truncation_notice {
+        notices.push(notice);
+    }
     let mut decision_facts = DecisionFacts::default();
     if plan.should_decide {
         match run_decide(ctx, &body).await {

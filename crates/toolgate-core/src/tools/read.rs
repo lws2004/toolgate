@@ -547,16 +547,21 @@ async fn image_response(
         }
         // §10.1 中间区间：结构化在前、原图在后。
         ImageOutcome::Both => {
-            let mut resp =
-                text_understanding_response(path, mime, meta, dims, plan, ctx, &bytes).await?;
+            // §4.8 并发模型：两个未依赖的动作并发提交——vision 理解（网络）与压缩
+            // 原图（本地 CPU）。并发只影响延迟、不改变结果（§16.3）：下面仍按
+            // 「vision 失败已退回原图则不重复追加」的同一判据组装。
+            let (text_resp, original) = tokio::join!(
+                text_understanding_response(path, mime, meta, dims, plan, ctx, &bytes),
+                async { image_pipeline::prepare(&bytes, mime, path) },
+            );
+            let mut resp = text_resp?;
             // vision 失败时 text_understanding_response 已退回原图，不要重复追加。
             if !resp
                 .content
                 .iter()
                 .any(|c| matches!(c, Content::Image { .. }))
             {
-                let original = image_pipeline::prepare(&bytes, mime, path)?;
-                resp.content.extend(original.content);
+                resp.content.extend(original?.content);
             }
             resp
         }
