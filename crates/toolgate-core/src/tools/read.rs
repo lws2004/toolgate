@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::{
     Content, ToolContext, ToolResponse, ToolSpec, optional_bool, optional_usize, required_str,
+    round2,
 };
 use crate::ToolError;
 use crate::compat::{CompatConfig, resolve_intent};
@@ -368,8 +369,8 @@ async fn image_response(
     if let Some(ruling) = ruling {
         resp.meta["imageKind"] = json!(ruling.facts.kind.as_str());
         resp.meta["hasText"] = json!(ruling.facts.has_text);
-        resp.meta["needPixels"] = json!(ruling.facts.need_pixels);
-        resp.meta["confidence"] = json!(ruling.confidence);
+        resp.meta["needPixels"] = json!(round2(ruling.facts.need_pixels as f64));
+        resp.meta["confidence"] = json!(round2(ruling.confidence));
         resp.meta["decideLatencyMs"] = json!(ruling.latency_ms);
     }
     Ok(resp)
@@ -852,13 +853,13 @@ mod tests {
         let facts = ImageFacts {
             kind: crate::read_path::ImageKind::Chart,
             has_text: true,
-            need_pixels: 0.5,
+            need_pixels: 0.7084,
         };
         let plan = plan_image(Intent::Auto, true, true, Some(&facts));
         assert_eq!(plan.outcome, ImageOutcome::Both);
         let ruling = ImageRuling {
             facts,
-            confidence: 0.77,
+            confidence: 0.7769,
             latency_ms: 4,
             calibrated: true,
         };
@@ -873,8 +874,9 @@ mod tests {
             "vision 失败时 Both 应退回原图"
         );
         assert_eq!(resp.meta["imageKind"], json!("chart"));
-        assert_eq!(resp.meta["needPixels"], json!(0.5));
-        assert_eq!(resp.meta["confidence"], json!(0.77));
+        // 概率类字段只保留两位小数（§4.7 输出密度）。
+        assert_eq!(resp.meta["needPixels"], json!(0.71));
+        assert_eq!(resp.meta["confidence"], json!(0.78));
         let _ = std::fs::remove_dir_all(ctx.cwd);
     }
 }

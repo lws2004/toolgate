@@ -249,6 +249,11 @@ fn slot_state(bound: bool, disabled: bool) -> &'static str {
     }
 }
 
+/// 概率类数值只保留两位小数：超过两位的精度对调用方没有信息量（§4.7 输出密度）。
+pub(crate) fn round2(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
 /// 把协商状态并入一次工具返回的 meta；工具已写过的同名键不覆盖。
 fn inject_negotiation_meta(resp: &mut ToolResponse, intent: Intent, client: Option<&SlotClient>) {
     let extra = negotiation_meta(intent, &SlotSet::none(), client);
@@ -258,6 +263,12 @@ fn inject_negotiation_meta(resp: &mut ToolResponse, intent: Intent, client: Opti
     let target = resp.meta.as_object_mut().expect("meta 已确保为对象");
     for (key, value) in extra.as_object().expect("协商状态是对象") {
         target.entry(key.clone()).or_insert(value.clone());
+    }
+    // 工具自己写过的 confidence 同样收敛到两位小数。
+    if let Some(confidence) = target.get_mut("confidence")
+        && let Some(value) = confidence.as_f64()
+    {
+        *confidence = json!(round2(value));
     }
 }
 
@@ -348,6 +359,11 @@ mod tests {
         assert_eq!(resp.meta["custom"], json!(7));
         assert_eq!(resp.meta["slmStatus"]["decide"], json!("unavailable"));
         assert!(resp.meta["confidence"].is_null());
+
+        // 概率类字段只保留两位小数。
+        let mut rounded = ToolResponse::text("hi").with_meta(json!({ "confidence": 0.123456 }));
+        inject_negotiation_meta(&mut rounded, Intent::Raw, None);
+        assert_eq!(rounded.meta["confidence"], json!(0.12));
 
         let mut plain = ToolResponse::text("hi");
         inject_negotiation_meta(&mut plain, Intent::Auto, None);
