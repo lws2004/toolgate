@@ -427,6 +427,9 @@ pub fn render_notices(notices: &[Notice]) -> String {
 /// structuredContent 通道：原样携带同一份 notices，顺序与 content 一致。
 pub fn structured_notices(notices: &[Notice]) -> Value {
     let mut sorted = notices.to_vec();
+    for n in &mut sorted {
+        sanitize_notice(n);
+    }
     sorted.sort_by(by_render_order);
     json!(sorted.iter().map(Notice::to_structured).collect::<Vec<_>>())
 }
@@ -825,5 +828,34 @@ mod tests {
             .map(|l| l.split(']').next().unwrap().trim_start_matches('['))
             .collect();
         assert_eq!(codes, content_codes);
+    }
+}
+
+// ---------- §4.4b 两通道统一脱敏（补齐契约） ----------
+
+/// rule 在 notice 生成时脱敏：content 与 structuredContent 拿到同一份已脱敏 notices。
+fn sanitize_notice(n: &mut Notice) {
+    if let Notice::IsolationFallback { rule, .. } = n {
+        *rule = sanitize_rule(rule);
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    #[test]
+    fn structured_channel_sanitizes_rule() {
+        let n = Notice::IsolationFallback {
+            requested: IsolationLevel::Raw,
+            actual: FallbackAction::Redact,
+            rule: "/Users/lanws/workspace/toolgate/**/.env*".to_owned(),
+            reason: IsolationReason::RetentionBelowThreshold,
+        };
+        let value = structured_notices(&[n.clone()]);
+        let rule = value[0]["params"]["rule"].as_str().unwrap();
+        assert_eq!(rule, "<external>");
+        assert!(!value.to_string().contains("/Users/"));
+        assert!(!render_notices(&[n]).contains("/Users/"));
     }
 }
