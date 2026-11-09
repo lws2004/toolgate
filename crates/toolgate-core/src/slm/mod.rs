@@ -11,8 +11,11 @@ pub mod client;
 pub mod ordered_protocol;
 pub mod systemone;
 pub mod text_protocol;
+pub mod vision_protocol;
 
-pub use client::{DecideOutcome, RerankOutcome, SlotCallError, SlotClient, SummarizeOutcome};
+pub use client::{
+    DecideOutcome, RerankOutcome, SlotCallError, SlotClient, SummarizeOutcome, VisionOutcome,
+};
 pub use systemone::{
     SystemOneQuestion, SystemOneRequest, SystemOneResponse, build_request, endpoint,
     parse_decide_output,

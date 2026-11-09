@@ -192,6 +192,18 @@ systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，�
 协议无原生排序接口，分数是模型自报值、非校准（§18.1 能力表标「受限」）；
 形状不符按 §3.11 降级。专用 listwise reranker 不在本轮实现范围内（§3.5）。
 
+#### vision 适配器的协议形状
+
+`vision` 走 §3.10 的 `text` 适配器，但请求需要多模态 content part：
+
+| 方向 | 形状 |
+|---|---|
+| 槽位 → 协议 | `POST {base_url}/chat/completions`，`temperature = 0`；user 的 `content` 是数组：一个 `{"type":"text","text":<任务指令 + query>}` 加一个图片 part。`image` 的形状由调用方给（§3.2 不预设），本轮按 chat 端点的 image content part 直接透传 |
+| 协议 → 槽位 | `choices[0].message.content` 作为 `VisionOutput.text`；`task=ground` 时要求内容是 `{"boxes":[{"label":...,"bbox":[x,y,w,h]}]}`，解析成 `VisionOutput.boxes`，再按 §3.2 校验 bbox 有限且非负 |
+
+任务指令按 `VisionTask` 固定四档（describe / ocr / ground / classify），不生成自由
+指令；形状不符按 §3.11 降级。
+
 **openai / anthropic / responses 是通用 LLM 的协议形态，jev 类判定模型不按 chat
 协议工作。** §3.4 的参考判定实现（StartLux / d3-nano）属 systemone 协议族，
 对它们只能走 `systemone`；上表 openai 列的 decide 标「受限」，对这类模型是
