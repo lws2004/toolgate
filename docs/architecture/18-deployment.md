@@ -115,6 +115,8 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
 | `rerank` | 原生重排序端点（`/v1/rerank`） | 同上 | 同上 | jina-reranker 等专用 listwise reranker |
 | `auto` | 按 URL 推断 | `path` 或 `base_url` + `model` | 推断为上面某一种，规则见下 | 地址已含协议信息时 |
 
+**`base_url` 口径**：`openai` / `anthropic` / `responses` 的 `base_url` 是含 `/v1` 的 API 根（如 `http://127.0.0.1:8080/v1`）；`systemone` / `rerank` 是不含 `/v1` 的**服务根地址**，客户端自行拼 `/v1/systemone` / `/v1/rerank`。两者不可混用，否则会拼出 `/v1/v1/...`。
+
 ```yaml
 models:
   jev:
@@ -139,10 +141,10 @@ models:
 6. 都不命中 → **启动失败**，要求显式写 `source`。
 
 **这六条顺序不变，`systemone` 与 `rerank` 都不进自动推断。** `base_url` 写的是服务根地址
-（如 `http://127.0.0.1:8090`）时，根地址里没有任何协议特征可据此判断后端是
-systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，也能挂 systemone
-端点。按本节的保守推断原则（猜错协议比报错更糟，§1.4.4 的可行动失败），
-**`systemone` 与 `rerank` 都必须显式写 `source`**（猜错协议比报错更糟）。
+时，根地址里没有任何协议特征可据此判断后端属于哪个独立协议族——同一个根地址
+既能挂 OpenAI 兼容端点，也能挂 systemone、rerank 等独立协议端点。按本节的保守
+推断原则（§1.4.4 的可行动失败：猜错协议比报错更糟），
+**`systemone` 与 `rerank` 都必须显式写 `source`**。
 
 显式写 `source: systemone` 时，`base_url` 指向服务根地址，客户端自行拼
 `/v1/systemone` 路径；`source: rerank` 同口径，客户端拼 `/v1/rerank`（形状见下）。
@@ -160,8 +162,9 @@ systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，�
 | rerank | **受限** | **受限** | **受限** | **不可用** | **可用（原生排序）** | systemone 无排序接口；`source: rerank` 走原生 `/v1/rerank` |
 
 **这张表是 §3.10「信息充分 ∧ 形状可转换」的判例**：每个「不可用」都能归到输入
-信息不足（systemone 不生成文本、无排序接口），每个「受限」归到输出形状可转但
-适配未落或概率非校准；`classify` 的「受限」不是信息不足，是 `choice` 映射未落
+信息不足（systemone 不生成文本、无排序接口；rerank 协议只返回排序结果，缺文本 /
+概率 / 图像输出通道），每个「受限」归到输出形状可转但适配未落或概率非校准；
+`rerank × rerank` 的「可用」是信息充分且形状可转的原生端点；`classify` 的「受限」不是信息不足，是 `choice` 映射未落
 （§3.10）。代码侧由 `capability` 模块按本表固化 `source × slot` 判定，作为运行时
 前置准入的唯一可执行落点——文档表是权威，代码判定与它逐格一致。不因配置里写了
 `serves` 就认为能力成立（§3.11）。
@@ -209,16 +212,16 @@ systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，�
 
 #### rerank 协议：原生 `/v1/rerank` 端点
 
-`source: rerank` 用于上游直接提供排序接口的场景（本机 127.0.0.1:10020 的 rmlx retrieval 服务，jina-reranker-v3.5-mlx-merged）。它是独立协议族，不是 `openai` 上的形状变体（ADR 0007）；`adapter: auto` 给它 `native`。
+`source: rerank` 用于上游直接提供排序接口的场景（实例与逐条实测见附件 E.11）。它是独立协议族，不是 `openai` 上的形状变体（ADR 0007）；`adapter: auto` 给它 `native`。
 
 `base_url` 指向服务根地址，客户端自行拼 `/v1/rerank`（与 `systemone` 拼 `/v1/systemone` 同口径）：
 
 | 方向 | 形状 |
 |---|---|
-| 槽位 → 协议 | `POST /v1/rerank`，`{"model": <models.<id>.model>, "query": ..., "documents": [...]}`；`model` 必须与上游服务启动时的模型名完全一致，不做别名推断（配错按 §18.9 fail loud） |
+| 槽位 → 协议 | `POST /v1/rerank`，`{"model": <models.<id>.model>, "query": ..., "documents": [...]}`；`model` 不做别名推断。与上游启动名是否一致无法在配置期判定（§18.1 不做启动探测），上游返回 `model_not_found` 时按 §18.9 第四层 / §3.11 首次使用校验降级并告警（§7.3），不在配置期 fail loud |
 | 协议 → 槽位 | `results[].{index, relevance_score}` → `RerankResult{index, score}`；`document` 等额外字段丢弃；再按 §3.2 校验覆盖全部输入、index 指向原始位置、按 score 降序 |
 
-`RerankInput.top_n` 不透传（上游是否支持本轮未实测），由 toolgate 侧在完整 `results` 上按 §3.2 截断。形状不符按 §3.11 降级。`source: rerank` 的 `serves` 只能含 `rerank`（其余槽位在能力表里是「不可用」）。HTTP 发送在 `external-protocols` feature 后（§19.6）。
+`RerankInput.top_n` 不透传（上游是否支持本轮未实测）；槽位按 §3.2 返回覆盖全部输入的完整 `results`，截断由工具层按 §5.2 的确定性截断完成（与 `ordered` 路径「`top_n` 透传但 results 仍须覆盖全部候选」对照）。形状不符按 §3.11 降级。能力表中 `rerank` 协议对其余四个槽位判为「不可用」；`serves` 是声明不是承诺（§3.11），声明阶段不因此拒绝配置，运行时按 §3.11 前置准入拒绝并降级。`relevance_score` 是相关性分数、非校准概率，只用作顺序、不作置信度门控输入（§5.2、§18.1）；`UNCALIBRATED` 告知只适用于自报概率的 `ordered` 路径。HTTP 发送在 `external-protocols` feature 后（§19.6）。
 
 #### vision 适配器的协议形状
 
@@ -352,7 +355,7 @@ systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，�
 
 **边界**：本节只管协议选择，不改 §3.2 的槽位契约、也不改 §5.1 的问题定义。
 
-**部署约束**：外部来源（`openai` / `anthropic` / `responses` / `systemone` / `auto` 解析为外部协议时）`mode` 只能是 `http`；`embedded` 只适用于 `source: local`。非法组合启动即失败（fail loud）。`base_url` 不写时用 `slm.http.base_url`。
+**部署约束**：外部来源（`openai` / `anthropic` / `responses` / `systemone` / `rerank` / `auto` 解析为外部协议时）`mode` 只能是 `http`；`embedded` 只适用于 `source: local`。非法组合启动即失败（fail loud）。`base_url` 不写时用 `slm.http.base_url`。
 
 **数据边界**：外部协议默认只接受 loopback（127.0.0.1 / localhost）。远程 endpoint 会让数据出机器，违背 §8 的隔离目标——必须显式配置 `allow_remote: true` 并在启动时告警；第一期不实现远程来源。
 
@@ -368,7 +371,7 @@ systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，�
 **这条现在就写明，是因为它防的是「接云端时漏掉」**：本机链路加不加幂等键都跑得
 通，所以它不会以故障的形式暴露出来，只会以账单的形式。
 
-**依赖**：外部协议客户端（HTTP 客户端）属于可选层（Cargo feature `external-protocols`），默认构建不含；纯本地路径不需要它（§19.6）。**默认构建不含该 feature 时，配置了外部 `source` 的槽位按 §3.8 降级**（资源层失败，不是配置错误）：配置本身合法，后端能力缺失属运行期资源问题（§18.9 四层校验的第四层）。
+**依赖**：外部协议客户端（HTTP 客户端）属于可选层（Cargo feature `external-protocols`），默认构建不含；纯本地路径不需要它（§19.6）。**默认构建不含该 feature 时，配置了外部 `source` 的槽位按 §3.8 降级**（资源层失败，不是配置错误）：配置本身合法，后端能力缺失属运行期资源问题（§18.9 四层校验的第四层）。`source: rerank` 的客户端同属该 feature 后的可选层；默认构建缺失时按 §3.8 降级并告警（§7.3）。
 
 **实例去重**：本地来源按模型文件路径去重；外部来源按 `base_url + source + model` 去重（§18.1 的实例管理）。
 
@@ -986,7 +989,7 @@ cargo build --release    # 产出一个可执行文件，无运行时依赖
 | 能力 | 形态 | 隔离方式 | 为什么不做进默认层 |
 |---|---|---|---|
 | 本地模型推理（embedded） | llama.cpp / MLX 的 Rust 绑定或动态库 | Cargo feature `slm-embedded`（待实现） | C++ / Apple 框架绑定破坏单二进制，native 崩溃会带走整个进程（§18.1） |
-| 外部模型协议客户端（openai / anthropic / responses / systemone） | HTTP 客户端库 `reqwest`（Cargo feature `external-protocols`） | 默认关闭；配置外部 `source`（openai / anthropic / responses / systemone / auto）时启用 | 默认层不引入 HTTP 客户端；纯本地路径不需要（§18.1） |
+| 外部模型协议客户端（openai / anthropic / responses / systemone / rerank） | HTTP 客户端库 `reqwest`（Cargo feature `external-protocols`） | 默认关闭；配置外部 `source`（openai / anthropic / responses / systemone / rerank / auto）时启用 | 默认层不引入 HTTP 客户端；纯本地路径不需要（§18.1） |
 | WebP 编码 | ffmpeg / cwebp 子进程 | 运行时检测命令是否存在（§10.2b） | 为约 3.5% 的体积收益引入 C 依赖不值得（§10.2b 的三条判据） |
 | fetch provider | 外部子进程（dsh-web-fetch / pi / opencli / moli / command） | `fetch.provider` 配置，默认 `none` | 取数能力由客户端生态提供，不内建网络栈 |
 
@@ -1001,7 +1004,7 @@ GC 运行时、日志聚合客户端。它们会把「本地常驻小工具」�
 单二进制（§19.3）。默认关闭该 feature 时，`reqwest` 完全不进默认构建。
 
 **默认构建不含 HTTP 客户端时的行为**：配置了外部 `source`（`openai` /
-`anthropic` / `responses` / `systemone`）的槽位**按 §3.8 降级并告警**，归类为
+`anthropic` / `responses` / `systemone` / `rerank`）的槽位**按 §3.8 降级并告警**，归类为
 资源层失败（§18.9 四层校验的第四层），**不是配置错误**——配置本身合法，缺的是
 这个构建里的后端能力。判定发生在启动时发现「该 feature 未编入」，不是配置解析
 阶段。

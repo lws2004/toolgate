@@ -62,7 +62,7 @@ toolgate 是本地常驻的工具层：云端做规划，本地做理解与执�
 
 ### 3.5 决策与 ADR
 
-- 决策翻转或重大取舍（影响对外契约/部署/依赖）→ 写 `docs/decisions/NNNN-*.md`，编号递增（现有 0001–0005）。
+- 决策翻转或重大取舍（影响对外契约/部署/依赖）→ 写 `docs/decisions/NNNN-*.md`，编号递增（现有 0001–0007）。
 - **结论守持**：没有新证据不改已定结论；改判必须指出哪条证据推翻了它（矛盾的事实、反例、核对失败）。
 - 数字必须标口径：**实测**给命令与条件，**估算**明确写「估算」，引用给来源；不编造测试数、行数、延迟。
 
@@ -90,7 +90,7 @@ toolgate 是本地常驻的工具层：云端做规划，本地做理解与执�
 - **工具设计**：新增/修改工具先过 §4.6 的克制、能力、诚实三条；能由现有工具组合完成的不新增；ToolSpec 的 description 必须写清「能做什么 / 不能做什么 / 什么时候用别的工具」。
 - **面向 agent**：工具返回按 §4.7 执行——高密度、高效；不写寒暄、人类文案、装饰性输出；CLI 调试输出与 MCP 返回不共享格式。
 - **理解链**：工具内多步理解按 §4.8——固定动作菜单、单次调用内、有界步数与并发、无状态无副作用；不做开放式规划。
-- **槽位配置**：只写 `models` 清单与 `serves`，槽位按 serves 自动绑定（§3.10）；不在槽位下重复声明槽位名。模型来源 `source` = auto / local / openai / anthropic / responses（§18.1）；外部协议客户端属可选层。形状适配按 `adapter`（§3.10）。
+- **槽位配置**：只写 `models` 清单与 `serves`，槽位按 serves 自动绑定（§3.10）；不在槽位下重复声明槽位名。模型来源 `source` 的取值以 §18.1 的 source 表为准（auto / local / openai / anthropic / responses / systemone / rerank）；`systemone` / `rerank` 不参与 auto 推断，外部协议客户端属可选层。形状适配按 `adapter`（§3.10）。
 - **配置校验**：语法 / 结构 / 语义错误 fail loud、多错误聚合、未知字段拒绝，资源失败按 §3.8 降级但告警（§18.9）；改配置前先跑 `toolgate config check`。
 - **能力校验**：`serves` 是声明不是承诺（§3.11）——首次使用校验、形状不符降级、连续失败禁用并告警；不把声明当能力保证。
 - **平台范围**：第一期只做 macOS（Apple Silicon 优先）；Windows / Linux 属后续规划（§19.7）。不提前实现平台分支，平台特定代码集中隔离。
@@ -103,7 +103,7 @@ toolgate 是本地常驻的工具层：云端做规划，本地做理解与执�
 改完必须实跑并贴输出：
 
 ```bash
-cargo test --workspace                    # 全部通过；当前基线 57 passed，新增行为要有新测试
+cargo test --workspace                    # 全部通过；当前基线见 implementation-status.md，新增行为要有新测试
 cargo build --release                     # 零警告
 cargo clippy --workspace --all-targets    # 无问题
 ./scripts/check-doc.sh                    # 文档改动必跑

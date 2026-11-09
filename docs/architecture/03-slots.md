@@ -336,7 +336,7 @@ models:
 
 - 五个槽位不写全：上面 2 个模型覆盖 4 个槽位，rerank 为空（§3.8 降级）；
 - 同一个模型服务多个槽位只声明一次（在 `models` 里），**不在槽位下重复写槽位名**；
-- `source` 默认 `auto`（有 `path` 用本地权重，有 `base_url` 按 URL 推断协议）；也可显式 `local` / `openai` / `anthropic` / `responses`（见 §18.1）；
+- `source` 默认 `auto`（有 `path` 用本地权重，有 `base_url` 按 URL 推断协议）；显式取值以 §18.1 的 source 表为准（`local` / `openai` / `anthropic` / `responses` / `systemone` / `rerank`），其中 `systemone` / `rerank` 不参与 auto 推断；
 - `adapter` 默认 `auto`（按来源与槽位推断），可显式 `native` / `json` / `text` / `ordered`（见下）。
 
 **解析规则**：
@@ -399,6 +399,8 @@ slots:
 
 `source: auto` 先按 §18.1 的判定顺序推断成具体来源，再套用本表（推断出 `local`
 走 `native`）；推断不出来按最后一行处理。
+
+**术语**：本表的「外部协议」特指通用 LLM 三协议（`openai` / `anthropic` / `responses`）；§18.1 的「外部来源」是更大的集合，另含 `systemone` / `rerank` 两个独立协议族，两者不互换。
 
 #### 跨槽位服务的准入：信息充分 ∧ 形状可转换
 

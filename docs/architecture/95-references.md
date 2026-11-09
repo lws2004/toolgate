@@ -596,4 +596,28 @@ toolgate 上一轮已接它（§18.1）。
 「每个问题一个概率」，没有类型维度）。这个差距本轮评估过「要不要给契约加类型
 维度」，结论是**不采纳**（理由与重新评估的触发条件见
 [architecture-review-2026-11-09-typed-decide-align.md](../architecture-review-2026-11-09-typed-decide-align.md)
-第 5 节）——**§3.2 正文保持不动**。
+第 5 节）——**§3.2 正文保持不动**.
+## E.11 原生 rerank 端点实测（2026-11-10）
+
+用途：ADR 0007 新增 `source: rerank` 的上游事实依据。按 §4「正文只写决策」，
+实测 / 背景 / 实例一律放附件 E，架构正文只留指针。
+
+**服务**：`com.lanws.rmlx-retrieval`（launchd `RunAtLoad` + `KeepAlive`）常驻
+127.0.0.1:10020；启动脚本 `~/workspace/tools/retrieval/scripts/rmlx_retrieval_service.py`
+带 `--rerank-model /Users/lanws/.models/jina-reranker-v3.5-mlx-merged`、
+`--embedding-model /Users/lanws/.omlx/models/mlx-community_bge-m3-mlx-8bit`、
+`--rerank-model-family jina3 --port 10020`。
+
+**实测命令与条件**（本机 macOS、2026-11-10、loopback、无鉴权；以下数字均为**实测**）：
+
+| 命令 | 条件 | 结果 |
+|---|---|---|
+| `curl -sS http://127.0.0.1:10020/v1/models` | GET | 列出 `mlx-community_bge-m3-mlx-8bit` |
+| `curl -sS -X POST http://127.0.0.1:10020/v1/rerank -H 'Content-Type: application/json' -d '{"model":"/Users/lanws/.models/jina-reranker-v3.5-mlx-merged","query":"apple","documents":["apple fruit","a car"]}'` | 2 个候选 | `results[0].relevance_score=0.641352117061615`（index 0）、`results[1].relevance_score=0.4527008831501007`（index 1），按分数降序；`usage.prompt_tokens=166` |
+| 同上，`model` 改为 `bge-m3` | 2 个候选 | `model_not_found`，提示只能用启动时的 `--rerank-model` 路径 |
+| `curl -sS -X POST http://127.0.0.1:10020/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"bge-m3","messages":[{"role":"user","content":"hi"}],"max_tokens":5}'` | 最小 chat 请求 | `Model not loaded`（该服务未加载 chat 模型） |
+| `curl -sS http://127.0.0.1:10020/openapi.json` | GET | 注册路径含 `/v1/rerank`、`/v1/embeddings` |
+
+**口径**：上表只用于说明端点形状，不作延迟 / 质量基准。`jina-reranker-v3.5-mlx-merged`
+的 listwise 块大小 125 出自 §3.5 的参考实现选型记录（**引用**，非本机实测），
+不在本表内。OpenViking 已在消费该端点（用户 2026-11-10 告知）。
