@@ -13,6 +13,9 @@ use serde_json::{Value, json};
 
 use super::{ToolContext, ToolResponse, ToolSpec, optional_str, optional_usize, required_str};
 use crate::ToolError;
+use crate::bash_path::intent_tag;
+use crate::notice::{render_notices, structured_notices};
+use crate::search_path::{SearchShape, plan_search, resolve_search_intent, structured_facts};
 use crate::truncate::{MAX_MATCH_LINE_LENGTH, truncate_head};
 
 pub fn spec() -> ToolSpec {
@@ -41,6 +44,11 @@ pub fn spec() -> ToolSpec {
                     "type": "integer",
                     "description": "最多返回多少条结果，默认 200",
                     "minimum": 1
+                },
+                "intent": {
+                    "type": "string",
+                    "enum": ["raw", "summary", "structured", "visual", "auto"],
+                    "description": "协商层输出形态：raw 全部命中（默认）/ structured 结构化候选列表 / auto 与 summary 仅在命中超过 20 条时需要 rerank，槽位不可用则按命中顺序返回并告知 / visual 不适用"
                 }
             },
             "required": ["mode", "query"]
@@ -82,13 +90,33 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         });
     }
 
-    Ok(ToolResponse::text(body).with_meta(json!({
+    let intent = resolve_search_intent(args).map_err(ToolError::bad_argument)?;
+    // rerank 槽位当前不可用（可选层未接入，§3.3）。
+    let plan = plan_search(intent, hit_count, false).map_err(ToolError::bad_argument)?;
+
+    let mut meta = json!({
         "mode": mode,
         "query": query,
         "hits": hit_count,
         "truncated": truncation.truncated,
         "spill": spilled,
-    })))
+        "intent": intent_tag(intent),
+        "rerank": plan.rerank.as_str(),
+    });
+    let mut content = body;
+    if !plan.notices.is_empty() {
+        content.push('\n');
+        content.push_str(&render_notices(&plan.notices));
+        meta["notices"] = structured_notices(&plan.notices);
+    }
+    if plan.shape == SearchShape::Structured {
+        let candidates: Vec<&str> = raw.lines().collect();
+        let spill_path = meta["spill"]["path"].as_str();
+        let facts = structured_facts(hit_count, &candidates, spill_path, plan.rerank);
+        content = facts.to_string();
+        meta["facts"] = facts;
+    }
+    Ok(ToolResponse::text(content).with_meta(meta))
 }
 
 /// 内容检索：正则逐行匹配，返回 路径:行号:内容。
@@ -231,5 +259,99 @@ mod tests {
         let out = truncate_line(&line);
         assert!(out.len() < 600);
         assert!(out.contains("..."));
+    }
+
+    fn ctx_with_hits(name: &str, files: usize) -> (ToolContext, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("tg-search-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        for i in 0..files {
+            std::fs::write(dir.join(format!("f{i}.txt")), "hit\n").expect("write");
+        }
+        (ToolContext::new(&dir).expect("ctx"), dir)
+    }
+
+    #[tokio::test]
+    async fn raw_intent_matches_v1_behavior() {
+        let (ctx, dir) = ctx_with_hits("raw", 3);
+        let resp = run(
+            &json!({ "mode": "content", "query": "hit", "intent": "raw" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("hit"));
+        assert_eq!(resp.meta["hits"], json!(3));
+        assert_eq!(resp.meta["intent"], json!("raw"));
+        assert_eq!(resp.meta["rerank"], json!("skipped"));
+        assert!(resp.meta.get("notices").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn small_hits_auto_stays_raw() {
+        let (ctx, dir) = ctx_with_hits("small", 5);
+        let resp = run(
+            &json!({ "mode": "content", "query": "hit", "intent": "auto" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        assert_eq!(resp.meta["rerank"], json!("skipped"));
+        assert!(resp.meta.get("notices").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn many_hits_auto_degrades_with_slot_unavailable() {
+        let (ctx, dir) = ctx_with_hits("many", 25);
+        let resp = run(
+            &json!({ "mode": "content", "query": "hit", "intent": "auto" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("[SLOT_UNAVAILABLE]"));
+        assert_eq!(resp.meta["hits"], json!(25));
+        assert_eq!(resp.meta["rerank"], json!("unavailable"));
+        assert_eq!(resp.meta["notices"].as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn structured_intent_returns_candidate_json() {
+        let (ctx, dir) = ctx_with_hits("structured", 3);
+        let resp = run(
+            &json!({ "mode": "content", "query": "hit", "intent": "structured" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        let facts: Value = serde_json::from_str(body).expect("content 应是 JSON");
+        assert_eq!(facts["hits"], json!(3));
+        assert_eq!(facts["candidates"].as_array().unwrap().len(), 3);
+        assert_eq!(resp.meta["facts"]["rerank"], json!("skipped"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn visual_intent_is_rejected_actionably() {
+        let (ctx, dir) = ctx_with_hits("visual", 1);
+        let err = run(
+            &json!({ "mode": "content", "query": "hit", "intent": "visual" }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("read"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
