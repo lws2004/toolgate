@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use super::{ToolContext, ToolResponse, ToolSpec, gate_notices, optional_str, optional_usize, required_str};
+use super::{
+    ToolContext, ToolResponse, ToolSpec, gate_notices, optional_str, optional_usize, required_str,
+};
 use crate::ToolError;
 use crate::bash_path::{
     BashDecision, BashMode, DecisionFacts, L1_QUESTION_KEYS, L1_QUESTIONS, estimate_tokens,
@@ -91,8 +93,11 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // §14 阶段 4：独立进程组，超时可整组终止（避免子进程残留）。
+        .process_group(0)
         .spawn()
         .map_err(|e| ToolError::failed(format!("无法启动 {binary}：{e}")))?;
+    let pid = child.id().unwrap_or(0);
 
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr piped");
@@ -117,6 +122,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
             (out, err, status)
         }
         Err(_) => {
+            super::kill_process_group(pid).await;
             let _ = child.kill().await;
             return Err(ToolError::failed(format!(
                 "命令超时（{} 秒）已被终止：{binary} {}",
@@ -291,11 +297,7 @@ async fn run_decide(ctx: &ToolContext, body: &str) -> Option<DecideRun> {
 
 /// 跑一次 L2 摘要；槽位不可用（未绑定 / feature 未开 / 调用失败）时返回 None，
 /// 由调用方降级（§7.3）。
-async fn run_summarize(
-    ctx: &ToolContext,
-    body: &str,
-    facts: &DecisionFacts,
-) -> Option<String> {
+async fn run_summarize(ctx: &ToolContext, body: &str, facts: &DecisionFacts) -> Option<String> {
     let client = ctx.slm.as_ref()?;
     let input = build_summarize_input(body, facts);
     let outcome = client.summarize(&input).await.ok()?;

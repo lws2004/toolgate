@@ -175,6 +175,24 @@ impl ToolSpec {
     }
 }
 
+/// 终止整个进程组（§14 阶段 4）：先按负 PID 发 SIGKILL，再杀直接子进程。
+///
+/// 进程组由启动时的 `process_group(0)` 建立；`kill` 是 POSIX 必备命令，
+/// 不引入新依赖。调用方仍要 `child.kill()` 兜底（例如进程尚未入组）。
+pub(crate) async fn kill_process_group(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    let _ = tokio::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(format!("-{pid}"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+}
+
 /// §7.2 门控 → 告知：采用且足够确定时不告知；不够确定或两种视图时给 LOW_CONFIDENCE。
 /// bash 与 task 共用，避免各写一份（§28 DRY）。
 pub(crate) fn gate_notices(gate: ConfidenceGate, confidence: f64) -> Vec<Notice> {

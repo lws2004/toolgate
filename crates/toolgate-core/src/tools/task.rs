@@ -27,8 +27,8 @@ use crate::notice::{Notice, SlotFallback, budgeted_notices};
 use crate::slots::{ConfidenceGate, SummarizeInput};
 use crate::task_path::{
     TASK_L1_QUESTION_KEYS, TASK_L1_QUESTIONS, TaskDecision, TaskDecisionFacts, TaskMode,
-    decision_state_tail, merge_task_decision, plan_task, resolve_task_intent,
-    state_decide_request, structured_facts,
+    decision_state_tail, merge_task_decision, plan_task, resolve_task_intent, state_decide_request,
+    structured_facts,
 };
 use crate::truncate::{format_size, truncate_tail};
 
@@ -121,6 +121,8 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(false)
+        // §14 阶段 4：独立进程组，kill 时整组终止。
+        .process_group(0)
         .spawn()
         .map_err(|e| ToolError::failed(format!("无法启动 {binary}：{e}")))?;
 
@@ -203,7 +205,11 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
     .with_meta(json!({ "taskId": task_id, "pid": pid, "label": label })))
 }
 
-async fn read_output(args: &Value, ctx: &ToolContext, intent: Intent) -> Result<ToolResponse, ToolError> {
+async fn read_output(
+    args: &Value,
+    ctx: &ToolContext,
+    intent: Intent,
+) -> Result<ToolResponse, ToolError> {
     let task_id = required_str(args, "task_id")?;
     // 先在同步块里收集机械事实并释放 registry 锁，再 await 判定（不跨 await 持锁）。
     let (raw, exit, elapsed, label, pid) = {
@@ -409,7 +415,8 @@ fn build_summary_input(
     let tail = decision_state_tail(body);
     let text = format!(
         "进程事实：exitCode={} elapsedSecs={}\n判定事实：state={} progress={}\n输出尾部：\n{}",
-        exit.map(|c| c.to_string()).unwrap_or_else(|| "null".to_owned()),
+        exit.map(|c| c.to_string())
+            .unwrap_or_else(|| "null".to_owned()),
         elapsed,
         facts.state.as_deref().unwrap_or("unknown"),
         facts.progress.as_deref().unwrap_or("unknown"),
@@ -449,15 +456,16 @@ fn state_line(
 
 async fn kill(args: &Value, lang: Language) -> Result<ToolResponse, ToolError> {
     let task_id = required_str(args, "task_id")?;
-    let child = {
+    let (child, pid) = {
         let reg = registry()
             .lock()
             .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?;
-        reg.get(task_id)
-            .ok_or_else(|| ToolError::failed(format!("没有这个任务：{task_id}")))?
-            .child
-            .clone()
+        let job = reg
+            .get(task_id)
+            .ok_or_else(|| ToolError::failed(format!("没有这个任务：{task_id}")))?;
+        (job.child.clone(), job.pid)
     };
+    super::kill_process_group(pid).await;
     let mut guard = child.lock().await;
     guard
         .kill()
@@ -685,9 +693,8 @@ mod tests {
     /// §5.5：摘要输入有界，且带上机械观测与 L1 判定事实。
     #[test]
     fn summary_input_is_bounded_and_carries_facts() {
-        let body = "头部".to_owned()
-            + &"x".repeat(crate::task_path::TASK_STATE_CHARS + 100)
-            + "尾部";
+        let body =
+            "头部".to_owned() + &"x".repeat(crate::task_path::TASK_STATE_CHARS + 100) + "尾部";
         let facts = TaskDecisionFacts {
             state: Some("stuck".to_owned()),
             progress: Some("error_loop".to_owned()),
