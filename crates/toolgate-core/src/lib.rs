@@ -9,6 +9,7 @@ pub mod error;
 pub mod hashline;
 pub mod media;
 pub mod notice;
+pub mod slot_state;
 pub mod slots;
 pub mod spill;
 pub mod tools;
