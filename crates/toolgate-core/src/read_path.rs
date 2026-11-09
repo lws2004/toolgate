@@ -136,6 +136,236 @@ pub fn vision_task_for(kind: ImageKind) -> VisionTask {
     }
 }
 
+/// §5.3 文本路径的 file_kind 五分类（unknown 表示判定置信不足）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Code,
+    Config,
+    Log,
+    Doc,
+    Data,
+    Unknown,
+}
+
+impl FileKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FileKind::Code => "code",
+            FileKind::Config => "config",
+            FileKind::Log => "log",
+            FileKind::Doc => "doc",
+            FileKind::Data => "data",
+            FileKind::Unknown => "unknown",
+        }
+    }
+}
+
+/// §5.3 文本路径的 sensitivity 事实（只作标注，不替代 §8 的隔离规则）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sensitivity {
+    None,
+    Secret,
+    Personal,
+}
+
+impl Sensitivity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Sensitivity::None => "none",
+            Sensitivity::Secret => "secret",
+            Sensitivity::Personal => "personal",
+        }
+    }
+}
+
+/// §5.3 文本路径的 best_view 三档。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BestView {
+    Full,
+    Structure,
+    Fragment,
+}
+
+impl BestView {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BestView::Full => "full",
+            BestView::Structure => "structure",
+            BestView::Fragment => "fragment",
+        }
+    }
+}
+
+/// decide 对文本路径的 L1 判定结果（§5.3）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextFacts {
+    pub file_kind: FileKind,
+    /// 被选中的 file_kind 类别概率（unknown 时是五类最大概率）。
+    pub kind_confidence: f32,
+    pub sensitivity: Sensitivity,
+    pub best_view: BestView,
+    /// 被选中的 best_view 类别概率（full 兜底时是三档最大概率）。
+    pub view_confidence: f32,
+}
+
+/// §5.3 文本路径 L1 的十问：file_kind 五类 + sensitivity 两问 + best_view 三档。
+pub const TEXT_FILE_KIND_QUESTIONS: [(&str, FileKind); 5] = [
+    ("这段文本是源代码吗？", FileKind::Code),
+    ("这段文本是配置文件吗？", FileKind::Config),
+    ("这段文本是日志吗？", FileKind::Log),
+    ("这段文本是文档吗？", FileKind::Doc),
+    ("这段文本是结构化数据（JSON、CSV、表格等）吗？", FileKind::Data),
+];
+pub const TEXT_SENSITIVITY_QUESTIONS: [(&str, Sensitivity); 2] = [
+    ("这段文本包含密钥、口令或访问令牌吗？", Sensitivity::Secret),
+    ("这段文本包含个人信息（姓名、证件号、联系方式等）吗？", Sensitivity::Personal),
+];
+pub const TEXT_BEST_VIEW_QUESTIONS: [(&str, BestView); 3] = [
+    ("这段文本最适合完整通读吗？", BestView::Full),
+    ("这段文本最适合按结构化视图（函数签名、键值树、错误时间线等）阅读吗？", BestView::Structure),
+    ("这段文本最适合只取一个片段吗？", BestView::Fragment),
+];
+
+/// 十问的固定顺序：file_kind 五问 → sensitivity 两问 → best_view 三问。
+pub fn text_decide_questions() -> Vec<String> {
+    TEXT_FILE_KIND_QUESTIONS
+        .iter()
+        .map(|(question, _)| (*question).to_owned())
+        .chain(TEXT_SENSITIVITY_QUESTIONS.iter().map(|(question, _)| (*question).to_owned()))
+        .chain(TEXT_BEST_VIEW_QUESTIONS.iter().map(|(question, _)| (*question).to_owned()))
+        .collect()
+}
+
+/// 归并文本路径 L1 答案（§5.3 的落地口径）：
+/// - file_kind 取五类最大概率，< 0.5 记 unknown；
+/// - sensitivity 安全优先：密钥 ≥ 0.5 取 secret，否则个人信息 ≥ 0.5 取 personal；
+/// - best_view 取三档最大概率，< 0.5 兜底 full。
+pub fn merge_text_answers(
+    answers: &std::collections::BTreeMap<String, crate::slots::DecideAnswer>,
+) -> Option<TextFacts> {
+    let mut best: Option<(FileKind, f64)> = None;
+    for (question, kind) in TEXT_FILE_KIND_QUESTIONS {
+        let p = answers.get(question)?.probability;
+        if best.is_none_or(|(_, best_p)| p > best_p) {
+            best = Some((kind, p));
+        }
+    }
+    let (mut file_kind, kind_p) = best?;
+    if kind_p < 0.5 {
+        file_kind = FileKind::Unknown;
+    }
+    let secret = answers.get(TEXT_SENSITIVITY_QUESTIONS[0].0)?.probability;
+    let personal = answers.get(TEXT_SENSITIVITY_QUESTIONS[1].0)?.probability;
+    let sensitivity = if secret >= 0.5 {
+        Sensitivity::Secret
+    } else if personal >= 0.5 {
+        Sensitivity::Personal
+    } else {
+        Sensitivity::None
+    };
+    let mut best_view: Option<(BestView, f64)> = None;
+    for (question, view) in TEXT_BEST_VIEW_QUESTIONS {
+        let p = answers.get(question)?.probability;
+        if best_view.is_none_or(|(_, best_p)| p > best_p) {
+            best_view = Some((view, p));
+        }
+    }
+    let (mut view, view_p) = best_view?;
+    if view_p < 0.5 {
+        view = BestView::Full;
+    }
+    Some(TextFacts {
+        file_kind,
+        kind_confidence: kind_p as f32,
+        sensitivity,
+        best_view: view,
+        view_confidence: view_p as f32,
+    })
+}
+
+/// §5.3 文本路径 L2 的结构化 schema：按 file_kind 固定，不生成自由 schema。
+pub fn text_summarize_schema(kind: FileKind) -> Value {
+    match kind {
+        FileKind::Code => json!({
+            "type": "object",
+            "properties": {
+                "signatures": { "type": "array", "items": { "type": "string" } },
+                "todos": { "type": "array", "items": { "type": "string" } },
+                "imports": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["signatures", "todos", "imports"]
+        }),
+        FileKind::Config => json!({ "type": "object" }),
+        FileKind::Log => json!({
+            "type": "object",
+            "properties": {
+                "errors": { "type": "array", "items": { "type": "string" } },
+                "timeline": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["errors", "timeline"]
+        }),
+        FileKind::Doc | FileKind::Data | FileKind::Unknown => json!({
+            "type": "object",
+            "properties": {
+                "summary": { "type": "string" },
+                "keyPoints": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["summary", "keyPoints"]
+        }),
+    }
+}
+
+/// 文本路径的协商模式（§5.3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextMode {
+    Raw,
+    Summary,
+    Structured,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextPlan {
+    pub mode: TextMode,
+    pub notices: Vec<Notice>,
+}
+
+/// §5.3 文本路径的 L1/L2 协商：raw 不触发；summary / structured 要 summarize；
+/// auto 只在 bestView=structure 且 summarize 可用时结构化。summarize 缺失按 §3.8 退原文。
+pub fn plan_text(intent: Intent, facts: Option<&TextFacts>, summarize_available: bool) -> TextPlan {
+    let to_summary = |structured: bool| {
+        if summarize_available {
+            TextPlan {
+                mode: if structured {
+                    TextMode::Structured
+                } else {
+                    TextMode::Summary
+                },
+                notices: vec![],
+            }
+        } else {
+            TextPlan {
+                mode: TextMode::Raw,
+                notices: vec![slot_unavailable("summarize", SlotFallback::Text)],
+            }
+        }
+    };
+    match intent {
+        Intent::Raw | Intent::Visual => TextPlan {
+            mode: TextMode::Raw,
+            notices: vec![],
+        },
+        Intent::Summary => to_summary(false),
+        Intent::Structured => to_summary(true),
+        Intent::Auto => match facts {
+            Some(f) if f.best_view == BestView::Structure => to_summary(true),
+            _ => TextPlan {
+                mode: TextMode::Raw,
+                notices: vec![],
+            },
+        },
+    }
+}
+
 fn slot_unavailable(slot: &str, fallback: SlotFallback) -> Notice {
     Notice::SlotUnavailable {
         slot: slot.to_owned(),
@@ -613,6 +843,191 @@ mod tests {
         assert_eq!(plan.outcome, ImageOutcome::TextUnderstanding);
         assert_eq!(plan.task, Some(VisionTask::Ocr));
         assert!(plan.notices.is_empty());
+    }
+
+    fn text_answers(
+        kind_scores: &[(FileKind, f64)],
+        secret: f64,
+        personal: f64,
+        view_scores: &[(BestView, f64)],
+    ) -> std::collections::BTreeMap<String, crate::slots::DecideAnswer> {
+        let mut answers = std::collections::BTreeMap::new();
+        for (kind, p) in kind_scores {
+            let question = TEXT_FILE_KIND_QUESTIONS
+                .iter()
+                .find(|(_, candidate)| candidate == kind)
+                .expect("kind 在问题表中")
+                .0;
+            answers.insert(
+                question.to_owned(),
+                crate::slots::DecideAnswer {
+                    probability: *p,
+                    span: None,
+                },
+            );
+        }
+        answers.insert(
+            TEXT_SENSITIVITY_QUESTIONS[0].0.to_owned(),
+            crate::slots::DecideAnswer {
+                probability: secret,
+                span: None,
+            },
+        );
+        answers.insert(
+            TEXT_SENSITIVITY_QUESTIONS[1].0.to_owned(),
+            crate::slots::DecideAnswer {
+                probability: personal,
+                span: None,
+            },
+        );
+        for (view, p) in view_scores {
+            let question = TEXT_BEST_VIEW_QUESTIONS
+                .iter()
+                .find(|(_, candidate)| candidate == view)
+                .expect("view 在问题表中")
+                .0;
+            answers.insert(
+                question.to_owned(),
+                crate::slots::DecideAnswer {
+                    probability: *p,
+                    span: None,
+                },
+            );
+        }
+        answers
+    }
+
+    /// §5.3 文本路径固定十问：file_kind 5 + sensitivity 2 + best_view 3。
+    #[test]
+    fn text_decide_questions_cover_ten_fixed_questions() {
+        let questions = text_decide_questions();
+        assert_eq!(questions.len(), 10);
+        assert_eq!(questions[0], TEXT_FILE_KIND_QUESTIONS[0].0);
+        assert_eq!(questions[4], TEXT_FILE_KIND_QUESTIONS[4].0);
+        assert_eq!(questions[5], TEXT_SENSITIVITY_QUESTIONS[0].0);
+        assert_eq!(questions[7], TEXT_BEST_VIEW_QUESTIONS[0].0);
+        assert_eq!(questions[9], TEXT_BEST_VIEW_QUESTIONS[2].0);
+    }
+
+    /// §5.3 归并：file_kind 取最大、sensitivity 安全优先、best_view 取最大。
+    #[test]
+    fn text_answers_merge_kind_sensitivity_and_view() {
+        let answers = text_answers(
+            &[
+                (FileKind::Code, 0.9),
+                (FileKind::Config, 0.05),
+                (FileKind::Log, 0.02),
+                (FileKind::Doc, 0.01),
+                (FileKind::Data, 0.02),
+            ],
+            0.2,
+            0.8,
+            &[
+                (BestView::Full, 0.05),
+                (BestView::Structure, 0.85),
+                (BestView::Fragment, 0.10),
+            ],
+        );
+        let facts = merge_text_answers(&answers).expect("答案覆盖全部问题");
+        assert_eq!(facts.file_kind, FileKind::Code);
+        assert!((facts.kind_confidence - 0.9).abs() < 1e-6);
+        assert_eq!(facts.sensitivity, Sensitivity::Personal);
+        assert_eq!(facts.best_view, BestView::Structure);
+        assert!((facts.view_confidence - 0.85).abs() < 1e-6);
+    }
+
+    #[test]
+    fn text_sensitivity_secret_wins_when_both_high() {
+        let answers = text_answers(
+            &[
+                (FileKind::Doc, 0.6),
+                (FileKind::Code, 0.1),
+                (FileKind::Config, 0.1),
+                (FileKind::Log, 0.1),
+                (FileKind::Data, 0.1),
+            ],
+            0.7,
+            0.9,
+            &[
+                (BestView::Full, 0.8),
+                (BestView::Structure, 0.1),
+                (BestView::Fragment, 0.1),
+            ],
+        );
+        let facts = merge_text_answers(&answers).unwrap();
+        assert_eq!(facts.sensitivity, Sensitivity::Secret);
+    }
+
+    /// 三档 best_view 最大者 < 0.5 → full 兜底；unknown 同理。
+    #[test]
+    fn text_best_view_below_half_defaults_full() {
+        let answers = text_answers(
+            &[
+                (FileKind::Code, 0.2),
+                (FileKind::Config, 0.1),
+                (FileKind::Log, 0.1),
+                (FileKind::Doc, 0.1),
+                (FileKind::Data, 0.1),
+            ],
+            0.1,
+            0.1,
+            &[
+                (BestView::Full, 0.3),
+                (BestView::Structure, 0.4),
+                (BestView::Fragment, 0.2),
+            ],
+        );
+        let facts = merge_text_answers(&answers).unwrap();
+        assert_eq!(facts.file_kind, FileKind::Unknown);
+        assert_eq!(facts.best_view, BestView::Full);
+        assert!((facts.view_confidence - 0.4).abs() < 1e-6);
+    }
+
+    /// §5.3 文本路径 L2 schema 按 file_kind 固定。
+    #[test]
+    fn text_summarize_schema_per_kind() {
+        let code = text_summarize_schema(FileKind::Code);
+        assert!(code["properties"]["signatures"].is_object());
+        assert!(code["properties"]["todos"].is_object());
+        assert!(code["required"].as_array().unwrap().contains(&json!("imports")));
+        let log = text_summarize_schema(FileKind::Log);
+        assert!(log["properties"]["errors"].is_object());
+        assert!(log["properties"]["timeline"].is_object());
+        let doc = text_summarize_schema(FileKind::Doc);
+        assert!(doc["properties"]["summary"].is_object());
+        assert!(doc["properties"]["keyPoints"].is_object());
+    }
+
+    /// §5.3 文本路径的协商矩阵：raw 不触发；summary/structured 要 summarize；
+    /// auto 只在 bestView=structure 且 summarize 可用时结构化。
+    #[test]
+    fn plan_text_modes_matrix() {
+        let structure = TextFacts {
+            file_kind: FileKind::Code,
+            kind_confidence: 0.9,
+            sensitivity: Sensitivity::None,
+            best_view: BestView::Structure,
+            view_confidence: 0.9,
+        };
+        let full = TextFacts {
+            best_view: BestView::Full,
+            ..structure
+        };
+        assert_eq!(plan_text(Intent::Raw, Some(&structure), true).mode, TextMode::Raw);
+        assert_eq!(plan_text(Intent::Summary, None, true).mode, TextMode::Summary);
+        assert_eq!(
+            plan_text(Intent::Structured, None, true).mode,
+            TextMode::Structured
+        );
+        let fallback = plan_text(Intent::Summary, None, false);
+        assert_eq!(fallback.mode, TextMode::Raw);
+        assert!(render_notices(&fallback.notices).contains("slot=summarize"));
+        assert_eq!(
+            plan_text(Intent::Auto, Some(&structure), true).mode,
+            TextMode::Structured
+        );
+        assert_eq!(plan_text(Intent::Auto, Some(&full), true).mode, TextMode::Raw);
+        assert_eq!(plan_text(Intent::Auto, None, true).mode, TextMode::Raw);
     }
 
     #[test]

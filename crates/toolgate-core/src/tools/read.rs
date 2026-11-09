@@ -21,10 +21,11 @@ use crate::media::image_pipeline;
 use crate::notice::Notice;
 use crate::notice::budgeted_notices;
 use crate::read_path::{
-    ImageFacts, ImageOutcome, ImagePlan, display_path, image_decide_questions, merge_image_answers,
-    metadata_facts, metadata_text, plan_image,
+    FileKind, ImageFacts, ImageOutcome, ImagePlan, TextFacts, TextMode, TextPlan, display_path,
+    image_decide_questions, merge_image_answers, merge_text_answers, metadata_facts, metadata_text,
+    plan_image, plan_text, text_decide_questions, text_summarize_schema,
 };
-use crate::slots::{DecideInput, SlotKind, VisionInput, VisionTask};
+use crate::slots::{DecideInput, SlotKind, SummarizeInput, VisionInput, VisionTask};
 use crate::truncate::{TruncationOptions, format_size, truncate_head};
 
 pub fn spec() -> ToolSpec {
@@ -177,6 +178,57 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     // 此时显示内容里的替换字符不是原文，必须告知调用方。
     let total_lines = text.lines().count();
 
+    // §5.3 文本路径：L1 判定 + L2 协商；raw 不触发判定（不白烧一次模型调用）。
+    let summarize_available = ctx.slm.as_ref().is_some_and(|client| {
+        client.is_bound(SlotKind::Summarize)
+            && client
+                .source_for_slot(SlotKind::Summarize)
+                .map(|source| {
+                    crate::capability::source_slot_capability(source, SlotKind::Summarize).grade
+                        != crate::capability::CapabilityGrade::Unavailable
+                })
+                .unwrap_or(true)
+    });
+    // 文本判定不要求多模态：systemone 的 native 与通用 LLM 的 json 适配器都可用。
+    let text_decide_available = ctx.slm.as_ref().is_some_and(|client| {
+        client.is_bound(SlotKind::Decide)
+            && client
+                .source_for_slot(SlotKind::Decide)
+                .map(|source| {
+                    crate::capability::source_slot_capability(source, SlotKind::Decide).grade
+                        != crate::capability::CapabilityGrade::Unavailable
+                })
+                .unwrap_or(true)
+    });
+    let text_ruling = if matches!(intent, Intent::Auto | Intent::Summary | Intent::Structured)
+        && text_decide_available
+        && crate::bash_path::estimate_tokens(&text) >= crate::bash_path::AUTO_SUMMARY_TOKENS
+    {
+        text_ruling(&text, ctx).await
+    } else {
+        None
+    };
+    let mut text_plan = plan_text(
+        intent,
+        text_ruling.as_ref().map(|ruling| &ruling.facts),
+        summarize_available,
+    );
+    if text_plan.mode != TextMode::Raw {
+        if let Some(resp) =
+            text_summarize_response(&path, &text, ctx, &text_plan, text_ruling.as_ref()).await
+        {
+            return Ok(resp);
+        }
+        // summarize 不可用 / 调用失败：按 §3.8 退编号行原文 + 告知，不编造结构化结果。
+        text_plan = TextPlan {
+            mode: TextMode::Raw,
+            notices: vec![crate::notice::Notice::SlotUnavailable {
+                slot: "summarize".to_owned(),
+                fallback: crate::notice::SlotFallback::Text,
+            }],
+        };
+    }
+
     let offset = optional_usize(args, "offset").unwrap_or(1).max(1);
     let limit = optional_usize(args, "limit");
     let with_anchor = optional_bool(args, "anchor").unwrap_or(false);
@@ -238,7 +290,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         ));
     }
 
-    Ok(ToolResponse::text(out).with_meta(json!({
+    let mut out_meta = json!({
         "path": path.display().to_string(),
         "totalLines": total_lines,
         "offset": offset,
@@ -247,7 +299,23 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "anchored": with_anchor,
         "encoding": encoding_name,
         "decodeErrors": had_decode_errors,
-    })))
+    });
+    if let Some(ruling) = &text_ruling {
+        out_meta["fileKind"] = json!(ruling.facts.file_kind.as_str());
+        out_meta["sensitivity"] = json!(ruling.facts.sensitivity.as_str());
+        out_meta["bestView"] = json!(ruling.facts.best_view.as_str());
+        out_meta["confidence"] = json!(round2(ruling.confidence));
+        if !ruling.calibrated {
+            text_plan.notices.push(Notice::Uncalibrated {
+                slot: "decide".to_owned(),
+                adapter: crate::notice::AdapterKind::Json,
+            });
+        }
+    }
+    if !text_plan.notices.is_empty() {
+        attach_text_notices(&mut out, &mut out_meta, text_plan.notices.clone());
+    }
+    Ok(ToolResponse::text(out).with_meta(out_meta))
 }
 
 /// decide 对图片的 L1 判定结果（§5.3 / §7.3）。
@@ -309,6 +377,95 @@ async fn image_ruling(
         confidence,
         calibrated: outcome.calibrated,
     })
+}
+
+/// decide 对文本路径的 L1 判定结果（§5.3）。
+struct TextRuling {
+    facts: TextFacts,
+    /// min(被选中的 file_kind 概率, 被选中的 best_view 概率)；sensitivity 只标注不参与。
+    confidence: f64,
+    /// systemone 的 noul 是校准概率；外部 JSON 适配器为自报值（§3.10）。
+    calibrated: bool,
+}
+
+/// 调 decide 槽位做文本路径 L1 十问（§5.3）。任何失败返回 None，调用方走原文。
+async fn text_ruling(text: &str, ctx: &ToolContext) -> Option<TextRuling> {
+    let client = ctx.slm.as_ref()?;
+    let bounded: String = text.chars().take(8000).collect();
+    let input = DecideInput {
+        state: json!(bounded),
+        images: None,
+        questions: text_decide_questions(),
+    };
+    let outcome = client.decide(&input).await.ok()?;
+    let facts = merge_text_answers(&outcome.output.answers)?;
+    Some(TextRuling {
+        facts,
+        confidence: facts.kind_confidence.min(facts.view_confidence) as f64,
+        calibrated: outcome.calibrated,
+    })
+}
+
+/// §5.3 文本路径 L2：summarize 结构化 / 摘要；失败返回 None 由调用方降级原文。
+async fn text_summarize_response(
+    path: &Path,
+    text: &str,
+    ctx: &ToolContext,
+    plan: &TextPlan,
+    ruling: Option<&TextRuling>,
+) -> Option<ToolResponse> {
+    let client = ctx.slm.as_ref()?;
+    let bounded: String = text.chars().take(8000).collect();
+    let kind = ruling.map(|r| r.facts.file_kind).unwrap_or(FileKind::Unknown);
+    let schema = (plan.mode == TextMode::Structured).then(|| text_summarize_schema(kind));
+    let input = SummarizeInput {
+        text: bounded,
+        schema,
+        max_tokens: Some(600),
+    };
+    let outcome = client.summarize(&input).await.ok()?;
+    let content = match plan.mode {
+        TextMode::Structured => outcome
+            .output
+            .data
+            .as_ref()
+            .map(|data| serde_json::to_string_pretty(data).unwrap_or_default())?,
+        TextMode::Summary => outcome.output.text.clone()?,
+        TextMode::Raw => return None,
+    };
+    let mut notices = plan.notices.clone();
+    let mut meta = json!({
+        "path": path.display().to_string(),
+        "totalLines": text.lines().count(),
+        "structured": plan.mode == TextMode::Structured,
+    });
+    if let Some(ruling) = ruling {
+        meta["fileKind"] = json!(ruling.facts.file_kind.as_str());
+        meta["sensitivity"] = json!(ruling.facts.sensitivity.as_str());
+        meta["bestView"] = json!(ruling.facts.best_view.as_str());
+        meta["confidence"] = json!(round2(ruling.confidence));
+        if !ruling.calibrated {
+            notices.push(Notice::Uncalibrated {
+                slot: "decide".to_owned(),
+                adapter: crate::notice::AdapterKind::Json,
+            });
+        }
+    }
+    let mut body = content;
+    attach_text_notices(&mut body, &mut meta, notices);
+    Some(ToolResponse::text(body).with_meta(meta))
+}
+
+/// 文本路径的告知合并（content 追加 + structuredContent 同源）。
+fn attach_text_notices(body: &mut String, meta: &mut Value, notices: Vec<Notice>) {
+    if notices.is_empty() {
+        return;
+    }
+    let channels = budgeted_notices(notices);
+    body.push('\n');
+    body.push_str(&channels.text);
+    meta["notices"] = channels.structured;
+    meta["noticeOverflow"] = json!(channels.overflow);
 }
 
 /// 图片分支的返回组装（§10.1 / §3.8 / §4.4b 两个通道）。
