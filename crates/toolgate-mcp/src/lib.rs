@@ -8,20 +8,28 @@ use std::io::Write as _;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use toolgate_core::compat::{
+    CompatConfig, LATEST_VERSION, SUPPORTED_VERSIONS, check_protocol_version,
+    default_decision_input, parse_request_meta, resolve_intent,
+};
+use toolgate_core::decision::{Intent, decide_output};
 use toolgate_core::error::{error_response as tool_error_response, govern_error};
+use toolgate_core::notice::structured_notices;
 use toolgate_core::tools::{ToolContext, all_specs, dispatch};
-
-/// 支持的 MCP 协议版本，按新到旧排列。
-const SUPPORTED_VERSIONS: &[&str] = &["2026-07-28", "2025-11-25", "2025-06-18"];
 
 /// 一个运行中的 MCP server 实例。
 pub struct McpServer {
     ctx: ToolContext,
+    /// v2 首版默认 intent=raw（§4.2 兼容性约束）。
+    compat: CompatConfig,
 }
 
 impl McpServer {
     pub fn new(ctx: ToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            compat: CompatConfig::default(),
+        }
     }
 
     /// 在 stdin/stdout 上跑主循环，直到 stdin 关闭。
@@ -64,6 +72,14 @@ impl McpServer {
 
     async fn handle(&mut self, request: &Value, id: Value) -> Value {
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+
+        // 2026-07-28 无握手：每个请求独立校验版本；initialize 走旧版协商。
+        if let Err(message) = check_protocol_version(method, request) {
+            return error_response(id, -32600, &message);
+        }
+        let params = request.get("params").cloned().unwrap_or(Value::Null);
+        let meta = parse_request_meta(&params);
+
         match method {
             "initialize" => {
                 let requested = request
@@ -74,7 +90,7 @@ impl McpServer {
                     .iter()
                     .find(|v| **v == requested)
                     .copied()
-                    .unwrap_or(SUPPORTED_VERSIONS[0]);
+                    .unwrap_or(LATEST_VERSION);
                 json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -112,6 +128,12 @@ impl McpServer {
                     .cloned()
                     .unwrap_or_else(|| json!({}));
 
+                // 阶段 1.5：intent 缺省 raw，v1 客户端不改参数行为不变。
+                let intent = match resolve_intent(&args, &self.compat) {
+                    Ok(intent) => intent,
+                    Err(message) => return error_response(id, -32602, &message),
+                };
+
                 // 工具级错误走 isError，而不是 JSON-RPC 错误——模型据此自行修正。
                 // Ok 与 Err 都收敛成 ToolResponse，序列化只有一处。
                 let resp = match dispatch(name, &args, &self.ctx).await {
@@ -119,7 +141,7 @@ impl McpServer {
                     Err(e) => tool_error_response(&govern_error(&e)),
                 };
                 let content: Vec<Value> = resp.content.iter().map(|c| c.to_mcp()).collect();
-                json!({
+                let mut result = json!({
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
@@ -127,7 +149,22 @@ impl McpServer {
                         "isError": resp.is_error,
                         "structuredContent": resp.meta,
                     }
-                })
+                });
+
+                // 新客户端 intent=auto：附协商告知（§4.4b 结构化通道）。
+                // 本阶段只解析与协商，不改工具结果形态；单工具接入在阶段 2。
+                if intent == Intent::Auto {
+                    let decision = decide_output(&default_decision_input(intent, &meta));
+                    let notices = structured_notices(&decision.decision_notices);
+                    if notices.as_array().is_some_and(|a| !a.is_empty()) {
+                        let sc = &mut result["result"]["structuredContent"];
+                        if !sc.is_object() {
+                            *sc = json!({});
+                        }
+                        sc["notices"] = notices;
+                    }
+                }
+                result
             }
             other => error_response(id, -32601, &format!("不支持的方法：{other}")),
         }
@@ -251,6 +288,89 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn v1_call_without_intent_keeps_v1_shape() {
+        let mut s = test_server();
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                "params": { "name": "nope", "arguments": {} }
+            }),
+        )
+        .await;
+        assert_eq!(resp["result"]["isError"], json!(true));
+        assert!(resp["result"]["structuredContent"].get("notices").is_none());
+    }
+
+    #[tokio::test]
+    async fn new_client_meta_with_auto_negotiates() {
+        let mut s = test_server();
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                "params": {
+                    "name": "nope",
+                    "arguments": { "intent": "auto" },
+                    "_meta": {
+                        "protocolVersion": "2026-07-28",
+                        "toolgate/upstream": { "vision": false },
+                        "toolgate/turn": {
+                            "turn_id": "turn_01", "seq": 1,
+                            "budget": { "max_judgments": 8 }
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let notices = resp["result"]["structuredContent"]["notices"]
+            .as_array()
+            .expect("auto 应产出协商告知");
+        assert!(!notices.is_empty());
+        assert!(resp["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn unknown_protocol_version_is_rejected() {
+        let mut s = test_server();
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                "params": {
+                    "name": "nope", "arguments": {},
+                    "protocolVersion": "1999-01-01"
+                }
+            }),
+        )
+        .await;
+        assert_eq!(resp["error"]["code"], json!(-32600));
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("2026-07-28")
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_intent_fails_loud() {
+        let mut s = test_server();
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                "params": { "name": "nope", "arguments": { "intent": "bogus" } }
+            }),
+        )
+        .await;
+        assert_eq!(resp["error"]["code"], json!(-32602));
+        assert!(resp["error"]["message"].as_str().unwrap().contains("raw"));
     }
 
     #[tokio::test]

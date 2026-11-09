@@ -6,9 +6,12 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Status](https://img.shields.io/badge/architectural--review-v2-yellow)
 
-> **状态**：架构已迭代到 v2（围绕本地小模型），**已审阅（2026-11-07），阶段 0 完成**；实现仍按约定暂不启动。
-> 仓库里的代码是 v1 骨架（无本地模型），与 v2 的差距见
-> [架构文档 §13](docs/architecture/11-runtime.md#13-现有实现与新架构的差距)。
+> **状态**：架构已迭代到 v2（围绕本地小模型）并已审阅，阶段 0（架构定稿）完成；
+> 实现阶段自 2026-11-09 起按 §14 路线图推进，阶段 1 与阶段 1.5 已落地。
+> 代码不再是纯 v1 骨架：已落地错误契约、槽位契约、告知协议、决策表、理解链与兼容层；
+> 本地模型后端仍属可选层（§19.6），尚未接入。差距表见
+> [架构文档 §13](docs/architecture/11-runtime.md#13-现有实现与新架构的差距)，
+> 升级说明见 [v1 → v2 升级指南](docs/upgrade-v1-to-v2.md)。
 
 ## 它要回答的问题
 
