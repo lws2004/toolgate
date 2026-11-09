@@ -24,7 +24,7 @@ use crate::bash_path::{estimate_tokens, intent_tag};
 use crate::decision::Intent;
 use crate::locale::{Language, t, tf, tformat};
 use crate::notice::{Notice, SlotFallback, budgeted_notices};
-use crate::slots::ConfidenceGate;
+use crate::slots::{ConfidenceGate, SummarizeInput};
 use crate::task_path::{
     TASK_L1_QUESTION_KEYS, TASK_L1_QUESTIONS, TaskDecision, TaskDecisionFacts, TaskMode,
     decision_state_tail, merge_task_decision, plan_task, resolve_task_intent,
@@ -288,10 +288,27 @@ async fn read_output(args: &Value, ctx: &ToolContext, intent: Intent) -> Result<
         }
     }
 
+    // §5.5：L2 增量摘要只在协商层判定要摘要时跑；不可用只降级并告知（§7.3）。
+    let mut summary_text: Option<String> = None;
+    if plan.should_summarize {
+        match run_summary(ctx, &body, exit, elapsed, &decision_facts).await {
+            Some(text) => summary_text = Some(text),
+            None => notices.push(Notice::SlotUnavailable {
+                slot: "summarize".to_owned(),
+                fallback: SlotFallback::Mechanical,
+            }),
+        }
+    }
+
     let mut content = body;
     match plan.mode {
         TaskMode::Raw => {}
         TaskMode::StateDegraded | TaskMode::SummaryDegraded => {
+            if let Some(text) = &summary_text {
+                // §5.5：摘要成功时 content 只给摘要，状态事实在 meta / 状态行，不重复上传原文。
+                content = text.clone();
+                meta["summary"] = json!(text);
+            }
             content.push('\n');
             content.push_str(&state_line(
                 ctx.language,
@@ -366,6 +383,43 @@ async fn run_state_decide(
         decision: merge_task_decision(&probs),
         gate: outcome.gate,
     })
+}
+
+/// 跑一次 L2 增量摘要；槽位不可用时返回 None，由调用方降级（§7.3）。
+async fn run_summary(
+    ctx: &ToolContext,
+    body: &str,
+    exit: Option<i32>,
+    elapsed: u64,
+    facts: &TaskDecisionFacts,
+) -> Option<String> {
+    let client = ctx.slm.as_ref()?;
+    let input = build_summary_input(body, exit, elapsed, facts);
+    let outcome = client.summarize(&input).await.ok()?;
+    outcome.output.text
+}
+
+/// §5.5：摘要输入是有界尾部窗口（§6.4）+ 机械观测 + L1 判定事实。
+fn build_summary_input(
+    body: &str,
+    exit: Option<i32>,
+    elapsed: u64,
+    facts: &TaskDecisionFacts,
+) -> SummarizeInput {
+    let tail = decision_state_tail(body);
+    let text = format!(
+        "进程事实：exitCode={} elapsedSecs={}\n判定事实：state={} progress={}\n输出尾部：\n{}",
+        exit.map(|c| c.to_string()).unwrap_or_else(|| "null".to_owned()),
+        elapsed,
+        facts.state.as_deref().unwrap_or("unknown"),
+        facts.progress.as_deref().unwrap_or("unknown"),
+        tail,
+    );
+    SummarizeInput {
+        text,
+        schema: None,
+        max_tokens: None,
+    }
 }
 
 /// 机械可观测的进程状态行（§4.7：只给事实，不给判断）。
@@ -626,6 +680,27 @@ mod tests {
         assert!(resp.meta.get("confidence").is_none());
         assert!(resp.meta.get("decision").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.5：摘要输入有界，且带上机械观测与 L1 判定事实。
+    #[test]
+    fn summary_input_is_bounded_and_carries_facts() {
+        let body = "头部".to_owned()
+            + &"x".repeat(crate::task_path::TASK_STATE_CHARS + 100)
+            + "尾部";
+        let facts = TaskDecisionFacts {
+            state: Some("stuck".to_owned()),
+            progress: Some("error_loop".to_owned()),
+            confidence: Some(0.8),
+        };
+        let input = build_summary_input(&body, Some(2), 12, &facts);
+        assert!(input.text.contains("exitCode=2"));
+        assert!(input.text.contains("elapsedSecs=12"));
+        assert!(input.text.contains("state=stuck"));
+        assert!(input.text.contains("progress=error_loop"));
+        assert!(input.text.contains("尾部"));
+        assert!(!input.text.contains("头部"));
+        assert!(input.schema.is_none());
     }
 
     #[tokio::test]

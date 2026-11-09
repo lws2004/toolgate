@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::bash_path::AUTO_SUMMARY_TOKENS;
 use crate::compat::{CompatConfig, resolve_intent};
 use crate::decision::Intent;
-use crate::notice::{Notice, SlotFallback};
+use crate::notice::Notice;
 use crate::slots::DecideInput;
 use crate::understanding::{ChainAction, ChainNode, decide_request};
 
@@ -171,7 +171,7 @@ pub enum TaskMode {
     Raw,
     /// 状态判定路径：输出 500–2000 token，不做摘要（§5.5）。
     StateDegraded,
-    /// 状态判定 + 摘要路径：输出 > 2000 token 或显式 summary；summarize 槽位未实现时降级告知。
+    /// 状态判定 + 摘要路径：输出 > 2000 token 或显式 summary；摘要不可用时按 §3.8 降级告知。
     SummaryDegraded,
     /// 结构化事实 JSON（§4.7）。
     Structured,
@@ -184,18 +184,13 @@ pub struct TaskPlan {
     pub notices: Vec<Notice>,
     /// §5.1/§9.2：输出 ≥ 500 token 才触发 L1 判定；由协商层单点产出。
     pub should_decide: bool,
-}
-
-fn slot_unavailable(slot: &str) -> Notice {
-    Notice::SlotUnavailable {
-        slot: slot.to_owned(),
-        fallback: SlotFallback::Mechanical,
-    }
+    /// §5.5：仅摘要路径尝试 L2 增量摘要；告知由运行时按实际结果追加。
+    pub should_summarize: bool,
 }
 
 /// 协商层：按 intent 与输出体量决定返回形态。纯函数，同输入同输出。
-/// decide 的告知由 task.rs 运行时按实际判定结果追加（判定不可用才加），
-/// 所以这里只写 summarize 的降级告知（与 bash 的 §5.1 接线对称）。
+/// decide / summarize 的告知都由 task.rs 运行时按实际结果追加（与 bash 对称），
+/// 所以这里不写死降级告知。
 pub fn plan_task(intent: Intent, tokens: usize) -> Result<TaskPlan, String> {
     let should_decide = matches!(intent, Intent::Summary | Intent::Structured | Intent::Auto)
         && tokens >= AUTO_CHAIN_TOKENS;
@@ -212,12 +207,17 @@ pub fn plan_task(intent: Intent, tokens: usize) -> Result<TaskPlan, String> {
         // 低于门槛给机械结果（原文），不发 decide / summarize 降级告知。
         Intent::Summary | Intent::Auto if !needs_chain(tokens) => (TaskMode::Raw, vec![]),
         Intent::Auto if !needs_summary(tokens) => (TaskMode::StateDegraded, vec![]),
-        Intent::Summary | Intent::Auto => (
-            TaskMode::SummaryDegraded,
-            vec![slot_unavailable("summarize")],
-        ),
+        Intent::Summary | Intent::Auto => (TaskMode::SummaryDegraded, vec![]),
     };
-    Ok(TaskPlan { mode, notices, should_decide })
+    // §5.5：L2 增量摘要只在摘要路径尝试；auto 的 > 2000 token 条件由 needs_summary
+    // 分支体现，显式 summary 是调用方明确要加工，不受该自动门槛限制。
+    let should_summarize = mode == TaskMode::SummaryDegraded;
+    Ok(TaskPlan {
+        mode,
+        notices,
+        should_decide,
+        should_summarize,
+    })
 }
 
 /// §5.5 structured 路径的事实 JSON。
@@ -338,17 +338,15 @@ line2"));
         assert!(!plan.should_decide);
     }
 
-    /// 到达门槛才进理解链；decide 的告知由运行时按实际判定结果追加。
+    /// 到达门槛才进理解链；decide / summarize 的告知都由运行时按实际结果追加。
     #[test]
-    fn summary_degrades_with_summarize_notice_only() {
+    fn summary_path_requests_both_slots_without_plan_notices() {
         let plan = plan_task(Intent::Summary, AUTO_CHAIN_TOKENS).unwrap();
         assert_eq!(plan.mode, TaskMode::SummaryDegraded);
         assert!(plan.should_decide);
-        assert_eq!(plan.notices.len(), 1);
-        let rendered = render_notices(&plan.notices);
-        assert!(!rendered.contains("slot=decide"));
-        assert!(rendered.contains("slot=summarize"));
-        assert!(rendered.contains("fallback=mechanical"));
+        assert!(plan.should_summarize);
+        assert!(plan.notices.is_empty());
+        assert!(render_notices(&plan.notices).is_empty());
     }
 
     /// §5.1/§9.2：summary 低于 500 token 给机械结果，不进理解链、不发降级告知。
@@ -358,6 +356,18 @@ line2"));
         assert_eq!(plan.mode, TaskMode::Raw);
         assert!(plan.notices.is_empty());
         assert!(!plan.should_decide);
+        assert!(!plan.should_summarize);
+    }
+
+    /// §5.5：L2 只在摘要路径尝试；auto 的 > 2000 token 条件生效，显式 summary 不受该门槛。
+    #[test]
+    fn summarize_only_on_summary_path() {
+        assert!(!plan_task(Intent::Auto, AUTO_CHAIN_TOKENS).unwrap().should_summarize);
+        assert!(!plan_task(Intent::Auto, TASK_SUMMARY_TOKENS).unwrap().should_summarize);
+        assert!(plan_task(Intent::Auto, TASK_SUMMARY_TOKENS + 1).unwrap().should_summarize);
+        assert!(plan_task(Intent::Summary, AUTO_CHAIN_TOKENS).unwrap().should_summarize);
+        assert!(!plan_task(Intent::Raw, 10_000).unwrap().should_summarize);
+        assert!(!plan_task(Intent::Structured, 10_000).unwrap().should_summarize);
     }
 
     #[test]
@@ -378,6 +388,7 @@ line2"));
         assert_eq!(plan.mode, TaskMode::StateDegraded);
         assert!(plan.notices.is_empty());
         assert!(plan.should_decide);
+        assert!(!plan.should_summarize);
     }
 
     /// §5.1/§9.2：三种 intent 都到 500 token 门槛才触发判定；raw 永不判定。
@@ -396,6 +407,7 @@ line2"));
         assert_eq!(plan.mode, TaskMode::Structured);
         assert!(plan.notices.is_empty());
         assert!(!plan.should_decide);
+        assert!(!plan.should_summarize);
     }
 
     #[test]
