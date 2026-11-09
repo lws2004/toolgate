@@ -93,7 +93,7 @@ dsh-ledger-compact 的对照与六条借鉴见附件 E.5。
 | SLM 客户端（五个槽位的契约适配：classify / rerank / decide / summarize / vision） | 中 | 本地推理后端（llama.cpp / MLX / vLLM） |
 | embedded 推理后端（动态库加载、模型实例与常驻管理、故障边界，§18.1） | 大 | llama.cpp / MLX 的 Rust 绑定 |
 | 判定封装（命名问题 → 带概率的答案） | 中 | decide 槽位的接口形态 |
-| `_meta` 解析 + 新旧协议兼容层（2026-07-28 无握手 + 旧版 initialize） | 中 | MCP 传输层 |
+| `_meta` 解析 + 协议兼容层（2026-07-28 无握手 + 标准 initialize 握手） | 中 | MCP 传输层 |
 | 协商层（intent → 输出形态） | 小 | 纯逻辑 |
 | 置信度门控 | 小 | 纯逻辑 |
 | 降级路径 | 小 | 纯逻辑 |
@@ -234,7 +234,11 @@ feature 默认关闭，默认构建下这条路径不可用（§19.6）。
 ### 阶段 1.5：兼容性
 
 - v2 首版默认 `raw`（§4.2）
-- 新旧 MCP 协议兼容层：2026-07-28 无握手 + 旧版 initialize（§13.2）
+- MCP 协议兼容层：2026-07-28 无握手 + 标准 initialize 握手（§13.2）。
+  **initialize 不是「旧版兼容」而是接入主路径**：官方 SDK 客户端
+  （`@modelcontextprotocol/client`，本机 capability-catalog 与 dsh-mcp-client 都用它）
+  连接时先发 `initialize` 再发 `notifications/initialized`，之后才 `tools/list`；
+  删掉这条分支，任何官方 SDK 客户端都连不上
 - 升级指南与客户端迁移说明
 
 验收：v1 客户端不改参数升级后，行为与 v1 一致；新客户端可用 `auto` 与 `_meta`。

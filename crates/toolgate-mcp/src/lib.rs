@@ -282,6 +282,70 @@ mod tests {
         assert_eq!(resp["result"]["protocolVersion"], json!("2026-07-28"));
     }
 
+    /// 标准 MCP 握手序列：initialize → tools/list → tools/call 全部可用。
+    ///
+    /// 官方 SDK 客户端（`@modelcontextprotocol/client`）连接时走的就是这条路径：
+    /// 先 `initialize` 协商版本与能力，再 `notifications/initialized`（无 id，传输层不回复），
+    /// 之后才发 `tools/list` / `tools/call`。旧版两个版本号都必须能协商。
+    #[tokio::test]
+    async fn legacy_handshake_sequence_reaches_tools() {
+        let mut s = test_server();
+        for version in ["2025-11-25", "2025-06-18"] {
+            let init = call(
+                &mut s,
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": version,
+                        "capabilities": {},
+                        "clientInfo": { "name": "sdk-test", "version": "0" }
+                    }
+                }),
+            )
+            .await;
+            assert_eq!(
+                init["result"]["protocolVersion"],
+                json!(version),
+                "旧版版本号必须原样回（{version}）"
+            );
+            assert_eq!(
+                init["result"]["capabilities"]["tools"]["listChanged"],
+                json!(false)
+            );
+            assert_eq!(init["result"]["serverInfo"]["name"], json!("toolgate"));
+        }
+
+        let list = call(
+            &mut s,
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        )
+        .await;
+        assert_eq!(
+            list["result"]["tools"].as_array().expect("tools").len(),
+            6,
+            "握手后 tools/list 必须可用"
+        );
+
+        let dir = std::env::temp_dir().join(format!("tg-mcp-handshake-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("a.txt"), "hello\n").expect("write");
+        let mut s2 = McpServer::new(ToolContext::new(&dir).expect("ctx"));
+        let called = call(
+            &mut s2,
+            json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "read", "arguments": { "path": "a.txt" } }
+            }),
+        )
+        .await;
+        assert_eq!(called["result"]["isError"], json!(false));
+        let text = called["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text");
+        assert!(text.contains("hello"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn tools_list_returns_six_tools() {
         let mut s = test_server();

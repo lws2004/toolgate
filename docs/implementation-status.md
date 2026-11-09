@@ -40,7 +40,7 @@
 | 项 | 状态 | 架构依据 | 证据 |
 |---|---|---|---|
 | v2 首版默认 raw | 完成 | §4.2 | `compat.rs` resolve_intent 缺省 raw |
-| 无握手 + 旧版 initialize 兼容 | 完成 | §13.2 | `toolgate-mcp/src/lib.rs` SUPPORTED_VERSIONS；`check_protocol_version` |
+| 无握手 + 标准 initialize 握手 | 完成 | §13.2 | `SUPPORTED_VERSIONS`（2026-07-28 / 2025-11-25 / 2025-06-18）；`check_protocol_version`；测试 `legacy_handshake_sequence_reaches_tools` 覆盖 initialize → tools/list → tools/call（官方 SDK 客户端走这条路径） |
 | `_meta` 解析（含 turn 载体） | 完成 | §13.2 / §13.4 | `compat.rs` parse_request_meta；`understanding.rs` TurnContext |
 | 升级指南 | 完成 | §14 | `docs/upgrade-v1-to-v2.md` |
 
@@ -112,7 +112,7 @@
 
 | 命令 | 结果（2026-11-09） |
 |---|---|
-| `cargo test --workspace` | 437 passed（默认构建；含 4 个阶段 5 集成用例） |
+| `cargo test --workspace` | 438 passed（默认构建；含 4 个阶段 5 集成用例与 1 个 MCP 握手序列用例） |
 | `cargo test --workspace --features external-protocols` | 425 passed（feature 构建；6 个默认构建专属的降级测试被 cfg 隔离） |
 | `cargo clippy --workspace --all-targets` | No issues |
 | `cargo build --release` | 零警告 |
