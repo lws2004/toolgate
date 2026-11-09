@@ -15,7 +15,7 @@ use crate::compat::{CompatConfig, resolve_intent};
 use crate::hashline::render_anchored;
 use crate::media;
 use crate::media::image_pipeline;
-use crate::notice::{render_notices, structured_notices};
+use crate::notice::budgeted_notices;
 use crate::read_path::{
     ImageOutcome, ImagePlan, display_path, metadata_facts, metadata_text, plan_image,
 };
@@ -185,13 +185,15 @@ async fn image_response(
         None => (None, None),
     };
 
+    // §4.4b：一次预算合并，两个分支共用同一份告知事实源。
+    let channels = budgeted_notices(plan.notices.clone());
     match plan.outcome {
         ImageOutcome::Original => {
             let mut resp = image_pipeline::prepare(&bytes, mime, path)?;
-            if !plan.notices.is_empty() {
-                resp.content
-                    .insert(0, Content::Text(render_notices(&plan.notices)));
-                resp.meta["notices"] = structured_notices(&plan.notices);
+            if !channels.notices.is_empty() {
+                resp.content.insert(0, Content::Text(channels.text));
+                resp.meta["notices"] = channels.structured;
+                resp.meta["noticeOverflow"] = json!(channels.overflow);
             }
             Ok(resp)
         }
@@ -200,7 +202,7 @@ async fn image_response(
         ImageOutcome::Metadata | ImageOutcome::TextUnderstanding => {
             let facts = metadata_facts(mime, meta.len(), width, height, &display);
             let text = metadata_text(
-                &plan.notices,
+                &channels.notices,
                 file_name,
                 mime,
                 meta.len(),
@@ -209,8 +211,9 @@ async fn image_response(
                 &display,
             );
             let mut out_meta = facts;
-            if !plan.notices.is_empty() {
-                out_meta["notices"] = structured_notices(&plan.notices);
+            if !channels.notices.is_empty() {
+                out_meta["notices"] = channels.structured;
+                out_meta["noticeOverflow"] = json!(channels.overflow);
             }
             Ok(ToolResponse::text(text).with_meta(out_meta))
         }

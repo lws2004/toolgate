@@ -14,7 +14,7 @@ use toolgate_core::compat::{
 };
 use toolgate_core::decision::{Intent, decide_output};
 use toolgate_core::error::{error_response as tool_error_response, govern_error};
-use toolgate_core::notice::structured_notices;
+use toolgate_core::notice::budgeted_notices;
 use toolgate_core::tools::{ToolContext, all_specs, dispatch};
 
 /// 一个运行中的 MCP server 实例。
@@ -155,17 +155,22 @@ impl McpServer {
                     }
                 });
 
-                // 新客户端 intent=auto：附协商告知（§4.4b 结构化通道）。
-                // 本阶段只解析与协商，不改工具结果形态；单工具接入在阶段 2。
+                // 新客户端 intent=auto：协商告知必须同时进 content 与
+                // structuredContent（§4.4 / §4.4b 一个事实源、两个通道）。
                 if intent == Intent::Auto {
                     let decision = decide_output(&default_decision_input(intent, &meta));
-                    let notices = structured_notices(&decision.decision_notices);
-                    if notices.as_array().is_some_and(|a| !a.is_empty()) {
+                    if !decision.decision_notices.is_empty() {
+                        let ch = budgeted_notices(decision.decision_notices);
+                        result["result"]["content"]
+                            .as_array_mut()
+                            .expect("content 是数组")
+                            .push(json!({ "type": "text", "text": ch.text }));
                         let sc = &mut result["result"]["structuredContent"];
                         if !sc.is_object() {
                             *sc = json!({});
                         }
-                        sc["notices"] = notices;
+                        sc["notices"] = ch.structured;
+                        sc["noticeOverflow"] = json!(ch.overflow);
                     }
                 }
                 result
@@ -298,6 +303,41 @@ mod tests {
         assert_eq!(sc["intent"], json!("raw"));
         assert_eq!(sc["slmStatus"]["decide"], json!("unavailable"));
         assert!(sc["confidence"].is_null());
+    }
+
+    #[tokio::test]
+    async fn auto_notices_reach_both_channels() {
+        let mut s = test_server();
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                "params": {
+                    "name": "write",
+                    "arguments": {
+                        "path": "auto-channels.txt",
+                        "content": "hi",
+                        "intent": "auto"
+                    }
+                }
+            }),
+        )
+        .await;
+        let blocks = resp["result"]["content"]
+            .as_array()
+            .expect("content 是数组");
+        let joined: String = blocks
+            .iter()
+            .map(|c| c["text"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            joined.contains("SLOT_UNAVAILABLE"),
+            "content 通道缺少协商告知"
+        );
+        assert_eq!(
+            resp["result"]["structuredContent"]["noticeOverflow"],
+            json!(0)
+        );
     }
 
     #[tokio::test]

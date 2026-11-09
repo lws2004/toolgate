@@ -18,7 +18,7 @@ use crate::ToolError;
 use crate::bash_path::{
     BashMode, estimate_tokens, intent_tag, plan_bash, resolve_bash_intent, structured_facts,
 };
-use crate::notice::{render_notices, structured_notices};
+use crate::notice::budgeted_notices;
 use crate::truncate::{format_size, truncate_tail};
 
 /// 默认超时：5 分钟。
@@ -164,8 +164,10 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     let mut content = body;
     if !plan.notices.is_empty() {
         content.push('\n');
-        content.push_str(&render_notices(&plan.notices));
-        meta["notices"] = structured_notices(&plan.notices);
+        let ch = budgeted_notices(plan.notices.clone());
+        content.push_str(&ch.text);
+        meta["notices"] = ch.structured;
+        meta["noticeOverflow"] = json!(ch.overflow);
     }
     if plan.mode == BashMode::Structured {
         let spill_path = meta["spill"]["path"].as_str();

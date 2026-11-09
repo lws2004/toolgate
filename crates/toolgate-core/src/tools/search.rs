@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::{ToolContext, ToolResponse, ToolSpec, optional_str, optional_usize, required_str};
 use crate::ToolError;
 use crate::bash_path::intent_tag;
-use crate::notice::{render_notices, structured_notices};
+use crate::notice::budgeted_notices;
 use crate::search_path::{SearchShape, plan_search, resolve_search_intent, structured_facts};
 use crate::truncate::{MAX_MATCH_LINE_LENGTH, truncate_head};
 
@@ -106,8 +106,10 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     let mut content = body;
     if !plan.notices.is_empty() {
         content.push('\n');
-        content.push_str(&render_notices(&plan.notices));
-        meta["notices"] = structured_notices(&plan.notices);
+        let ch = budgeted_notices(plan.notices.clone());
+        content.push_str(&ch.text);
+        meta["notices"] = ch.structured;
+        meta["noticeOverflow"] = json!(ch.overflow);
     }
     if plan.shape == SearchShape::Structured {
         let candidates: Vec<&str> = raw.lines().collect();

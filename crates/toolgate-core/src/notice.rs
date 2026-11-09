@@ -505,6 +505,26 @@ pub fn apply_budget(notices: Vec<Notice>) -> NoticeBudget {
     }
 }
 
+/// §4.4b：一次预算合并，同时产出两个通道与溢出计数。
+/// 工具层只调这一个入口，避免 content 与 structuredContent 各走一份预算。
+pub struct NoticeChannels {
+    /// 合并后的告知，供需要自行拼接文本的工具（read 的元信息页）使用。
+    pub notices: Vec<Notice>,
+    pub text: String,
+    pub structured: Value,
+    pub overflow: usize,
+}
+
+pub fn budgeted_notices(notices: Vec<Notice>) -> NoticeChannels {
+    let budget = apply_budget(notices);
+    NoticeChannels {
+        text: render_notices(&budget.notices),
+        structured: structured_notices(&budget.notices),
+        overflow: budget.overflow,
+        notices: budget.notices,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,6 +700,17 @@ mod tests {
             assert!(codes.contains(&must), "安全/完整性类 {must} 被省略");
         }
         assert_eq!(render_notices(&b.notices).lines().count(), b.notices.len());
+    }
+
+    /// 两个通道与溢出计数来自同一次预算合并（§4.4b 一个事实源）。
+    #[test]
+    fn budgeted_notices_shares_one_budget_between_channels() {
+        let ch = budgeted_notices(all_notices());
+        assert!(ch.notices.len() <= 6);
+        assert!(ch.overflow > 0);
+        assert_eq!(ch.text, render_notices(&ch.notices));
+        assert_eq!(ch.structured, structured_notices(&ch.notices));
+        assert_eq!(ch.structured.as_array().unwrap().len(), ch.notices.len());
     }
 
     /// 同 code 合并：两处 REDACTED → count 求和、retention 取最差值。

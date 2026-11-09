@@ -25,7 +25,7 @@ use crate::edit_path::{
     mechanical_attribution, nearby_build_files, plan_edit,
 };
 use crate::hashline::{line_anchor, parse_anchor};
-use crate::notice::{Notice, render_notices, structured_notices};
+use crate::notice::{Notice, budgeted_notices};
 use crate::read_path::display_path;
 
 pub fn spec() -> ToolSpec {
@@ -157,8 +157,10 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     let mut content = diff;
     if !notices.is_empty() {
         content.push('\n');
-        content.push_str(&render_notices(&notices));
-        meta["notices"] = structured_notices(&notices);
+        let ch = budgeted_notices(notices.clone());
+        content.push_str(&ch.text);
+        meta["notices"] = ch.structured;
+        meta["noticeOverflow"] = json!(ch.overflow);
     }
     Ok(ToolResponse::text(content).with_meta(meta))
 }
