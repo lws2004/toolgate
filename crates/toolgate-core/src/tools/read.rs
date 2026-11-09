@@ -93,6 +93,17 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
 
     // 图片分支：§10.1 前置判断 → 协商 → 槽位全空时给可行动的元信息。
     if let Some(mime) = media::detect_image_mime(&path).await? {
+        // §22.3：同一张图只读一次——判定、组装、压缩共用这份字节与尺寸，
+        // 此前 image_ruling 与 image_response 各读一遍（MB 级图片每次多付两次 IO）。
+        let bytes = tokio::fs::read(&path).await?;
+        let dims = image_pipeline::dimensions(&bytes);
+        let image_input = ImageInput {
+            path: &path,
+            bytes: &bytes,
+            dims,
+            mime: &mime,
+            meta: &meta,
+        };
         let intent =
             resolve_intent(args, &CompatConfig::default()).map_err(ToolError::bad_argument)?;
         // §3.10：槽位可用性按绑定 + 能力矩阵真实判定，不硬编码（§7.3 状态要真实）。
@@ -122,7 +133,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         let ruling = if decide_available
             && matches!(intent, Intent::Auto | Intent::Structured | Intent::Summary)
         {
-            image_ruling(&path, &mime, &meta, ctx, intent).await
+            image_ruling(&image_input, ctx, intent).await
         } else {
             None
         };
@@ -143,7 +154,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
                 fallback: crate::notice::SlotFallback::Mechanical,
             });
         }
-        return image_response(&path, &mime, &meta, &plan, ctx, ruling.as_ref()).await;
+        return image_response(&image_input, &plan, ctx, ruling.as_ref()).await;
     }
 
     // §22：按 intent 的确定性预判决定要不要预热；缓存可丢弃，
@@ -364,17 +375,23 @@ struct ImageRuling {
     calibrated: bool,
 }
 
+/// 图片分支的输入快照（§22.3：同一张图只读一次，判定、组装与压缩共用这份字节）。
+struct ImageInput<'a> {
+    path: &'a Path,
+    bytes: &'a [u8],
+    dims: Option<(u32, u32)>,
+    mime: &'a str,
+    meta: &'a std::fs::Metadata,
+}
+
 /// 调 decide 槽位做图片 L1 判定（§5.3 七问）。任何失败返回 None，由调用方走保守路径。
 async fn image_ruling(
-    path: &Path,
-    mime: &str,
-    meta: &std::fs::Metadata,
+    input: &ImageInput<'_>,
     ctx: &ToolContext,
     intent: Intent,
 ) -> Option<ImageRuling> {
     let client = ctx.slm.as_ref()?;
-    let bytes = tokio::fs::read(path).await.ok()?;
-    let prepared = image_pipeline::prepare(&bytes, mime, path).ok()?;
+    let prepared = image_pipeline::prepare(input.bytes, input.mime, input.path).ok()?;
     let (mime_type, data_base64) = prepared.content.iter().find_map(|c| match c {
         Content::Image {
             mime_type,
@@ -383,15 +400,14 @@ async fn image_ruling(
         } => Some((mime_type.clone(), data_base64.clone())),
         _ => None,
     })?;
-    let dims = image_pipeline::dimensions(&bytes);
-    let (width, height) = match dims {
+    let (width, height) = match input.dims {
         Some((w, h)) => (Some(w), Some(h)),
         None => (None, None),
     };
-    let input = DecideInput {
+    let decide_input = DecideInput {
         state: json!({
-            "mime": mime,
-            "size": meta.len(),
+            "mime": input.mime,
+            "size": input.meta.len(),
             "width": width,
             "height": height,
         }),
@@ -400,7 +416,7 @@ async fn image_ruling(
         ))]),
         questions: image_decide_questions(),
     };
-    let outcome = client.decide(&input).await.ok()?;
+    let outcome = client.decide(&decide_input).await.ok()?;
     let facts = merge_image_answers(&outcome.output.answers)?;
     // §7.3：confidence = 本次被采纳结论所依赖的问题概率的最小值，不是全部问题的最小值。
     // auto 的结论由 need_pixels 决定；structured / summary 的结论由 image_kind 决定。
@@ -507,13 +523,18 @@ fn attach_text_notices(body: &mut String, meta: &mut Value, notices: Vec<Notice>
 
 /// 图片分支的返回组装（§10.1 / §3.8 / §4.4b 两个通道）。
 async fn image_response(
-    path: &Path,
-    mime: &str,
-    meta: &std::fs::Metadata,
+    input: &ImageInput<'_>,
     plan: &ImagePlan,
     ctx: &ToolContext,
     ruling: Option<&ImageRuling>,
 ) -> Result<ToolResponse, ToolError> {
+    let ImageInput {
+        path,
+        bytes,
+        dims,
+        mime,
+        meta,
+    } = *input;
     // 非校准概率必须标注（§3.10 / §4.4b）：decide 走外部 JSON 适配器时追加 UNCALIBRATED。
     let mut effective = plan.clone();
     if let Some(ruling) = ruling
@@ -526,8 +547,6 @@ async fn image_response(
     }
     let plan = &effective;
 
-    let bytes = tokio::fs::read(path).await?;
-    let dims = image_pipeline::dimensions(&bytes);
     let (width, height) = match dims {
         Some((w, h)) => (Some(w), Some(h)),
         None => (None, None),
@@ -535,7 +554,7 @@ async fn image_response(
 
     let mut resp = match plan.outcome {
         ImageOutcome::Original => {
-            let mut resp = image_pipeline::prepare(&bytes, mime, path)?;
+            let mut resp = image_pipeline::prepare(bytes, mime, path)?;
             attach_notices(&mut resp, plan.notices.clone(), true);
             resp
         }
@@ -543,7 +562,7 @@ async fn image_response(
             metadata_response(path, mime, meta, width, height, plan.notices.clone(), ctx)
         }
         ImageOutcome::TextUnderstanding => {
-            text_understanding_response(path, mime, meta, dims, plan, ctx, &bytes).await?
+            text_understanding_response(path, mime, meta, dims, plan, ctx, bytes).await?
         }
         // §10.1 中间区间：结构化在前、原图在后。
         ImageOutcome::Both => {
@@ -551,8 +570,8 @@ async fn image_response(
             // 原图（本地 CPU）。并发只影响延迟、不改变结果（§16.3）：下面仍按
             // 「vision 失败已退回原图则不重复追加」的同一判据组装。
             let (text_resp, original) = tokio::join!(
-                text_understanding_response(path, mime, meta, dims, plan, ctx, &bytes),
-                async { image_pipeline::prepare(&bytes, mime, path) },
+                text_understanding_response(path, mime, meta, dims, plan, ctx, bytes),
+                async { image_pipeline::prepare(bytes, mime, path) },
             );
             let mut resp = text_resp?;
             // vision 失败时 text_understanding_response 已退回原图，不要重复追加。
@@ -1085,7 +1104,16 @@ mod tests {
             calibrated: true,
         };
         let meta = std::fs::metadata(&file).expect("meta");
-        let resp = image_response(&file, "image/png", &meta, &plan, &ctx, Some(&ruling))
+        let bytes = std::fs::read(&file).expect("bytes");
+        let dims = image_pipeline::dimensions(&bytes);
+        let input = ImageInput {
+            path: &file,
+            bytes: &bytes,
+            dims,
+            mime: "image/png",
+            meta: &meta,
+        };
+        let resp = image_response(&input, &plan, &ctx, Some(&ruling))
             .await
             .expect("image response");
         assert!(

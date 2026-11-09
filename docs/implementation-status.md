@@ -70,7 +70,7 @@
 | 项 | 状态 | 架构依据 | 证据 |
 |---|---|---|---|
 | 进程组管理（超时整组终止） | 完成 | §14 阶段 4 | `kill_process_group`；bash/task 均接 |
-| L0 预热与 L1 预判 | 部分 | §22 | `warm.rs` + read 路径接入；其余工具未接 |
+| L0 预热与 L1 预判 | 完成 | §22 | read 文本预热（`WarmText`）；edit 复用预热内容；read 图片单次读取（判定/组装/压缩共用字节与尺寸）；预热缓存有总容量（64MB）与条目数（32）上限 |
 | 质量阶梯标定 | 完成 | §10.2b | `examples/quality_calibration.rs` |
 | decide 批处理（方案 B） | 未做 | §13.4 | 见「当前待办」 |
 | 理解链并发调度调优 | 完成 | §4.8 | read 图片 `Both` 并发（`tokio::join!`）；`understanding.rs` 的分层调度仍用于校验与确定性 |
@@ -112,7 +112,7 @@
 
 | 命令 | 结果（2026-11-09） |
 |---|---|
-| `cargo test --workspace` | 435 passed（默认构建；含 4 个阶段 5 集成用例） |
+| `cargo test --workspace` | 437 passed（默认构建；含 4 个阶段 5 集成用例） |
 | `cargo test --workspace --features external-protocols` | 425 passed（feature 构建；6 个默认构建专属的降级测试被 cfg 隔离） |
 | `cargo clippy --workspace --all-targets` | No issues |
 | `cargo build --release` | 零警告 |

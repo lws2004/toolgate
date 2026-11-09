@@ -14,6 +14,12 @@ use crate::decision::Intent;
 /// 阈值标定需实测（§15.4），此处不声称已标定。
 pub const WARM_MAX_BYTES: u64 = 1024 * 1024;
 
+/// §22.3「预热成本必须可算」：单文件上限之外，整体也要有上限——
+/// 否则连续 read 大文件会把内存吃满。超限整体丢弃（缓存可随时丢弃，§22.5）。
+pub const WARM_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+/// 预热条目数上限（同样的成本控制口径）。
+pub const WARM_MAX_ENTRIES: usize = 32;
+
 /// 文件失效判据：mtime + size（§22.5）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileKey {
@@ -80,9 +86,15 @@ impl WarmCache {
     }
 
     pub fn put(&self, path: PathBuf, entry: WarmText) {
-        if let Ok(mut guard) = self.entries.lock() {
-            guard.insert(path, entry);
+        let Ok(mut guard) = self.entries.lock() else {
+            return;
+        };
+        // §22.3：成本可算——总量或条目数超限时整体丢弃，不做复杂的 LRU。
+        let total: usize = guard.values().map(|e| e.bytes.len()).sum();
+        if guard.len() >= WARM_MAX_ENTRIES || total + entry.bytes.len() > WARM_MAX_TOTAL_BYTES {
+            guard.clear();
         }
+        guard.insert(path, entry);
     }
 
     /// §22.5：缓存可随时丢弃。
@@ -125,6 +137,20 @@ mod tests {
     fn warm_size_cap_is_one_megabyte() {
         assert!(should_warm(WARM_MAX_BYTES));
         assert!(!should_warm(WARM_MAX_BYTES + 1));
+    }
+
+    /// §22.3：条目数超限时整体丢弃，避免连续 read 大文件把内存吃满。
+    #[test]
+    fn entry_limit_discards_cache_instead_of_growing() {
+        let cache = WarmCache::default();
+        for index in 0..=WARM_MAX_ENTRIES {
+            cache.put(PathBuf::from(format!("/tmp/warm-{index}.txt")), entry(None, 5));
+        }
+        // 第 WARM_MAX_ENTRIES+1 次写入前触发清空，之后只剩最新一条。
+        let last = PathBuf::from(format!("/tmp/warm-{WARM_MAX_ENTRIES}.txt"));
+        assert!(cache.get(&last, FileKey::of(None, 5)).is_some());
+        let first = PathBuf::from("/tmp/warm-0.txt");
+        assert!(cache.get(&first, FileKey::of(None, 5)).is_none());
     }
 
     fn entry(mtime: Option<SystemTime>, size: u64) -> WarmText {

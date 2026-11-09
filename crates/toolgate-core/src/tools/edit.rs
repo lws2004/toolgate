@@ -105,12 +105,24 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     };
     // §17.2：文件路径先过根校验（含 ../ 与符号链接逃逸）。
     let path = ctx.resolve_file(&raw_path)?;
-    let bytes = tokio::fs::read(&path).await.map_err(|e| {
+    // §22.3：read 预热过的文件内容直接复用，省一次 IO 与解码；
+    // 缓存可丢弃（§22.5），未命中就走正常读取。写前复核仍以磁盘为准（§18.5）。
+    let meta = tokio::fs::metadata(&path).await.map_err(|e| {
         ToolError::failed_with(
             crate::error::ErrorCode::PathNotFound,
             format!("无法读取 {}：{e}", path.display()),
         )
     })?;
+    let warm_key = crate::warm::FileKey::of(meta.modified().ok(), meta.len());
+    let bytes = match ctx.warm.get(&path, warm_key) {
+        Some(warm) => warm.bytes,
+        None => tokio::fs::read(&path).await.map_err(|e| {
+            ToolError::failed_with(
+                crate::error::ErrorCode::PathNotFound,
+                format!("无法读取 {}：{e}", path.display()),
+            )
+        })?,
+    };
     // §5.4 共同前置：读原文时记版本指纹，写前复核（三种模式同一份）。
     let stamp = FileStamp::capture(&path, &bytes).await?;
 
@@ -983,6 +995,29 @@ mod tests {
         let file = dir.join("f.txt");
         std::fs::write(&file, "alpha\nbeta\n").expect("write");
         (ToolContext::new(&dir).expect("ctx"), dir)
+    }
+
+    /// §22.3：read 预热后的文件内容被 edit 复用——命中缓存不改变写回结果，
+    /// 写前复核仍以磁盘为准（§18.5）。
+    #[tokio::test]
+    async fn edit_reuses_warmed_content_and_writes_correctly() {
+        let (ctx, dir) = ctx_with_file("warm-edit").await;
+        // read（intent 缺省 raw）触发 §22.3 的 Full 预热。
+        let _ = crate::tools::read::run(&json!({ "path": "f.txt" }), &ctx)
+            .await
+            .expect("read 预热");
+        let resp = run(
+            &json!({ "path": "f.txt", "edits": [{ "oldText": "beta", "newText": "BETA" }] }),
+            &ctx,
+        )
+        .await
+        .expect("edit 成功");
+        assert_eq!(resp.meta["changed"], json!(true));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).expect("读回"),
+            "alpha\nBETA\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// §17.2：edit 的路径参数走根校验，../ 逃逸返回 ISOLATION_REFUSED。
