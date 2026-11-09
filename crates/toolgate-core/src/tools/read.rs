@@ -16,8 +16,8 @@ use crate::hashline::render_anchored;
 use crate::locale::{tf, tformat};
 use crate::media;
 use crate::media::image_pipeline;
-use crate::notice::budgeted_notices;
 use crate::notice::Notice;
+use crate::notice::budgeted_notices;
 use crate::read_path::{
     ImageOutcome, ImagePlan, display_path, metadata_facts, metadata_text, plan_image,
 };
@@ -382,7 +382,9 @@ async fn text_understanding_response(
                 attach_notices(&mut resp, notices, true);
                 Ok(resp)
             } else {
-                Ok(metadata_response(path, mime, meta, width, height, notices, ctx))
+                Ok(metadata_response(
+                    path, mime, meta, width, height, notices, ctx,
+                ))
             }
         }
     }
