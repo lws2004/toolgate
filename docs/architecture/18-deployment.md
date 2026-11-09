@@ -186,7 +186,7 @@ systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，�
 
 | 方向 | 形状 |
 |---|---|
-| 槽位 → 协议 | `model` 取配置的上游模型名；`temperature = 0`（§3.2 同输入同输出）；`messages` 为 system + user 两条，user 放 `text`；`max_tokens` 透传 |
+| 槽位 → 协议 | `model` 取配置的上游模型名；`temperature = 0`（§3.2 同输入同输出）；`messages` 为 system + user 两条，user 放 `text`；有 `schema` 时把 schema 的 JSON 一并写入 user prompt；`max_tokens` 透传 |
 | 协议 → 槽位 | 取 `choices[0].message.content`；无 `schema` 时作为 `SummarizeOutput.text`，有 `schema` 时解析成 JSON 给 `data` |
 
 响应形状不符（缺 `choices[0]`、空 content、有 schema 却不是合法 JSON）按 §3.11

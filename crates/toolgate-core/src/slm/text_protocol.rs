@@ -73,6 +73,16 @@ pub fn build_request(
     } else {
         SYSTEM_PROMPT
     };
+    // 有 schema 时把 schema 本身写进 user prompt：只说「输出 JSON」而不给结构，
+    // 模型只能猜字段名与类型（§3.2「输出按 schema 校验」）。
+    let user = match &input.schema {
+        Some(schema) => format!(
+            "{}\n\n输出必须符合以下 JSON Schema：\n{}",
+            input.text,
+            serde_json::to_string_pretty(schema).unwrap_or_else(|_| "{}".to_owned())
+        ),
+        None => input.text.clone(),
+    };
     Ok(ChatRequest {
         model: model.to_owned(),
         temperature: 0.0,
@@ -83,7 +93,7 @@ pub fn build_request(
             },
             ChatMessage {
                 role: "user".to_owned(),
-                content: input.text.clone(),
+                content: user,
             },
         ],
         max_tokens: input.max_tokens,
@@ -157,7 +167,11 @@ mod tests {
 
     #[test]
     fn empty_text_is_rejected_actionably() {
-        let input = SummarizeInput { text: String::new(), schema: None, max_tokens: None };
+        let input = SummarizeInput {
+            text: String::new(),
+            schema: None,
+            max_tokens: None,
+        };
         let err = build_request(&input, "demo").unwrap_err();
         assert!(!err.next_steps.is_empty());
         assert_eq!(err.code, "CAPABILITY_MISMATCH");
@@ -165,7 +179,11 @@ mod tests {
 
     #[test]
     fn plain_response_maps_to_text() {
-        let input = SummarizeInput { text: "x".to_owned(), schema: None, max_tokens: None };
+        let input = SummarizeInput {
+            text: "x".to_owned(),
+            schema: None,
+            max_tokens: None,
+        };
         let out = parse_output(&response("  摘要内容  "), &input).unwrap();
         assert_eq!(out.text.as_deref(), Some("摘要内容"));
         assert!(out.data.is_none());
@@ -173,21 +191,33 @@ mod tests {
     }
 
     #[test]
-    fn schema_response_maps_to_data() {
+    fn schema_response_maps_to_data_and_schema_reaches_prompt() {
         let input = SummarizeInput {
             text: "x".to_owned(),
-            schema: Some(json!({ "type": "object" })),
+            schema: Some(json!({
+                "type": "object",
+                "properties": { "summary": { "type": "string" } },
+                "required": ["summary"]
+            })),
             max_tokens: None,
         };
-        let out = parse_output(&response(r#"{"a":1}"#), &input).unwrap();
-        assert_eq!(out.data, Some(json!({ "a": 1 })));
+        let request = build_request(&input, "demo").unwrap();
+        let prompt = &request.messages[1].content;
+        assert!(prompt.contains("JSON Schema"), "{prompt}");
+        assert!(prompt.contains("summary"), "{prompt}");
+        let out = parse_output(&response(r#"{"summary":"ok"}"#), &input).unwrap();
+        assert_eq!(out.data, Some(json!({ "summary": "ok" })));
         assert!(out.text.is_none());
         out.validate(&input).unwrap();
     }
 
     #[test]
     fn malformed_responses_are_rejected() {
-        let input = SummarizeInput { text: "x".to_owned(), schema: None, max_tokens: None };
+        let input = SummarizeInput {
+            text: "x".to_owned(),
+            schema: None,
+            max_tokens: None,
+        };
         let empty = ChatResponse { choices: vec![] };
         assert!(parse_output(&empty, &input).is_err());
         assert!(parse_output(&response("  "), &input).is_err());
