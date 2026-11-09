@@ -15,6 +15,7 @@ pub mod slots;
 pub mod spill;
 pub mod tools;
 pub mod truncate;
+pub mod understanding;
 
 pub use truncate::{
     DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, TruncatedBy, TruncationOptions, TruncationResult,
