@@ -204,11 +204,11 @@ PTC 里每次子调用仍是一个独立的 MCP 请求，工具层不做批量�
 验收目标在 §3.2 的 decide 契约与 §7.2 的门控里已经定案，本轮没有改动任何架构
 决策，只是首次有端到端实测证据。systemone 协议本身见 §18.1。
 
-**尚未覆盖的部分**（不影响本条验收，但阶段 1 未完）：五个槽位的客户端适配已落
-decide（systemone / noul）、summarize（text 适配器）、rerank（ordered 适配器）与
-vision（多模态 chat 适配器）四条；classify 一条仍未落；§13.4 的 turn 聚合钩子（方案 B）
-随阶段 1.5 与阶段 4 落地；`external-protocols` feature 默认关闭，默认构建下这条路径
-不可用（§19.6）。
+**尚未覆盖的部分**（不影响本条验收）：五个槽位的客户端适配五条全落——decide
+（systemone / noul）、summarize（text 适配器）、rerank（ordered 适配器）、vision
+（多模态 chat 适配器）、classify（json 适配器，模型自报分数、非校准）；
+§13.4 的 turn 聚合钩子（方案 B）随阶段 1.5 与阶段 4 落地；`external-protocols`
+feature 默认关闭，默认构建下这条路径不可用（§19.6）。
 
 同期完成错误自检三层（§1.4.5）与 `ErrorCode` 枚举——它们是纯逻辑，不依赖模型，可以先做完。
 

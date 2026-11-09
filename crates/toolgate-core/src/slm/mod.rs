@@ -7,6 +7,7 @@
 //! 架构依据：18-deployment.md §18.1（模型来源与协议）、§19.6（依赖分层与可选层）、
 //! 03-slots.md §3.2（槽位契约）、§3.11（能力声明与失效状态机）、06-cost.md §7.2（置信度门控）。
 
+pub mod classify_protocol;
 pub mod client;
 pub mod ordered_protocol;
 pub mod systemone;
@@ -14,7 +15,8 @@ pub mod text_protocol;
 pub mod vision_protocol;
 
 pub use client::{
-    DecideOutcome, RerankOutcome, SlotCallError, SlotClient, SummarizeOutcome, VisionOutcome,
+    ClassifyOutcome, DecideOutcome, RerankOutcome, SlotCallError, SlotClient, SummarizeOutcome,
+    VisionOutcome,
 };
 pub use systemone::{
     SystemOneQuestion, SystemOneRequest, SystemOneResponse, build_request, endpoint,
