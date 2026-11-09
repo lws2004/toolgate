@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use crate::bash_path::intent_tag;
 use crate::compat::{CompatConfig, resolve_intent};
 use crate::decision::Intent;
+use crate::locale::Language;
 use crate::slots::{SlotKind, SlotSet};
 use crate::spill::SpillStore;
 use crate::truncate::TruncationOptions;
@@ -38,6 +39,8 @@ pub struct ToolContext {
     pub limits: TruncationOptions,
     /// 请求级上游视觉能力（§18.1b）：来自 _meta.toolgate/upstream.vision，缺省 false。
     pub upstream_vision: bool,
+    /// 请求级用户语言（§18.1b）：由传输层按 _meta / 环境注入。
+    pub language: Language,
 }
 
 impl ToolContext {
@@ -52,6 +55,7 @@ impl ToolContext {
             snapshots,
             limits: TruncationOptions::default(),
             upstream_vision: false,
+            language: Language::default(),
         })
     }
 
@@ -135,6 +139,8 @@ impl ToolResponse {
 pub struct ToolSpec {
     pub name: &'static str,
     pub description: &'static str,
+    /// 英文描述（§18.1b 用户语言）；中文是源语言，缺省取 description。
+    pub description_en: &'static str,
     pub input_schema: Value,
 }
 
@@ -215,6 +221,7 @@ pub async fn dispatch(
     // §13.3 / §7.3：协商状态在返回出口统一注入，六个工具共用一份事实源。
     let intent =
         resolve_intent(args, &CompatConfig::default()).map_err(crate::ToolError::bad_argument)?;
+    let lang = ctx.language;
     let mut resp = match name {
         "read" => read::run(args, ctx).await,
         "write" => write::run(args, ctx).await,
@@ -223,7 +230,8 @@ pub async fn dispatch(
         "bash" => bash::run(args, ctx).await,
         "task" => task::run(args, ctx).await,
         other => Err(crate::ToolError::unknown_tool(other.to_owned())),
-    }?;
+    }
+    .map_err(|e| e.localized(lang))?;
     inject_negotiation_meta(&mut resp, intent);
     Ok(resp)
 }

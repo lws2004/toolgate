@@ -7,6 +7,7 @@
 use serde_json::Value;
 
 use crate::decision::{DecisionInput, ExposureLevel, FallbackStep, Intent, UpstreamCapability};
+use crate::locale::Language;
 use crate::understanding::TurnContext;
 
 /// 支持的 MCP 协议版本，按新到旧排列。
@@ -34,6 +35,8 @@ pub struct RequestMeta {
     pub session: Option<SessionMeta>,
     /// 方案 B 的 turn 载体；本阶段只解析，跨请求聚合留给阶段 1.5 之后（§13.4）。
     pub turn: Option<TurnContext>,
+    /// 用户语言（§18.1b）：来自 _meta.toolgate/language，缺省时按环境判定。
+    pub language: Option<Language>,
 }
 
 impl RequestMeta {
@@ -42,6 +45,11 @@ impl RequestMeta {
         UpstreamCapability {
             vision: self.upstream.as_ref().is_some_and(|u| u.vision),
         }
+    }
+
+    /// 默认跟随用户语言：请求声明 > 环境变量 > 源语言兜底（§18.1b）。
+    pub fn effective_language(&self) -> Language {
+        self.language.unwrap_or_else(Language::from_env)
     }
 }
 
@@ -95,11 +103,17 @@ pub fn parse_request_meta(params: &Value) -> RequestMeta {
         })
     });
 
+    let language = meta
+        .and_then(|m| m.get("toolgate/language"))
+        .and_then(Value::as_str)
+        .and_then(Language::parse);
+
     RequestMeta {
         protocol_version,
         upstream,
         session,
         turn,
+        language,
     }
 }
 

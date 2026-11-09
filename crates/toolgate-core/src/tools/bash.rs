@@ -32,6 +32,7 @@ pub fn spec() -> ToolSpec {
         description: "能做什么：执行系统命令，只接受程序名 + 参数数组（无 shell 解析层）；输出超过 2000 行 / 50KB 保留尾部并落盘。 \
                       不能做什么：不接受 shell 字符串、管道与重定向；不返回图片；不做长任务托管。 \
                       什么时候用别的工具：长任务用 task；按内容查找用 search；改文件用 edit / write；看图用 read。",
+        description_en: "Can: run system commands via program name + args array (no shell parsing); tail-truncates past 2000 lines / 50KB and spills. Cannot: accept shell strings, pipes or redirects, return images, or host long jobs. Use instead: task for long jobs, search to find content, edit / write to modify, read for images.",
         input_schema: json!({
             "type": "object",
             "properties": {

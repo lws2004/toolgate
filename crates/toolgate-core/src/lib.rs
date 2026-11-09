@@ -11,6 +11,7 @@ pub mod encoding;
 pub mod error;
 pub use error::ErrorCode;
 pub mod hashline;
+pub mod locale;
 pub mod media;
 pub mod notice;
 pub mod read_path;

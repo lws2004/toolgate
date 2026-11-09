@@ -13,7 +13,8 @@ use toolgate_core::compat::{
     default_decision_input, parse_request_meta, resolve_intent,
 };
 use toolgate_core::decision::{Intent, decide_output};
-use toolgate_core::error::{error_response as tool_error_response, govern_error};
+use toolgate_core::error::{error_response_with_lang, govern_error};
+use toolgate_core::locale::{Language, localize_value};
 use toolgate_core::notice::budgeted_notices;
 use toolgate_core::tools::{ToolContext, all_specs, dispatch};
 
@@ -79,6 +80,7 @@ impl McpServer {
         }
         let params = request.get("params").cloned().unwrap_or(Value::Null);
         let meta = parse_request_meta(&params);
+        let lang = meta.effective_language();
 
         match method {
             "initialize" => {
@@ -109,11 +111,15 @@ impl McpServer {
                 let tools: Vec<Value> = all_specs()
                     .into_iter()
                     .map(|s| {
+                        let description = match lang {
+                            Language::En => s.description_en,
+                            Language::Zh => s.description,
+                        };
                         json!({
                             "name": s.name,
-                            "description": s.description,
-                            "inputSchema": s.input_schema,
-                            "outputSchema": s.output_schema(),
+                            "description": description,
+                            "inputSchema": localize_value(lang, &s.input_schema),
+                            "outputSchema": localize_value(lang, &s.output_schema()),
                         })
                     })
                     .collect();
@@ -140,9 +146,10 @@ impl McpServer {
                 // 把 _meta 的上游视觉能力注入本次调用上下文（§18.1b）。
                 let mut call_ctx = self.ctx.clone();
                 call_ctx.upstream_vision = meta.upstream_capability().vision;
+                call_ctx.language = lang;
                 let resp = match dispatch(name, &args, &call_ctx).await {
                     Ok(resp) => resp,
-                    Err(e) => tool_error_response(&govern_error(&e)),
+                    Err(e) => error_response_with_lang(&govern_error(&e), lang),
                 };
                 let content: Vec<Value> = resp.content.iter().map(|c| c.to_mcp()).collect();
                 let mut result = json!({
@@ -337,6 +344,50 @@ mod tests {
         assert_eq!(
             resp["result"]["structuredContent"]["noticeOverflow"],
             json!(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn user_language_controls_specs_and_errors() {
+        let mut s = test_server();
+        let list = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 9, "method": "tools/list",
+                "params": { "_meta": { "toolgate/language": "en" } }
+            }),
+        )
+        .await;
+        let tools = list["result"]["tools"].as_array().expect("tools");
+        let write_spec = tools.iter().find(|t| t["name"] == "write").expect("write");
+        assert!(
+            write_spec["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("Can:"),
+            "工具描述未按用户语言切换"
+        );
+        assert_eq!(
+            write_spec["inputSchema"]["properties"]["content"]["description"],
+            json!("Full file content")
+        );
+
+        let err = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+                "params": {
+                    "name": "nope", "arguments": {},
+                    "_meta": { "toolgate/language": "en" }
+                }
+            }),
+        )
+        .await;
+        let text = err["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.starts_with("Fact:"), "错误三段式标签未本地化: {text}");
+        assert!(
+            text.contains("Call tools/list"),
+            "nextSteps 未本地化: {text}"
         );
     }
 

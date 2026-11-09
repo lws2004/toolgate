@@ -34,6 +34,7 @@ pub fn spec() -> ToolSpec {
         description: "能做什么：局部修改文件，支持 edits 文本匹配与 anchor 行锚点两种模式；多处匹配会拒绝，改动前留快照。 \
                       不能做什么：不承接大块内容摘要；不返回图片；不自动回滚；失败归因在 d1 槽位不可用时按 §3.8 走机械路径并告知。 \
                       什么时候用别的工具：整段重写用 write；按内容查找用 search；读取用 read。",
+        description_en: "Can: local edits via edits text matching or anchor line mode; rejects multiple matches and snapshots before writing. Cannot: summarize large content, return images, auto-rollback; failure attribution degrades to the mechanical path per §3.8 when d1 is unavailable. Use instead: write for a full rewrite, search to find content, read to inspect.",
         input_schema: json!({
             "type": "object",
             "properties": {

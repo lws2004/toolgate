@@ -24,6 +24,7 @@ pub fn spec() -> ToolSpec {
         description: "能做什么：按正则检索文件内容或按通配符枚举文件路径；结果超过 2000 行 / 50KB 保留头部并落盘。 \
                       不能做什么：不解析网页 JS；不返回图片；rerank 槽位不可用时按命中顺序返回并告知（§3.8）。 \
                       什么时候用别的工具：已知路径读全文用 read；修改用 edit / write；跑命令用 bash。",
+        description_en: "Can: regex content search or glob file enumeration; head-truncates past 2000 lines / 50KB and spills. Cannot: run page JS or return images; when rerank is unavailable it keeps hit order and says so (§3.8). Use instead: read for a known path, edit / write to modify, bash to run commands.",
         input_schema: json!({
             "type": "object",
             "properties": {

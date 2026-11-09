@@ -7,6 +7,7 @@
 
 use std::process::ExitCode;
 
+use toolgate_core::locale::{Language, localize_value};
 use toolgate_core::tools::{ToolContext, all_specs, dispatch};
 use toolgate_mcp::McpServer;
 
@@ -48,11 +49,17 @@ async fn main() -> ExitCode {
             }
         },
         "list" => {
+            let lang = Language::from_env();
             for spec in all_specs() {
-                println!("{}\n  {}", spec.name, spec.description);
+                let description = match lang {
+                    Language::En => spec.description_en,
+                    Language::Zh => spec.description,
+                };
+                println!("{}\n  {}", spec.name, description);
                 println!(
                     "  schema: {}",
-                    serde_json::to_string(&spec.input_schema).unwrap_or_default()
+                    serde_json::to_string(&localize_value(lang, &spec.input_schema))
+                        .unwrap_or_default()
                 );
                 println!(
                     "  output: {}",

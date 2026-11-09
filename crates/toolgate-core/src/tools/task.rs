@@ -49,6 +49,7 @@ pub fn spec() -> ToolSpec {
         description: "能做什么：启动、查看、终止后台长任务；action=read 返回累积输出（尾部截断并落盘）与进程状态，intent 协商仅作用于 read。 \
                       不能做什么：不做任务级断点与完成度判断（归调用方）；不判定卡住/崩溃/报错循环（decide 槽位属可选层，未接入时按 §3.8 降级并告知）；不返回图片。 \
                       什么时候用别的工具：一次性等结果的命令用 bash；按内容查找用 search；精确看图用 read。",
+        description_en: "Can: start, inspect and kill background long jobs; action=read returns accumulated output (tail-truncated and spilled) plus process state; intent applies only to read. Cannot: decide task-level checkpoints or completion (caller's job), judge stuck / crash / error loops (decide slot is optional, unavailable degrades per §3.8), or return images. Use instead: bash for one-shot commands, search to find content, read for precise images.",
         input_schema: json!({
             "type": "object",
             "properties": {

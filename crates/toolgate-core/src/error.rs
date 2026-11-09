@@ -9,6 +9,7 @@ use std::io::ErrorKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::locale::{Language, t, tf};
 use crate::tools::{Content, ToolResponse};
 
 /// §1.4.5 稳定错误码：8 个特定场景 + 4 个通用兜底，封闭 12 个。
@@ -114,6 +115,59 @@ impl crate::ToolError {
     }
 }
 
+impl crate::ToolError {
+    /// §18.1b：三段式文案按用户语言本地化；字段里的中文是源语言 msgid。
+    pub fn localized(&self, lang: Language) -> Self {
+        use crate::ToolError as E;
+        let l = |s: &str| t(lang, s).into_owned();
+        let steps = |v: &Vec<String>| v.iter().map(|s| l(s)).collect();
+        match self {
+            E::UnknownTool {
+                code,
+                name,
+                available,
+                next_steps,
+            } => E::UnknownTool {
+                code: *code,
+                name: name.clone(),
+                available: available.clone(),
+                next_steps: steps(next_steps),
+            },
+            E::BadArgument {
+                code,
+                message,
+                next_steps,
+            } => E::BadArgument {
+                code: *code,
+                message: l(message),
+                next_steps: steps(next_steps),
+            },
+            E::Io {
+                code,
+                fact,
+                reason,
+                next_steps,
+            } => E::Io {
+                code: *code,
+                fact: l(fact),
+                reason: l(reason),
+                next_steps: steps(next_steps),
+            },
+            E::Failed {
+                code,
+                fact,
+                reason,
+                next_steps,
+            } => E::Failed {
+                code: *code,
+                fact: l(fact),
+                reason: l(reason),
+                next_steps: steps(next_steps),
+            },
+        }
+    }
+}
+
 impl From<std::io::Error> for crate::ToolError {
     fn from(e: std::io::Error) -> Self {
         let code = match e.kind() {
@@ -211,6 +265,24 @@ pub fn govern_error(e: &crate::ToolError) -> ErrorView {
 }
 
 /// 构造一条完整的错误响应，让传输层的 Ok / Err 两条路径共用同一套序列化。
+/// 带用户语言的错误响应：content 标签与分隔符同样按语言取（§18.1b）。
+pub fn error_response_with_lang(view: &ErrorView, lang: Language) -> ToolResponse {
+    let text = tf(
+        lang,
+        "事实：{fact}\n原因：{reason}\n可选下一步：{next}",
+        &[
+            ("fact", view.fact.clone()),
+            ("reason", view.reason.clone()),
+            ("next", view.next_steps.join(t(lang, "；").as_ref())),
+        ],
+    );
+    ToolResponse {
+        content: vec![Content::Text(text)],
+        is_error: true,
+        meta: json!({ "error": view.to_structured() }),
+    }
+}
+
 pub fn error_response(view: &ErrorView) -> ToolResponse {
     ToolResponse {
         content: vec![Content::Text(view.to_content_text())],

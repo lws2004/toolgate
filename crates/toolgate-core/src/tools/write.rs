@@ -15,6 +15,7 @@ pub fn spec() -> ToolSpec {
         description: "能做什么：新建文件或整体覆盖已有文件，自动建父目录；覆盖前留写前快照并沿用原文件编码。 \
                       不能做什么：不产生需要理解的大块内容，因此不做摘要 / 判定（§4.0）；不返回图片；不做局部替换。 \
                       什么时候用别的工具：局部修改用 edit；按内容查找用 search；读取用 read。",
+        description_en: "Can: create or fully overwrite a file, creating parent dirs; snapshots the old content and keeps its encoding. Cannot: summarize or judge (no large content, §4.0), return images, or do partial replacement. Use instead: edit for local changes, search to find content, read to inspect.",
         input_schema: json!({
             "type": "object",
             "properties": {
