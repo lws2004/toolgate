@@ -134,6 +134,28 @@ pub struct ToolSpec {
     pub input_schema: Value,
 }
 
+impl ToolSpec {
+    /// §4.3 / §4.7 / §13.3：结构化输出的公共 schema，六个工具共用一份声明。
+    ///
+    /// 只固定所有工具都遵守的 notices 契约（§4.4b 一个事实源、两个通道）；
+    /// 各工具特有的程序字段由 additionalProperties 放开，避免六份 schema
+    /// 与各自的 meta 实现形成双源。intent 的实际协商形态见 §4.2 与工具描述。
+    pub fn output_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "notices": {
+                    "type": "array",
+                    "description": "§4.4b 告知数组；无告知时省略该字段。与 content 文本同源",
+                    "items": { "type": "object" }
+                }
+            },
+            "additionalProperties": true,
+            "description": "structuredContent 是程序可读通道（§4.4）；notices 之外的键为各工具特有的程序事实（路径、行数、退出码等）"
+        })
+    }
+}
+
 /// 全部工具的规格表。顺序即 MCP tools/list 的顺序。
 pub fn all_specs() -> Vec<ToolSpec> {
     vec![
@@ -183,4 +205,50 @@ pub(crate) fn optional_usize(args: &Value, key: &str) -> Option<usize> {
 /// 从入参对象里取可选布尔。
 pub(crate) fn optional_bool(args: &Value, key: &str) -> Option<bool> {
     args.get(key).and_then(Value::as_bool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §13.3 / §4.6：六个工具的规格声明必须齐全且一致。
+    #[test]
+    fn all_specs_declare_intent_output_schema_and_three_part_description() {
+        let specs = all_specs();
+        assert_eq!(specs.len(), 6);
+        for spec in &specs {
+            let intent = &spec.input_schema["properties"]["intent"];
+            assert_eq!(intent["type"], json!("string"), "{} 缺 intent", spec.name);
+            assert_eq!(
+                intent["enum"],
+                json!(["raw", "summary", "structured", "visual", "auto"]),
+                "{} 的 intent 取值不全",
+                spec.name
+            );
+            assert!(
+                spec.description.contains("能做什么"),
+                "{} 缺第一段",
+                spec.name
+            );
+            assert!(
+                spec.description.contains("不能做什么"),
+                "{} 缺第二段",
+                spec.name
+            );
+            assert!(
+                spec.description.contains("什么时候用别的工具"),
+                "{} 缺第三段",
+                spec.name
+            );
+            let schema = spec.output_schema();
+            assert_eq!(schema["type"], json!("object"), "{}", spec.name);
+            assert_eq!(
+                schema["properties"]["notices"]["type"],
+                json!("array"),
+                "{}",
+                spec.name
+            );
+            assert_eq!(schema["additionalProperties"], json!(true), "{}", spec.name);
+        }
+    }
 }

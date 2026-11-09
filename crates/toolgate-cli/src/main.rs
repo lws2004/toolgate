@@ -54,6 +54,10 @@ async fn main() -> ExitCode {
                     "  schema: {}",
                     serde_json::to_string(&spec.input_schema).unwrap_or_default()
                 );
+                println!(
+                    "  output: {}",
+                    serde_json::to_string(&spec.output_schema()).unwrap_or_default()
+                );
                 println!();
             }
             ExitCode::SUCCESS

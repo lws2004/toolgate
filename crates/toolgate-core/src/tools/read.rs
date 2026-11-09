@@ -24,8 +24,9 @@ use crate::truncate::{TruncationOptions, format_size, truncate_head};
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "read",
-        description: "读取文本文件（带行号）或图片。超过 2000 行 / 50KB 时头部截断，\
-                      用 offset 参数续读。图片会自动走压缩流水线。",
+        description: "能做什么：读取文本文件（带行号与可选行锚点）或图片；超过 2000 行 / 50KB 头部截断并用 offset 续读；图片按压缩流水线返回或转译。 \
+                      不能做什么：不解析网页 JS（fetch.provider 默认 none）；不跟随符号链接；文本路径的 intent 只影响协商层标注。 \
+                      什么时候用别的工具：按内容查找用 search；局部修改用 edit；整段重写用 write。",
         input_schema: json!({
             "type": "object",
             "properties": {

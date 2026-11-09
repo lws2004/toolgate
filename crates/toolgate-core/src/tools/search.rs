@@ -21,9 +21,9 @@ use crate::truncate::{MAX_MATCH_LINE_LENGTH, truncate_head};
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "search",
-        description: "检索文件内容或枚举文件路径。mode=content 时按正则搜内容（等价 grep -rn），\
-                      mode=files 时按通配符枚举文件名（等价 fd）。结果超过 2000 行 / 50KB 时\
-                      保留头部、完整结果落盘并返回路径。",
+        description: "能做什么：按正则检索文件内容或按通配符枚举文件路径；结果超过 2000 行 / 50KB 保留头部并落盘。 \
+                      不能做什么：不解析网页 JS；不返回图片；rerank 槽位不可用时按命中顺序返回并告知（§3.8）。 \
+                      什么时候用别的工具：已知路径读全文用 read；修改用 edit / write；跑命令用 bash。",
         input_schema: json!({
             "type": "object",
             "properties": {

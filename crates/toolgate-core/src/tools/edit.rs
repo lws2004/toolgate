@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use super::{ToolContext, ToolResponse, ToolSpec, optional_str, required_str};
 use crate::ToolError;
+use crate::compat::{CompatConfig, resolve_intent};
 use crate::edit_path::{
     FileFacts, MatchLevel, change_facts, classify_match, detect_eol, diff_stats,
     mechanical_attribution, nearby_build_files, plan_edit,
@@ -30,10 +31,9 @@ use crate::read_path::display_path;
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "edit",
-        description: "局部修改文件。两种用法：\
-                      (1) 传 edits:[{oldText,newText}]，按原文精确匹配替换，匹配多处会报错；\
-                      (2) 传 anchor:\"行号#哈希\" 与 newText，按 read 返回的锚点定位单行，\
-                      文件已变动时拒绝写入。局部修改一律用 edit，不要用 write 覆盖。",
+        description: "能做什么：局部修改文件，支持 edits 文本匹配与 anchor 行锚点两种模式；多处匹配会拒绝，改动前留快照。 \
+                      不能做什么：不承接大块内容摘要；不返回图片；不自动回滚；失败归因在 d1 槽位不可用时按 §3.8 走机械路径并告知。 \
+                      什么时候用别的工具：整段重写用 write；按内容查找用 search；读取用 read。",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -57,6 +57,11 @@ pub fn spec() -> ToolSpec {
                 "newText": {
                     "type": "string",
                     "description": "行锚点模式下该行的新内容（不含换行）"
+                },
+                "intent": {
+                    "type": "string",
+                    "enum": ["raw", "summary", "structured", "visual", "auto"],
+                    "description": "协商层输出形态（§4.2）。edit 不产生可协商的大块内容（§4.0），输出形态固定为 diff / 失败归因；intent 仅用于统一校验，非法值 fail loud"
                 }
             },
             "required": ["path"]
@@ -65,6 +70,9 @@ pub fn spec() -> ToolSpec {
 }
 
 pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolError> {
+    // §13.3 / §18.9：intent 对所有调用统一校验，非法值 fail loud。
+    // edit 不产生可协商的大块内容（§4.0），所以只校验、不改输出形态。
+    resolve_intent(args, &CompatConfig::default()).map_err(ToolError::bad_argument)?;
     let path = ctx.resolve(required_str(args, "path")?);
     let bytes = tokio::fs::read(&path).await.map_err(|e| {
         ToolError::failed_with(

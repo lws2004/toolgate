@@ -7,17 +7,24 @@ use serde_json::{Value, json};
 
 use super::{ToolContext, ToolResponse, ToolSpec, required_str};
 use crate::ToolError;
+use crate::compat::{CompatConfig, resolve_intent};
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "write",
-        description: "新建文件或整体覆盖已有文件。父目录不存在时自动创建。\
-                      局部修改请用 edit，不要用 write 覆盖大文件。",
+        description: "能做什么：新建文件或整体覆盖已有文件，自动建父目录；覆盖前留写前快照并沿用原文件编码。 \
+                      不能做什么：不产生需要理解的大块内容，因此不做摘要 / 判定（§4.0）；不返回图片；不做局部替换。 \
+                      什么时候用别的工具：局部修改用 edit；按内容查找用 search；读取用 read。",
         input_schema: json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "目标文件路径" },
-                "content": { "type": "string", "description": "完整文件内容" }
+                "content": { "type": "string", "description": "完整文件内容" },
+                "intent": {
+                    "type": "string",
+                    "enum": ["raw", "summary", "structured", "visual", "auto"],
+                    "description": "协商层输出形态（§4.2）。write 不产生可协商的大块内容（§4.0），输出形态固定为写入事实；intent 仅用于统一校验，非法值 fail loud"
+                }
             },
             "required": ["path", "content"]
         }),
@@ -25,6 +32,9 @@ pub fn spec() -> ToolSpec {
 }
 
 pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolError> {
+    // §13.3 / §18.9：intent 对所有调用统一校验，非法值 fail loud。
+    // write 不产生可协商的大块内容（§4.0），所以只校验、不改输出形态。
+    resolve_intent(args, &CompatConfig::default()).map_err(ToolError::bad_argument)?;
     let path = ctx.resolve(required_str(args, "path")?);
     let content = required_str(args, "content")?;
 
@@ -101,6 +111,40 @@ mod tests {
         assert_eq!(resp.meta["created"], json!(true));
         let read_back = std::fs::read_to_string(dir.join("a/b/c.txt")).expect("read back");
         assert_eq!(read_back, "hello\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn raw_intent_keeps_v1_body_unchanged() {
+        let dir = std::env::temp_dir().join(format!("tg-write-intent-{}", std::process::id()));
+        let ctx = ToolContext::new(&dir).expect("ctx");
+        let resp = run(
+            &json!({ "path": "a.txt", "content": "hi", "intent": "raw" }),
+            &ctx,
+        )
+        .await
+        .expect("write ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("a.txt"));
+        assert_eq!(resp.meta["created"], json!(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn unknown_intent_fails_loud_with_next_steps() {
+        let dir = std::env::temp_dir().join(format!("tg-write-bad-{}", std::process::id()));
+        let ctx = ToolContext::new(&dir).expect("ctx");
+        let err = run(
+            &json!({ "path": "a.txt", "content": "hi", "intent": "bogus" }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("next_steps"));
+        assert!(!dbg.contains("next_steps: []"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

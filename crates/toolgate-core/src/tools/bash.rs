@@ -29,9 +29,9 @@ const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "bash",
-        description: "执行系统命令。传 binary 与 args 数组，不接受 shell 字符串——\
-                      需要管道或重定向时请自己串起多个调用。输出超过 2000 行 / 50KB 时\
-                      保留尾部、完整输出落盘并返回路径。",
+        description: "能做什么：执行系统命令，只接受程序名 + 参数数组（无 shell 解析层）；输出超过 2000 行 / 50KB 保留尾部并落盘。 \
+                      不能做什么：不接受 shell 字符串、管道与重定向；不返回图片；不做长任务托管。 \
+                      什么时候用别的工具：长任务用 task；按内容查找用 search；改文件用 edit / write；看图用 read。",
         input_schema: json!({
             "type": "object",
             "properties": {

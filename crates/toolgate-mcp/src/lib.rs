@@ -113,6 +113,7 @@ impl McpServer {
                             "name": s.name,
                             "description": s.description,
                             "inputSchema": s.input_schema,
+                            "outputSchema": s.output_schema(),
                         })
                     })
                     .collect();
@@ -253,6 +254,30 @@ mod tests {
             names,
             vec!["read", "write", "edit", "search", "bash", "task"]
         );
+    }
+
+    #[tokio::test]
+    async fn tools_list_declares_output_schema_and_intent() {
+        let mut s = test_server();
+        let resp = call(
+            &mut s,
+            json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list" }),
+        )
+        .await;
+        for tool in resp["result"]["tools"].as_array().expect("tools") {
+            assert_eq!(
+                tool["outputSchema"]["type"],
+                json!("object"),
+                "{} 缺 outputSchema",
+                tool["name"]
+            );
+            assert_eq!(
+                tool["inputSchema"]["properties"]["intent"]["type"],
+                json!("string"),
+                "{} 缺 intent 参数",
+                tool["name"]
+            );
+        }
     }
 
     #[tokio::test]
