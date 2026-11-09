@@ -214,12 +214,12 @@ async fn image_response(
         ImageOutcome::Metadata | ImageOutcome::TextUnderstanding => {
             let facts = metadata_facts(mime, meta.len(), width, height, &display);
             let text = metadata_text(
+                ctx.language,
                 &channels.notices,
                 file_name,
                 mime,
                 meta.len(),
-                width,
-                height,
+                width.zip(height),
                 &display,
             );
             let mut out_meta = facts;

@@ -360,6 +360,9 @@ fn en(zh: &str) -> Option<&'static str> {
         }
         "节点 id {} 重复" => "duplicate node id {}",
         "节点 {} 依赖自身" => "node {} depends on itself",
+        "{notices}\n[图片文件] {file_name} · {mime}{dims} · {size}\n路径：{path}\n\n无法提供图片内容：vision 槽位未配置，上游模型也不接受图片输入。\n可选路径：\n- 若你能通过其他方式查看该文件，用上面的路径\n- 配置 vision 槽位后重试\n- 若只需要文件名与尺寸，以上信息已足够" => {
+            "{notices}\n[Image] {file_name} · {mime}{dims} · {size}\nPath: {path}\n\nCannot provide image content: the vision slot is not configured and the upstream model does not accept images.\nOptions:\n- If you can view the file another way, use the path above\n- Configure the vision slot and retry\n- File name and dimensions are enough if that is all you need"
+        }
         _ => return None,
     })
 }

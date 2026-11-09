@@ -145,27 +145,29 @@ pub fn metadata_facts(
 
 /// §10.1:148-152 的可行动元信息文本：告知在前，事实居中，可选路径收尾。
 pub fn metadata_text(
+    lang: crate::locale::Language,
     notices: &[Notice],
     file_name: &str,
     mime: &str,
     size: u64,
-    width: Option<u32>,
-    height: Option<u32>,
+    dims: Option<(u32, u32)>,
     path: &str,
 ) -> String {
-    let dims = match (width, height) {
-        (Some(w), Some(h)) => format!(" · {w}x{h}"),
-        _ => String::new(),
+    let dims = match dims {
+        Some((w, h)) => format!(" · {w}x{h}"),
+        None => String::new(),
     };
-    format!(
-        "{}\n[图片文件] {file_name} · {mime}{dims} · {}\n路径：{path}\n\n\
-         无法提供图片内容：vision 槽位未配置，上游模型也不接受图片输入。\n\
-         可选路径：\n\
-         - 若你能通过其他方式查看该文件，用上面的路径\n\
-         - 配置 vision 槽位后重试\n\
-         - 若只需要文件名与尺寸，以上信息已足够",
-        render_notices(notices),
-        format_size(size as usize),
+    crate::locale::tf(
+        lang,
+        "{notices}\n[图片文件] {file_name} · {mime}{dims} · {size}\n路径：{path}\n\n无法提供图片内容：vision 槽位未配置，上游模型也不接受图片输入。\n可选路径：\n- 若你能通过其他方式查看该文件，用上面的路径\n- 配置 vision 槽位后重试\n- 若只需要文件名与尺寸，以上信息已足够",
+        &[
+            ("notices", render_notices(notices)),
+            ("file_name", file_name.to_owned()),
+            ("mime", mime.to_owned()),
+            ("dims", dims),
+            ("size", format_size(size as usize)),
+            ("path", path.to_owned()),
+        ],
     )
 }
 
@@ -258,12 +260,12 @@ mod tests {
     fn metadata_text_is_actionable() {
         let notices = vec![slot_unavailable("vision", SlotFallback::Metadata)];
         let text = metadata_text(
+            crate::locale::Language::Zh,
             &notices,
             "screenshot.png",
             "image/png",
             840_000,
-            Some(1920),
-            Some(1080),
+            Some((1920, 1080)),
             "<workspace>/screenshot.png",
         );
         assert!(text.starts_with("[SLOT_UNAVAILABLE]"));

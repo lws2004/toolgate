@@ -113,7 +113,7 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match run_call(tool, parsed).await {
+            match run_call(tool, parsed, lang).await {
                 Ok(code) => code,
                 Err(e) => {
                     eprintln!("{e}");
@@ -141,14 +141,16 @@ async fn main() -> ExitCode {
 
 async fn run_serve() -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
-    let ctx = ToolContext::new(cwd)?;
+    let mut ctx = ToolContext::new(cwd)?;
+    ctx.language = Language::from_env();
     let mut server = McpServer::new(ctx);
     server.serve_stdio().await
 }
 
-async fn run_call(tool: &str, args: serde_json::Value) -> anyhow::Result<ExitCode> {
+async fn run_call(tool: &str, args: serde_json::Value, lang: Language) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir()?;
-    let ctx = ToolContext::new(cwd)?;
+    let mut ctx = ToolContext::new(cwd)?;
+    ctx.language = lang;
     let resp = dispatch(tool, &args, &ctx).await;
     match resp {
         Ok(r) => {
