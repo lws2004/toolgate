@@ -8,10 +8,11 @@
 //! 03-slots.md §3.2（槽位契约）、§3.11（能力声明与失效状态机）、06-cost.md §7.2（置信度门控）。
 
 pub mod client;
+pub mod ordered_protocol;
 pub mod systemone;
 pub mod text_protocol;
 
-pub use client::{DecideOutcome, SlotCallError, SlotClient, SummarizeOutcome};
+pub use client::{DecideOutcome, RerankOutcome, SlotCallError, SlotClient, SummarizeOutcome};
 pub use systemone::{
     SystemOneQuestion, SystemOneRequest, SystemOneResponse, build_request, endpoint,
     parse_decide_output,

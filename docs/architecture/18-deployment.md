@@ -179,6 +179,19 @@ systemone 还是别的——同一个根地址既能挂 OpenAI 兼容端点，�
 形状不符处理：该次降级、连续失败后禁用并告警。**不假设统一包装**（§18.1「响应
 解包」）。`schema` 的 JSON Schema 校验需要校验器，属可选层，本轮只做 JSON 形状解析。
 
+#### ordered 适配器：通用 chat 端点的 rerank 形状
+
+`rerank` 走 §3.10 的 `ordered` 适配器，与 text 适配器共用同一个 chat 端点与
+请求/响应结构，差别只在 prompt 与输出形状：
+
+| 方向 | 形状 |
+|---|---|
+| 槽位 → 协议 | `temperature = 0`；user 放 `query` + 编号后的全部候选（`documents`），system 要求只输出排序 JSON；`top_n` 透传但 results 仍须覆盖全部候选 |
+| 协议 → 槽位 | `choices[0].message.content` 解析成 `RerankOutput.results`，再按 §3.2 校验：覆盖全部输入、index 指向原始位置、按 score 降序 |
+
+协议无原生排序接口，分数是模型自报值、非校准（§18.1 能力表标「受限」）；
+形状不符按 §3.11 降级。专用 listwise reranker 不在本轮实现范围内（§3.5）。
+
 **openai / anthropic / responses 是通用 LLM 的协议形态，jev 类判定模型不按 chat
 协议工作。** §3.4 的参考判定实现（StartLux / d3-nano）属 systemone 协议族，
 对它们只能走 `systemone`；上表 openai 列的 decide 标「受限」，对这类模型是
