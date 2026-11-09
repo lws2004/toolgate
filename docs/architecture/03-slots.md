@@ -336,7 +336,7 @@ models:
 
 - 五个槽位不写全：上面 2 个模型覆盖 4 个槽位，rerank 为空（§3.8 降级）；
 - 同一个模型服务多个槽位只声明一次（在 `models` 里），**不在槽位下重复写槽位名**；
-- `source` 默认 `auto`（有 `path` 用本地权重，有 `base_url` 按 URL 推断协议）；显式取值以 §18.1 的 source 表为准（`local` / `openai` / `anthropic` / `responses` / `systemone` / `rerank`），其中 `systemone` / `rerank` 不参与 auto 推断；
+- `source` 默认 `auto`（有 `path` 用本地权重，有 `base_url` 按 URL 推断协议）；显式取值以 §18.1 的 source 表为准（唯一事实源，不在此重复维护），其中 `systemone` / `rerank` 不参与 auto 推断；
 - `adapter` 默认 `auto`（按来源与槽位推断），可显式 `native` / `json` / `text` / `ordered`（见下）。
 
 **解析规则**：
@@ -415,7 +415,9 @@ slots:
 | 输出形状可转换 | 模型输出能稳定转成目标槽位的契约形状（本节适配器表） | 把 `choice` 的 `confidence` 当 `probability`，是把「选项间相对置信」与「二元肯定概率」混成一个量，属静默转换，禁止（见下） |
 
 **判据的落点是 §18.1 的协议能力表**：表里每个「不可用 / 受限」都必须能归到
-这两条之一；`classify` 对 systemone 标「受限」是形状可转换但适配未落，不是信息不足。
+这两条之一；`classify` 对 systemone 标「受限」是形状可转换但适配未落，不是信息不足；
+`rerank` 协议对其余四个槽位标「不可用」是只返回排序结果、缺文本 / 概率 / 图像输出
+通道（输入信息不足），而 `rerank × rerank` 的「可用」是信息充分且形状可转。
 **这张表在代码里由 `capability` 模块固化为唯一可执行落点**（`source × slot` 判定）：
 §18.1 的文档表是权威描述，代码判定与它逐格一致，不得各自演化出不同结论。
 

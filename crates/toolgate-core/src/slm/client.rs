@@ -22,7 +22,8 @@ use crate::slots::{
 
 #[cfg(feature = "external-protocols")]
 use super::{
-    classify_protocol, decide_protocol, ordered_protocol, systemone, text_protocol, vision_protocol,
+    classify_protocol, decide_protocol, ordered_protocol, rerank_protocol, systemone, text_protocol,
+    vision_protocol,
 };
 
 /// 单次外部协议请求的超时（架构暂无该项配置，先用常量）。
@@ -685,8 +686,15 @@ impl SlotClient {
                     });
                 }
             };
-            self.rerank_over_http(http, input, &base_url, &model_name, api_key_env.as_deref())
-                .await
+            self.rerank_over_http(
+                http,
+                input,
+                &base_url,
+                &model_name,
+                api_key_env.as_deref(),
+                source,
+            )
+            .await
         }
         #[cfg(not(feature = "external-protocols"))]
         {
@@ -709,18 +717,41 @@ impl SlotClient {
         base_url: &str,
         model: &str,
         api_key_env: Option<&str>,
+        source: ModelSource,
     ) -> Result<RerankOutcome, SlotCallError> {
         let slot = SlotKind::Rerank;
-        let request = match ordered_protocol::build_request(input, model) {
-            Ok(request) => request,
-            Err(violation) => {
-                return Err(SlotCallError::Contract {
-                    slot,
-                    reason: format!("请求构造失败（输入形态问题）：{}", violation.fact),
-                });
-            }
+        let (url, request, native) = if source == ModelSource::Rerank {
+            let request = match rerank_protocol::build_request(input, model) {
+                Ok(request) => request,
+                Err(violation) => {
+                    return Err(SlotCallError::Contract {
+                        slot,
+                        reason: format!("请求构造失败（输入形态问题）：{}", violation.fact),
+                    });
+                }
+            };
+            (rerank_protocol::endpoint(base_url), request, true)
+        } else {
+            let request = match ordered_protocol::build_request(input, model) {
+                Ok(request) => request,
+                Err(violation) => {
+                    return Err(SlotCallError::Contract {
+                        slot,
+                        reason: format!("请求构造失败（输入形态问题）：{}", violation.fact),
+                    });
+                }
+            };
+            let value = match serde_json::to_value(request) {
+                Ok(value) => value,
+                Err(err) => {
+                    return Err(SlotCallError::Contract {
+                        slot,
+                        reason: format!("chat 请求序列化失败：{err}"),
+                    });
+                }
+            };
+            (text_protocol::endpoint(base_url), value, false)
         };
-        let url = text_protocol::endpoint(base_url);
         let mut builder = http.post(&url).json(&request);
         if let Some(env_name) = api_key_env
             && let Ok(value) = std::env::var(env_name)
@@ -751,15 +782,31 @@ impl SlotClient {
             self.record_failure(slot, reason.clone(), FailureKind::Transient);
             return Err(SlotCallError::Transport { slot, reason });
         }
-        let parsed: text_protocol::ChatResponse = match serde_json::from_str(&body) {
-            Ok(parsed) => parsed,
+        let value: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(value) => value,
             Err(err) => {
                 let reason = format!("响应不是合法 JSON：{err}");
                 self.record_failure(slot, reason.clone(), FailureKind::ShapeMismatch);
                 return Err(SlotCallError::Contract { slot, reason });
             }
         };
-        let output = match ordered_protocol::parse_output(&parsed) {
+        let output = if native {
+            rerank_protocol::parse_output(&value)
+        } else {
+            match serde_json::from_value::<text_protocol::ChatResponse>(value) {
+                Ok(parsed) => ordered_protocol::parse_output(&parsed),
+                Err(err) => Err(crate::slots::ContractViolation {
+                    code: "CAPABILITY_MISMATCH",
+                    fact: format!("chat 响应形状不符：{err}"),
+                    next_steps: vec![
+                        "确认上游返回 chat 形状的 choices[0].message.content".to_owned(),
+                        "把 source 改为通用 LLM 来源，或改用 ordered 适配器".to_owned(),
+                        "从该模型的 serves 里移除此槽位，让它按 §3.8 降级".to_owned(),
+                    ],
+                }),
+            }
+        };
+        let output = match output {
             Ok(output) => output,
             Err(violation) => {
                 let reason = violation.fact.clone();

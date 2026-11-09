@@ -107,6 +107,8 @@ pub enum ModelSource {
     Responses,
     /// TypeSafe /v1/systemone（jev 类判定模型的原生协议，§18.1）。
     SystemOne,
+    /// 原生 /v1/rerank 重排序端点（ADR 0007，§18.1）。
+    Rerank,
 }
 
 impl ModelSource {
@@ -119,6 +121,7 @@ impl ModelSource {
             ModelSource::Anthropic => "anthropic",
             ModelSource::Responses => "responses",
             ModelSource::SystemOne => "systemone",
+            ModelSource::Rerank => "rerank",
         }
     }
 
@@ -130,6 +133,7 @@ impl ModelSource {
                 | ModelSource::Anthropic
                 | ModelSource::Responses
                 | ModelSource::SystemOne
+                | ModelSource::Rerank
         )
     }
 }
@@ -336,7 +340,7 @@ const HTTP_FIELDS: &str = "base_url";
 /// 五个槽位名。
 const SLOT_NAMES: &str = "classify / rerank / decide / summarize / vision";
 /// source 枚举的合法值。
-const SOURCE_VALUES: &str = "auto / local / openai / anthropic / responses / systemone";
+const SOURCE_VALUES: &str = "auto / local / openai / anthropic / responses / systemone / rerank";
 /// mode 枚举的合法值。
 const MODE_VALUES: &str = "auto / embedded / http";
 /// adapter 枚举的合法值。
@@ -699,7 +703,7 @@ pub fn resolve_source(model: &ModelConfig) -> Result<ModelSource, ConfigError> {
         field: "models.<id>.source".to_owned(),
         value: model.base_url.clone(),
         expected: SOURCE_VALUES.to_owned(),
-        fix: "显式写 source（local / openai / anthropic / responses / systemone）".to_owned(),
+        fix: "显式写 source（见 §18.1 的 source 表；systemone / rerank 不参与 auto 推断）".to_owned(),
     })
 }
 
@@ -753,7 +757,7 @@ pub fn resolve_adapter(model: &ModelConfig, slot: SlotKind, source: ModelSource)
         return adapter;
     }
     match source {
-        ModelSource::Local | ModelSource::SystemOne => Adapter::Native,
+        ModelSource::Local | ModelSource::SystemOne | ModelSource::Rerank => Adapter::Native,
         ModelSource::Auto => Adapter::Json,
         ModelSource::Openai | ModelSource::Anthropic | ModelSource::Responses => match slot {
             SlotKind::Classify | SlotKind::Decide => Adapter::Json,
@@ -1322,6 +1326,7 @@ fn parse_source_value(text: &str) -> Option<ModelSource> {
         "anthropic" => Some(ModelSource::Anthropic),
         "responses" => Some(ModelSource::Responses),
         "systemone" => Some(ModelSource::SystemOne),
+        "rerank" => Some(ModelSource::Rerank),
         _ => None,
     }
 }
@@ -1495,7 +1500,7 @@ mod tests {
         assert_eq!(errors[0].value.as_deref(), Some("gpt"));
         assert_eq!(
             errors[0].expected,
-            "auto / local / openai / anthropic / responses / systemone"
+            "auto / local / openai / anthropic / responses / systemone / rerank"
         );
     }
 
@@ -1562,7 +1567,7 @@ mod tests {
         assert_eq!(errors[0].code, "CONFIG_SOURCE_UNRESOLVED");
         assert_eq!(
             errors[0].fix,
-            "显式写 source（local / openai / anthropic / responses / systemone）"
+            "显式写 source（见 §18.1 的 source 表；systemone / rerank 不参与 auto 推断）"
         );
     }
 
@@ -1608,6 +1613,24 @@ mod tests {
             Some("TOOLGATE_TEST_KEY_ABSENT_9F3A")
         );
         assert_eq!(errors[0].field, "models.jev.api_key_env");
+    }
+
+    /// ADR 0007：`source: rerank` 可解析、走 native、属外部来源。
+    #[test]
+    fn rerank_source_parses_and_uses_native_adapter() {
+        let config = parse_config(
+            "models:\n  jina:\n    source: rerank\n    base_url: http://127.0.0.1:10020\n    model: /models/jina\n    serves: [rerank]\n",
+            "test.yaml",
+        )
+        .unwrap();
+        let model = &config.models[0];
+        assert_eq!(model.config.source, Some(ModelSource::Rerank));
+        assert!(ModelSource::Rerank.is_external());
+        assert_eq!(resolve_source(&model.config).unwrap(), ModelSource::Rerank);
+        assert_eq!(
+            resolve_adapter(&model.config, SlotKind::Rerank, ModelSource::Rerank),
+            Adapter::Native
+        );
     }
 
     /// §3.10：slots 指向不存在的模型被拒。

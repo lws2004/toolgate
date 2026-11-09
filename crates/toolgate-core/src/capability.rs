@@ -99,6 +99,20 @@ fn llm_protocol(slot: SlotKind) -> Capability {
     }
 }
 
+/// §18.1：原生 rerank 协议只返回排序结果，不生成文本、不出校准概率、不传图。
+fn rerank(slot: SlotKind) -> Capability {
+    match slot {
+        SlotKind::Rerank => cap(
+            CapabilityGrade::Available,
+            "原生 /v1/rerank 返回候选相关度排序，满足 §3.2 的 rerank 契约",
+        ),
+        _ => cap(
+            CapabilityGrade::Unavailable,
+            "rerank 协议只返回排序结果，缺文本 / 概率 / 图像输出通道；从 serves 移除该槽位或改用其它来源",
+        ),
+    }
+}
+
 /// §19.6 / §3.11：当前构建是否包含该来源所需的协议客户端。
 ///
 /// 外部协议来源（openai / anthropic / responses / systemone）走 HTTP 客户端，
@@ -109,7 +123,8 @@ pub fn client_available(source: ModelSource) -> bool {
         ModelSource::Openai
         | ModelSource::Anthropic
         | ModelSource::Responses
-        | ModelSource::SystemOne => cfg!(feature = "external-protocols"),
+        | ModelSource::SystemOne
+        | ModelSource::Rerank => cfg!(feature = "external-protocols"),
         ModelSource::Auto | ModelSource::Local => true,
     }
 }
@@ -132,6 +147,7 @@ pub fn source_slot_at(source: ModelSource, slot: SlotKind, grade: CapabilityGrad
 pub fn source_slot_capability(source: ModelSource, slot: SlotKind) -> Capability {
     match source {
         ModelSource::SystemOne => systemone(slot),
+        ModelSource::Rerank => rerank(slot),
         ModelSource::Openai | ModelSource::Anthropic | ModelSource::Responses => llm_protocol(slot),
         ModelSource::Auto | ModelSource::Local => cap(
             CapabilityGrade::Unspecified,
@@ -144,13 +160,14 @@ pub fn source_slot_capability(source: ModelSource, slot: SlotKind) -> Capability
 mod tests {
     use super::*;
 
-    const SOURCES: [ModelSource; 6] = [
+    const SOURCES: [ModelSource; 7] = [
         ModelSource::Auto,
         ModelSource::Local,
         ModelSource::Openai,
         ModelSource::Anthropic,
         ModelSource::Responses,
         ModelSource::SystemOne,
+        ModelSource::Rerank,
     ];
 
     /// §19.6：外部协议来源的可用性随构建 feature 变化；local / auto 恒可用。
@@ -162,6 +179,7 @@ mod tests {
             ModelSource::Anthropic,
             ModelSource::Responses,
             ModelSource::SystemOne,
+            ModelSource::Rerank,
         ] {
             assert_eq!(client_available(source), expected_external, "{source:?}");
             let matrix_usable = source_slot_capability(source, SlotKind::Decide).grade
@@ -223,6 +241,22 @@ mod tests {
         assert_eq!(grade(SlotKind::Classify), G::Limited);
         assert_eq!(grade(SlotKind::Decide), G::Available);
         assert_eq!(grade(SlotKind::Vision), G::Available);
+    }
+
+    /// §18.1 rerank 列：只有 rerank 槽位可用，其余四个槽位不可用。
+    #[test]
+    fn rerank_row_matches_spec_table() {
+        use CapabilityGrade as G;
+        let grade = |slot| source_slot_capability(ModelSource::Rerank, slot).grade;
+        assert_eq!(grade(SlotKind::Rerank), G::Available);
+        for slot in [
+            SlotKind::Classify,
+            SlotKind::Decide,
+            SlotKind::Summarize,
+            SlotKind::Vision,
+        ] {
+            assert_eq!(grade(slot), G::Unavailable, "{slot:?}");
+        }
     }
 
     /// §18.1 三个通用 LLM 列：decide / rerank 受限，其余可用。

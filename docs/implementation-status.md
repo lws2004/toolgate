@@ -7,7 +7,7 @@
 > **更新纪律**：每次改动落地后更新对应行（状态 + 证据）。判断下一步只读本文件，
 > 不要重新扫描代码与架构正文——那既慢又容易与事实源漂移。
 >
-> 最后更新：2026-11-10（§15.2 判定日志落地并接线五个判定点；验证基线 441/435）
+> 最后更新：2026-11-10（ADR 0007 落地：source: rerank 专属协议；验证基线 448/442）
 
 ## 怎么用
 
@@ -35,6 +35,7 @@
 | 降级路径（槽位不可用回退 L0） | 完成 | §3.8 | 各工具 `unavailable` 分支 + `SLOT_UNAVAILABLE` 告知 |
 | 错误自检三层 + ErrorCode 12 值域 | 完成 | §1.4.5 | `error.rs`；测试 `every_error_carries_next_steps` |
 | slmStatus 状态真实性（构建可用性） | 完成 | §7.3 / §19.6 | `capability::client_available` / `source_slot_usable`：默认构建下外部协议来源标 `unavailable`，不再谎报 `ready`；测试按 feature 分支 |
+| source: rerank 专属协议（ADR 0007） | 完成 | §18.1 / §3.5 / ADR 0007 | `config.rs` 的 `ModelSource::Rerank`、`capability.rs` 能力矩阵新列、`slm/rerank_protocol.rs`（原生 `/v1/rerank` 请求/响应）、client 按 source 分流的 HTTP 路径；7 个新单测；`toolgate config check --config` 实测 rerank 绑定 `native` |
 
 ## 阶段 1.5：兼容性
 
@@ -113,9 +114,10 @@
 
 | 命令 | 结果（2026-11-10 复测） |
 |---|---|
-| `cargo test --workspace` | 441 passed（默认构建；含 4 个阶段 5 集成用例、1 个 MCP 握手序列用例与 3 个判定日志单测） |
-| `cargo test --workspace --features external-protocols` | 435 passed（feature 构建；6 个默认构建专属的降级测试被 cfg 隔离，另含 3 个判定日志单测） |
+| `cargo test --workspace` | 448 passed（默认构建；含 4 个阶段 5 集成用例、1 个 MCP 握手序列用例、3 个判定日志单测与 7 个 rerank 协议单测） |
+| `cargo test --workspace --features external-protocols` | 442 passed（feature 构建；6 个默认构建专属的降级测试被 cfg 隔离，另含 3 个判定日志单测与 7 个 rerank 协议单测） |
 | `cargo clippy --workspace --all-targets` | No issues |
+| `cargo clippy --workspace --all-targets --features external-protocols` | No issues |
 | `cargo build --release` | 零警告 |
 | `./scripts/check-doc.sh` | 通过 |
 

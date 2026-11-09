@@ -596,7 +596,8 @@ toolgate 上一轮已接它（§18.1）。
 「每个问题一个概率」，没有类型维度）。这个差距本轮评估过「要不要给契约加类型
 维度」，结论是**不采纳**（理由与重新评估的触发条件见
 [architecture-review-2026-11-09-typed-decide-align.md](../architecture-review-2026-11-09-typed-decide-align.md)
-第 5 节）——**§3.2 正文保持不动**.
+第 5 节）——**§3.2 正文保持不动**。
+
 ## E.11 原生 rerank 端点实测（2026-11-10）
 
 用途：ADR 0007 新增 `source: rerank` 的上游事实依据。按 §4「正文只写决策」，

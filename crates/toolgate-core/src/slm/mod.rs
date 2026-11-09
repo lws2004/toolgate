@@ -11,6 +11,7 @@ pub mod classify_protocol;
 pub mod client;
 pub mod decide_protocol;
 pub mod ordered_protocol;
+pub mod rerank_protocol;
 pub mod systemone;
 pub mod text_protocol;
 pub mod vision_protocol;

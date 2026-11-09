@@ -123,7 +123,7 @@ slm:
 | `models.<id>.base_url` | 空 | 外部来源的接口地址（默认仅 loopback） |
 | `models.<id>.model` | 空 | 外部来源的上游模型名 |
 | `models.<id>.api_key_env` | 空 | 外部来源的密钥环境变量名，不落配置 |
-| `models.<id>.allow_remote` | `false` | 是否允许非 loopback 的外部协议地址（含 `rerank` 等非 OpenAI 兼容端点；不推荐，§18.1） |
+| `models.<id>.allow_remote` | `false` | 是否允许非 loopback 的外部来源地址（含 `rerank` 等非 OpenAI 兼容端点；不推荐，§18.1） |
 | `slots` | 空 | 显式覆盖槽位绑定；默认空 = 按 serves 自动解析（§3.10） |
 | `slots.<name>` | 自动 | 槽位 → 模型 id 的显式覆盖（§3.10） |
 | `slm.mode` | `auto` | 按槽位分档选择 embedded/http（§18.1） |
