@@ -272,10 +272,11 @@ feature 默认关闭，默认构建下这条路径不可用（§19.6）。
   最大者 < 0.5 记 unknown；need_pixels 按 §10.1 三档（不另设阈值）；vision 任务档
   按 kind 分流（UI 截图 → ground / 文档与代码截图 → OCR / 图表与照片 → describe）。
   auto 的三档分别给原图 / 结构化 / 两者都给（结构化在前）；decide 不可用时保守给
-  原图并告知。真实链路实测（2026-11-09 本机 StartLux systemone，320x180 合成图）：
-  七问一次调用返回（decideLatencyMs=2674），needPixels=0.708 落中间区间；imageKind
-  判 unknown（合成图不是真实 UI 截图，分类置信不足）——**真实截图样本复核前不勾
-  阶段 2 验收**。
+  原图并告知。真实链路实测（2026-11-09 本机 StartLux systemone）：320x180 合成图
+  七问一次调用返回，needPixels=0.708 落中间区间、imageKind 判 unknown（合成图不是
+  真实 UI 截图）；另用真实截图（2346x1032）实测 imageKind=ui_screenshot、hasText=true、
+  need_pixels=0.91（OriginalOnly），判定形态正确——**真实场景多图复核与阶段 2 整体
+  验收仍待完成**。
 - **阶段 2 验收项仍未勾选**：read 图片的实现已接入（vision 文本理解 + decide 判定 +
   按 kind 分流），auto 判定正确性待真实截图样本复核；classify 槽位仍未实现（阶段 1
   剩余项）。
