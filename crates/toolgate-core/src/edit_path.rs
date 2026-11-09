@@ -440,6 +440,29 @@ pub fn change_facts(
     })
 }
 
+/// 生成 unified diff（§5.7 的 facts 共用；edit / write 同一实现）。
+pub fn unified_diff(before: &str, after: &str, label: &str) -> String {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(before, after);
+    let mut out = String::new();
+    out.push_str(&format!("--- {label}\n+++ {label}\n"));
+    for group in diff.grouped_ops(3) {
+        for op in group {
+            for change in diff.iter_changes(&op) {
+                let sign = match change.tag() {
+                    ChangeTag::Delete => '-',
+                    ChangeTag::Insert => '+',
+                    ChangeTag::Equal => ' ',
+                };
+                out.push(sign);
+                out.push_str(change.value().trim_end_matches('\n'));
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

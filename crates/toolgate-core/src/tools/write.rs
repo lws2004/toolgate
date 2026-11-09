@@ -3,12 +3,19 @@
 //! 只做新建或整体覆盖。局部修改请用 edit——write 覆盖一个已有文件
 //! 时会把整份内容记进上下文，是 token 上的浪费。
 
+use std::path::Path;
+
 use serde_json::{Value, json};
 
 use super::{ToolContext, ToolResponse, ToolSpec, required_str};
 use crate::ToolError;
 use crate::compat::{CompatConfig, resolve_intent};
+use crate::edit_path::{
+    FileFacts, change_facts, detect_eol, diff_stats, nearby_build_files, unified_diff,
+};
 use crate::locale::{t, tformat};
+use crate::read_path::display_path;
+use crate::truncate::{TruncationOptions, truncate_head};
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -51,17 +58,25 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
 
     // 覆盖已有文件时沿用它的编码；新建文件用 UTF-8。
     // 这样 write 一个 GBK 文件不会把它悄悄转成 UTF-8。
-    let (encoding, snapshot) = if existed {
+    let (encoding, snapshot, original) = if existed {
         match tokio::fs::read(&path).await {
             Ok(old_bytes) => {
                 let enc = crate::encoding::FileEncoding::detect(&old_bytes);
                 let (old_text, _) = enc.decode(&old_bytes);
-                (enc, ctx.snapshots.snapshot(&path, &old_text).ok())
+                (enc, ctx.snapshots.snapshot(&path, &old_text).ok(), old_text)
             }
-            Err(_) => (crate::encoding::FileEncoding::default(), None),
+            Err(_) => (
+                crate::encoding::FileEncoding::default(),
+                None,
+                String::new(),
+            ),
         }
     } else {
-        (crate::encoding::FileEncoding::default(), None)
+        (
+            crate::encoding::FileEncoding::default(),
+            None,
+            String::new(),
+        )
     };
 
     // 目标编码无法表示新内容时明确报错，不静默替换成问号。
@@ -71,6 +86,24 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     tokio::fs::write(&path, &out_bytes).await?;
 
     let lines = content.lines().count();
+    // §5.7：改动后的事实，不含「你该跑什么」的指令；diff 超长时截断。
+    let diff = unified_diff(&original, content, &display_path(&path, &ctx.cwd));
+    let diff_truncated = truncate_head(&diff, TruncationOptions::new(200, 40_000));
+    let stats = diff_stats(&original, content);
+    let file_facts = FileFacts {
+        lines,
+        bytes: out_bytes.len(),
+        encoding: encoding.name(),
+        eol: detect_eol(&original),
+    };
+    let nearby = nearby_build_files(path.parent().unwrap_or_else(|| Path::new(".")));
+    let facts = change_facts(
+        &display_path(&path, &ctx.cwd),
+        stats,
+        file_facts,
+        nearby,
+        &diff_truncated.content,
+    );
     let snapshot_meta = snapshot
         .as_ref()
         .map(|s| json!(s.path.display().to_string()))
@@ -102,6 +135,8 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "created": !existed,
         "snapshot": snapshot_meta,
         "encoding": encoding.name(),
+        "facts": facts,
+        "diffTruncated": diff_truncated.truncated,
     })))
 }
 
@@ -117,8 +152,57 @@ mod tests {
             .await
             .expect("write ok");
         assert_eq!(resp.meta["created"], json!(true));
+        assert_eq!(resp.meta["facts"]["changed"]["added"], json!(1));
+        assert_eq!(resp.meta["facts"]["file"]["lines"], json!(1));
         let read_back = std::fs::read_to_string(dir.join("a/b/c.txt")).expect("read back");
         assert_eq!(read_back, "hello\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.7：新建文件的 facts 含 diff 统计、file 事实与同目录构建描述文件。
+    #[tokio::test]
+    async fn write_facts_include_diff_file_and_nearby_build_files() {
+        let dir = std::env::temp_dir().join(format!("tg-write-facts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("write");
+        let ctx = ToolContext::new(&dir).expect("ctx");
+        let resp = run(
+            &json!({ "path": "a.txt", "content": "hello\nworld\n" }),
+            &ctx,
+        )
+        .await
+        .expect("write ok");
+        let facts = &resp.meta["facts"];
+        assert_eq!(facts["changed"]["path"], json!("<workspace>/a.txt"));
+        assert_eq!(facts["changed"]["added"], json!(2));
+        assert_eq!(facts["changed"]["removed"], json!(0));
+        assert_eq!(facts["file"]["lines"], json!(2));
+        assert_eq!(facts["nearby"], json!(["Cargo.toml"]));
+        let diff = facts["diff"].as_str().unwrap();
+        assert!(diff.contains("+hello"));
+        assert!(
+            !diff.contains("/Users/"),
+            "diff label 不应暴露绝对路径：{diff}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.7：覆盖已有文件时 changed 同时给出 added / removed。
+    #[tokio::test]
+    async fn overwrite_reports_added_and_removed() {
+        let dir = std::env::temp_dir().join(format!("tg-write-overwrite-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let ctx = ToolContext::new(&dir).expect("ctx");
+        run(&json!({ "path": "a.txt", "content": "a\nb\n" }), &ctx)
+            .await
+            .expect("first write");
+        let resp = run(&json!({ "path": "a.txt", "content": "a\nc\n" }), &ctx)
+            .await
+            .expect("second write");
+        assert_eq!(resp.meta["created"], json!(false));
+        assert_eq!(resp.meta["facts"]["changed"]["added"], json!(1));
+        assert_eq!(resp.meta["facts"]["changed"]["removed"], json!(1));
+        assert_eq!(resp.meta["facts"]["file"]["lines"], json!(2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

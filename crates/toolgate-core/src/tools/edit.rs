@@ -26,7 +26,7 @@ use crate::edit_path::{
     EditDecider, EditDecision, EditFuture, FileFacts, MatchLevel, SEMANTIC_SIMILARITY_THRESHOLD,
     SEMANTIC_STATE_CHARS, SEMANTIC_TOP_K, apply_gate, change_facts, classify_match, detect_eol,
     diff_stats, mechanical_attribution, merge_edit_decision, nearby_build_files, plan_edit,
-    similar_candidates, suggestion_for,
+    similar_candidates, suggestion_for, unified_diff,
 };
 use crate::hashline::{line_anchor, parse_anchor};
 use crate::locale::t;
@@ -141,7 +141,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         .map_err(|e| ToolError::failed(format!("{} 写回失败：{e}", path.display())))?;
     tokio::fs::write(&path, &out_bytes).await?;
 
-    let diff = unified_diff(&original, &updated, &path.display().to_string());
+    let diff = unified_diff(&original, &updated, &display_path(&path, &ctx.cwd));
     let snapshot_meta = snapshot
         .as_ref()
         .map(|s| json!(s.path.display().to_string()))
@@ -674,29 +674,6 @@ fn normalize_wide(text: &str) -> String {
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// 生成 unified diff 供模型确认改动。
-fn unified_diff(before: &str, after: &str, label: &str) -> String {
-    use similar::{ChangeTag, TextDiff};
-    let diff = TextDiff::from_lines(before, after);
-    let mut out = String::new();
-    out.push_str(&format!("--- {label}\n+++ {label}\n"));
-    for group in diff.grouped_ops(3) {
-        for op in group {
-            for change in diff.iter_changes(&op) {
-                let sign = match change.tag() {
-                    ChangeTag::Delete => '-',
-                    ChangeTag::Insert => '+',
-                    ChangeTag::Equal => ' ',
-                };
-                out.push(sign);
-                out.push_str(change.value().trim_end_matches('\n'));
-                out.push('\n');
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]
