@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use crate::bash_path::intent_tag;
+use crate::compat::{CompatConfig, resolve_intent};
+use crate::decision::Intent;
+use crate::slots::{SlotKind, SlotSet};
 use crate::spill::SpillStore;
 use crate::truncate::TruncationOptions;
 
@@ -156,6 +160,40 @@ impl ToolSpec {
     }
 }
 
+/// §7.3 返回契约 / §13.3 / §18.7：返回出口统一的协商状态。
+///
+/// 槽位全空是当前的部署事实（模型后端属可选层，§19.6），因此未配置的槽位标
+/// unavailable；没有判定输出时 confidence 给 null，不编造（§4.6）。
+/// 一个函数产出、六个工具共用，避免各工具自行拼装形成双源。
+pub fn negotiation_meta(intent: Intent, slots: &SlotSet) -> Value {
+    let mut status = serde_json::Map::new();
+    for kind in SlotKind::ALL {
+        let state = if slots.is_available(kind) {
+            "ready"
+        } else {
+            "unavailable"
+        };
+        status.insert(kind.as_str().to_owned(), json!(state));
+    }
+    json!({
+        "intent": intent_tag(intent),
+        "slmStatus": Value::Object(status),
+        "confidence": Value::Null,
+    })
+}
+
+/// 把协商状态并入一次工具返回的 meta；工具已写过的同名键不覆盖。
+fn inject_negotiation_meta(resp: &mut ToolResponse, intent: Intent) {
+    let extra = negotiation_meta(intent, &SlotSet::none());
+    if !resp.meta.is_object() {
+        resp.meta = json!({});
+    }
+    let target = resp.meta.as_object_mut().expect("meta 已确保为对象");
+    for (key, value) in extra.as_object().expect("协商状态是对象") {
+        target.entry(key.clone()).or_insert(value.clone());
+    }
+}
+
 /// 全部工具的规格表。顺序即 MCP tools/list 的顺序。
 pub fn all_specs() -> Vec<ToolSpec> {
     vec![
@@ -174,7 +212,10 @@ pub async fn dispatch(
     args: &Value,
     ctx: &ToolContext,
 ) -> Result<ToolResponse, crate::ToolError> {
-    match name {
+    // §13.3 / §7.3：协商状态在返回出口统一注入，六个工具共用一份事实源。
+    let intent =
+        resolve_intent(args, &CompatConfig::default()).map_err(crate::ToolError::bad_argument)?;
+    let mut resp = match name {
         "read" => read::run(args, ctx).await,
         "write" => write::run(args, ctx).await,
         "edit" => edit::run(args, ctx).await,
@@ -182,7 +223,9 @@ pub async fn dispatch(
         "bash" => bash::run(args, ctx).await,
         "task" => task::run(args, ctx).await,
         other => Err(crate::ToolError::unknown_tool(other.to_owned())),
-    }
+    }?;
+    inject_negotiation_meta(&mut resp, intent);
+    Ok(resp)
 }
 
 /// 从入参对象里取必填字符串。
@@ -210,6 +253,38 @@ pub(crate) fn optional_bool(args: &Value, key: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decision::Intent;
+    use crate::slots::{SlotKind, SlotSet};
+
+    #[test]
+    fn negotiation_meta_marks_all_slots_unavailable_without_fabricated_confidence() {
+        let meta = negotiation_meta(Intent::Raw, &SlotSet::none());
+        assert_eq!(meta["intent"], json!("raw"));
+        assert!(meta["confidence"].is_null());
+        let status = meta["slmStatus"].as_object().expect("slmStatus 是对象");
+        assert_eq!(status.len(), 5);
+        for kind in SlotKind::ALL {
+            assert_eq!(status[kind.as_str()], json!("unavailable"));
+        }
+        let ready = negotiation_meta(Intent::Auto, &SlotSet::all());
+        assert_eq!(ready["intent"], json!("auto"));
+        assert_eq!(ready["slmStatus"]["decide"], json!("ready"));
+    }
+
+    #[test]
+    fn injection_keeps_existing_meta_and_fills_public_fields() {
+        let mut resp = ToolResponse::text("hi").with_meta(json!({ "intent": "raw", "custom": 7 }));
+        inject_negotiation_meta(&mut resp, Intent::Raw);
+        assert_eq!(resp.meta["intent"], json!("raw"));
+        assert_eq!(resp.meta["custom"], json!(7));
+        assert_eq!(resp.meta["slmStatus"]["decide"], json!("unavailable"));
+        assert!(resp.meta["confidence"].is_null());
+
+        let mut plain = ToolResponse::text("hi");
+        inject_negotiation_meta(&mut plain, Intent::Auto);
+        assert_eq!(plain.meta["intent"], json!("auto"));
+        assert!(plain.meta["confidence"].is_null());
+    }
 
     /// §13.3 / §4.6：六个工具的规格声明必须齐全且一致。
     #[test]

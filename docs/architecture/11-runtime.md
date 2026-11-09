@@ -106,7 +106,7 @@ dsh-ledger-compact 的对照与六条借鉴见附件 E.5。
 |---|---|
 | 每个工具的 run() | 从「执行 → 返回」改为「执行 → 理解 → 协商 → 返回」 |
 | ToolResponse | 增加 confidence、slmStatus、intent、notices 字段（含 meta.noticeOverflow）；content 与 structuredContent 按 §4.4/§4.4b 分流；输出密度按 §4.7 |
-| ToolSpec | 每个工具增加 intent 参数与 outputSchema 声明；description 按 §4.6 写三段式（能做什么 / 不能做什么 / 什么时候用别的工具） |
+| ToolSpec | 每个工具增加 intent 参数与 outputSchema 声明；description 按 §4.6 写三段式（能做什么 / 不能做什么 / 什么时候用别的工具）。write / edit 的 intent 只做统一校验与标注，输出形态按 §4.0 固定 |
 | ToolError | 按 §1.4.5 重构：四个变体 + ErrorCode 枚举 + 三段式 |
 | Cargo.toml | 按 §19.6 划分 default / optional feature；模型后端 feature 默认关闭 |
 
@@ -198,7 +198,7 @@ PTC 里每次子调用仍是一个独立的 MCP 请求，工具层不做批量�
 4. **edit**（第四）→ 四级匹配 + d1 失败归因 + 改动后的事实返回（§5.7）
 5. **task**（第五）→ d1 状态判断
 
-验收：每个工具都有 raw 与 summary 两条路径，且 auto 判定正确；理解链（§4.8）先在 bash 与 read 图片落地，多步与并发行为有测试。
+验收：bash / read 图片 / search / task 都有 raw 与协商两条路径，且 auto 判定正确；edit 的失败归因按 §5.4 在 d1 槽位不可用时降级告知；write / edit 不产生可协商的大块内容（§4.0 是上位约束，不是放宽验收），intent 只做统一校验与 meta 标注；理解链（§4.8）先在 bash 与 read 图片落地，多步与并发行为有测试。
 
 ### 阶段 3：协商层与 intent
 

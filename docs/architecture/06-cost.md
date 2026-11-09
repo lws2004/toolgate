@@ -197,5 +197,13 @@ p < 0.60          → 同时给出本地判定与原始内容，LOW_CONFIDENCE �
 5. **能力不符也算降级**：模型声明了 `serves` 但输出不符合槽位契约时，按 §3.11
    标记 degraded / disabled，并按 §4.4b 的 DEGRADED 告知；连续失败后禁用该槽位。
 
+**返回契约（阶段 3 落地）**：`slmStatus` 是对象，键为五个槽位名（classify / rerank /
+decide / summarize / vision），取值是封闭四态：`ready`（可用）/ `loading`（已配置、懒加载
+未就绪，§18.1 第 3 条）/ `unavailable`（未配置或已卸载，§3.8）/ `degraded`（形状不符或
+连续失败被禁用，§3.11）。五个槽位全空时全部为 `unavailable`。`meta.confidence` 是本次
+本地判定的概率数值，**没有判定输出时为 `null`，不填 0、不省略成假值**（§4.6 诚实）。
+`meta.intent` 写本次生效的五档值（§4.2）。三者由工具层在返回出口统一注入，六个工具
+共用一份事实源，各工具不自行拼装。
+
 ---
 

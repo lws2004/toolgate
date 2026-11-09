@@ -281,6 +281,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tools_call_carries_unified_negotiation_meta() {
+        let mut s = test_server();
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                "params": {
+                    "name": "write",
+                    "arguments": { "path": "neg-meta.txt", "content": "hi" }
+                }
+            }),
+        )
+        .await;
+        let sc = &resp["result"]["structuredContent"];
+        assert_eq!(sc["intent"], json!("raw"));
+        assert_eq!(sc["slmStatus"]["decide"], json!("unavailable"));
+        assert!(sc["confidence"].is_null());
+    }
+
+    #[tokio::test]
     async fn unknown_tool_returns_is_error() {
         let mut s = test_server();
         let resp = call(

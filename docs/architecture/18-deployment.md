@@ -63,7 +63,7 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
    启动时按模型文件大小估算常驻内存，估算值超过物理内存 50% 即拒绝启动。
 3. **加载时机：热槽位启动时预加载，冷槽位首次调用时懒加载。** 预加载在后台
    线程进行，不阻塞 MCP 启动；未就绪期间该槽位按不可用降级，content 按 §4.4b 的
-   `SLOT_UNAVAILABLE` 告知（fallback=loading），`meta` 的 `slmStatus: loading`。
+   `SLOT_UNAVAILABLE` 告知（fallback=loading），`meta.slmStatus` 中该槽位为 `loading`（形状见 §7.3 返回契约）。
 4. **并发：一个模型实例一个专用推理线程 + 有界队列，实例内推理串行。**
    native 推理上下文不是线程安全的，不能直接在 tokio task 里跑；队列满时返回
    排队深度或按 §7.3 降级，不无界堆积。不同实例之间可以并行。理解链内的并发
@@ -455,7 +455,7 @@ spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到�
 }
 ```
 
-- 响应：`{content, structuredContent:{..., notices}, meta:{slmStatus, confidence, redacted, truncated, spillPointer, noticeOverflow}, isError}`；`notices` 与 MCP 工具返回同源（§4.4b）；`meta` 的 redacted/truncated 是派生视图，不单独承载告知；
+- 响应：`{content, structuredContent:{..., notices}, meta:{intent, slmStatus, confidence, redacted, truncated, spillPointer, noticeOverflow}, isError}`；`notices` 与 MCP 工具返回同源（§4.4b）；`meta` 的 redacted/truncated 是派生视图，不单独承载告知；
 - 处理链与 `read` 相同：类型/大小检查 → 截断/落盘 → 脱敏（含路径用户名）→ 本地 SLM → 协商；web 内容按不可信来源处理（§15.1）；
 - 失败返回结构化 error + next；`govern.fail_open` 默认 `false`，不静默放行敏感内容。
 
