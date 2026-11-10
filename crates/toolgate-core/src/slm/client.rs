@@ -328,7 +328,7 @@ impl SlotClient {
             None => return Err(SlotCallError::NotBound { slot }),
         };
         let source = binding.and_then(|b| b.source).unwrap_or(ModelSource::Auto);
-        // §3.10 准入：json 适配器只在通用 LLM 协议来源上可用（systemone 的 choice 映射未落）。
+        // §3.10 准入：能力矩阵是唯一事实源；systemone 的 choice 映射已落（Available）。
         let capability = crate::capability::source_slot_capability(source, slot);
         if capability.grade != crate::capability::CapabilityGrade::Available {
             return Err(SlotCallError::ClientUnavailable {
@@ -377,8 +377,13 @@ impl SlotClient {
                     });
                 }
             };
-            self.classify_over_http(http, input, &base_url, &model_name, api_key_env.as_deref())
-                .await
+            if matches!(source, ModelSource::SystemOne) {
+                self.classify_over_systemone(http, input, &base_url, api_key_env.as_deref())
+                    .await
+            } else {
+                self.classify_over_http(http, input, &base_url, &model_name, api_key_env.as_deref())
+                    .await
+            }
         }
         #[cfg(not(feature = "external-protocols"))]
         {
@@ -468,6 +473,77 @@ impl SlotClient {
             output,
             latency_ms: started.elapsed().as_millis() as u64,
             calibrated: false,
+        })
+    }
+
+    /// systemone 原生路径：choice → 逐标签分数（校准概率，§3.10 / §19.6）。
+    #[cfg(feature = "external-protocols")]
+    async fn classify_over_systemone(
+        &self,
+        http: &reqwest::Client,
+        input: &ClassifyInput,
+        base_url: &str,
+        api_key_env: Option<&str>,
+    ) -> Result<ClassifyOutcome, SlotCallError> {
+        let slot = SlotKind::Classify;
+        let request = match systemone::build_classify_request(input) {
+            Ok(request) => request,
+            Err(violation) => {
+                let reason = format!("请求构造失败（输入形态问题）：{}", violation.fact);
+                return Err(SlotCallError::Contract { slot, reason });
+            }
+        };
+        let url = systemone::endpoint(base_url);
+        let mut builder = http.post(&url).json(&request);
+        if let Some(env_name) = api_key_env
+            && let Ok(value) = std::env::var(env_name)
+        {
+            builder = builder.bearer_auth(value);
+        }
+        let started = Instant::now();
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(err) => {
+                let reason = format!("请求 {url} 失败：{err}");
+                self.record_failure(slot, reason.clone(), FailureKind::Transient);
+                return Err(SlotCallError::Transport { slot, reason });
+            }
+        };
+        let status = response.status();
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(err) => {
+                let reason = format!("读取 {url} 响应失败：{err}");
+                self.record_failure(slot, reason.clone(), FailureKind::Transient);
+                return Err(SlotCallError::Transport { slot, reason });
+            }
+        };
+        if !status.is_success() {
+            let reason = format!("上游返回 {status}：{}", summarize(&body));
+            self.record_failure(slot, reason.clone(), FailureKind::Transient);
+            return Err(SlotCallError::Transport { slot, reason });
+        }
+        let parsed: systemone::SystemOneResponse = match serde_json::from_str(&body) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                let reason = format!("响应不是合法 JSON：{err}");
+                self.record_failure(slot, reason.clone(), FailureKind::ShapeMismatch);
+                return Err(SlotCallError::Contract { slot, reason });
+            }
+        };
+        let output = match systemone::parse_classify_output(&parsed, input) {
+            Ok(output) => output,
+            Err(violation) => {
+                let reason = violation.fact.clone();
+                self.record_failure(slot, reason.clone(), FailureKind::ShapeMismatch);
+                return Err(SlotCallError::Contract { slot, reason });
+            }
+        };
+        self.record_success(slot);
+        Ok(ClassifyOutcome {
+            output,
+            latency_ms: started.elapsed().as_millis() as u64,
+            calibrated: true,
         })
     }
 
@@ -1319,17 +1395,39 @@ mod tests {
         }
     }
 
-    /// §3.10 准入：systemone 的 choice 映射未落，classify 受限，不是 Available。
+    /// §3.10 准入：systemone 的 choice 映射已落，classify 不再因「受限」被拒；
+    /// 默认构建只到 feature 边界（§19.6）。
+    #[cfg(not(feature = "external-protocols"))]
     #[tokio::test]
-    async fn classify_with_systemone_source_is_rejected() {
+    async fn classify_with_systemone_source_reports_missing_feature() {
         let client = SlotClient::new(classify_config("systemone"));
         match client.classify(&classify_input()).await {
             Err(SlotCallError::ClientUnavailable { slot, reason }) => {
                 assert_eq!(slot, SlotKind::Classify);
-                assert!(reason.contains("limited"), "{reason}");
+                assert!(reason.contains("external-protocols"), "{reason}");
+                assert!(!reason.contains("limited"), "{reason}");
             }
             other => panic!("应当是 ClientUnavailable：{other:?}"),
         }
+    }
+
+    /// feature 构建：systemone 的 classify 分流到 /v1/systemone，不在准入处被拒。
+    #[cfg(feature = "external-protocols")]
+    #[tokio::test]
+    async fn classify_with_systemone_source_reaches_http() {
+        let mut cfg = classify_config("systemone");
+        cfg.models[0].config.base_url = Some("http://127.0.0.1:1".to_owned());
+        let client = SlotClient::new(cfg);
+        match client.classify(&classify_input()).await {
+            Err(SlotCallError::Transport { slot, .. }) => assert_eq!(slot, SlotKind::Classify),
+            other => panic!("应当走到 HTTP 发送阶段：{other:?}"),
+        }
+        let health = client.health();
+        let classify_health = health
+            .iter()
+            .find(|(kind, _)| *kind == SlotKind::Classify)
+            .unwrap();
+        assert_eq!(classify_health.1.failure_count, 1);
     }
 
     /// §19.6：默认构建不含外部协议客户端，classify 走降级。

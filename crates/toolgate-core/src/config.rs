@@ -1071,7 +1071,8 @@ fn parse_paths(value: Option<&YamlValue>, errors: &mut Vec<ConfigError>) -> Path
 
 // ---------- 内部：绑定与取值辅助 ----------
 
-/// 解析五个槽位的绑定（§3.10）：显式覆盖优先，否则按 models 声明顺序取第一个 serves 命中的模型。
+/// 解析五个槽位的绑定（§3.10）：显式覆盖优先；否则 `source: systemone` 的模型优先，
+/// 没有再按 models 声明顺序取第一个 serves 命中的模型（§18.1「能用 systemone 就用它」）。
 fn build_bindings(
     models: &[ModelEntry],
     slots: &BTreeMap<String, String>,
@@ -1082,13 +1083,18 @@ fn build_bindings(
         let explicit_model = slots.get(slot.as_str());
         let (model_id, explicit) = match explicit_model {
             Some(model_id) => (Some(model_id.clone()), true),
-            None => (
-                models
+            None => {
+                let candidates: Vec<&ModelEntry> = models
                     .iter()
-                    .find(|entry| entry.config.serves.contains(&slot))
-                    .map(|entry| entry.id.clone()),
-                false,
-            ),
+                    .filter(|entry| entry.config.serves.contains(&slot))
+                    .collect();
+                let chosen = candidates
+                    .iter()
+                    .find(|entry| matches!(entry.config.source, Some(ModelSource::SystemOne)))
+                    .copied()
+                    .or_else(|| candidates.first().copied());
+                (chosen.map(|entry| entry.id.clone()), false)
+            }
         };
         let entry = model_id
             .as_ref()
@@ -1450,6 +1456,20 @@ mod tests {
             Some("first")
         );
         assert_eq!(config.models[0].id, "first");
+    }
+
+    /// §18.1：多模型服务同一槽位时优先绑 source: systemone 的模型（能用原生就用原生）。
+    #[test]
+    fn systemone_source_wins_auto_binding() {
+        let config = parse_config(
+            "models:\n  llm:\n    source: openai\n    base_url: http://127.0.0.1:8080/v1\n    model: demo\n    serves: [classify]\n  jev:\n    source: systemone\n    base_url: http://127.0.0.1:8090\n    model: jev\n    mode: http\n    serves: [classify]\n",
+            "test.yaml",
+        )
+        .expect("配置应当解析成功");
+        let classify = binding(&config, SlotKind::Classify);
+        assert_eq!(classify.model_id.as_deref(), Some("jev"));
+        assert!(matches!(classify.source, Some(ModelSource::SystemOne)));
+        assert_eq!(classify.adapter, Some(Adapter::Native));
     }
 
     /// §3.8：一个模型都不配时，五个槽位全空但仍然成功。

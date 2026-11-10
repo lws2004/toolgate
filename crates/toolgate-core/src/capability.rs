@@ -59,8 +59,8 @@ fn systemone(slot: SlotKind) -> Capability {
             "images 需后端模型带 vision tower（§18.1）",
         ),
         SlotKind::Classify => cap(
-            CapabilityGrade::Limited,
-            "systemone 的 choice 有逐选项概率，但 §3.10 适配器本轮只映射 noul；走 choice 的 classify 映射未落，先把该槽位按 §3.8 降级或改用 json 适配器来源",
+            CapabilityGrade::Available,
+            "choice 的 probabilities 是逐选项校准概率，按 §3.10 映射成 §3.2 的逐标签 scores；confidence / choice 字段不参与映射",
         ),
         SlotKind::Summarize => cap(
             CapabilityGrade::Unavailable,
@@ -238,7 +238,7 @@ mod tests {
         let grade = |slot| source_slot_capability(ModelSource::SystemOne, slot).grade;
         assert_eq!(grade(SlotKind::Summarize), G::Unavailable);
         assert_eq!(grade(SlotKind::Rerank), G::Unavailable);
-        assert_eq!(grade(SlotKind::Classify), G::Limited);
+        assert_eq!(grade(SlotKind::Classify), G::Available);
         assert_eq!(grade(SlotKind::Decide), G::Available);
         assert_eq!(grade(SlotKind::Vision), G::Available);
     }

@@ -510,6 +510,10 @@ proc-macro 系）已是默认层既有依赖，新增成本集中在 YAML 解析
   2026-11-09 取。定义了 `POST /v1/systemone`（别名 `/v1/decisions`）的请求与
   响应形状、`noul` / `choice` / `score` 三种问题类型，以及 `none_probability`
   的告警语义（官方建议阈值 0.2）。
+- **官方文档（一手）**：TypeSafe `docs/typesafe.ai/primitives/choice`，2026-11-10 取。
+  `choice` 问题的 `criteria` 是 **map**（键为选项名、值为该选项的描述）；响应给出
+  `choice`（最高概率项）、`probabilities`（全选项概率分布，和为 1）与 `confidence`
+  （分布集中度）。toolgate 的 classify 映射据此落 §3.10。
 - **官方定义（一手）**：`noul` 是 yes 的概率；`score` 是量表上的等级期望值。
 
 ### 本机实测
@@ -535,8 +539,9 @@ P(是) 走，与 §7.2 同向（≥0.85 采用 / 0.60–0.85 标 LOW_CONFIDENCE 
 编造——概率的连续性正是门控可用的前提。
 
 第 5 行的 `none_probability` = 0.505 说明模型自认「三个选项都不够合适」——这正是
-该字段存在的理由（告警而非硬选）。但本轮 §3.10 的 systemone 适配器只映射
-`noul`，classify 走 `choice` 的映射未落（§18.1 能力表标「受限」）。
+该字段存在的理由（告警而非硬选），也是 §3.10 把它接入降级的实测依据：判定阈值
+取官方建议的 0.2，本例远超阈值，按「无合适选项」处理。classify 走 `choice` 的
+映射已落 §3.10，`probabilities` 按标签名映射成 `scores`，`confidence` 不参与。
 
 ### 对照：jev 类判定模型走 chat 协议会退化
 
@@ -547,9 +552,9 @@ P(是) 走，与 §7.2 同向（≥0.85 采用 / 0.60–0.85 标 LOW_CONFIDENCE 
 `/v1/systemone`（命名问题 → 校准概率）。判据与处理见 §3.4。
 
 **第 4 组的意义**：`choice` 类型的 `none_probability` 达 0.505，说明模型自认
-「三个选项都不够合适」——这正是该字段存在的理由（告警而非硬选）。但本轮 §3.10 的
-systemone 适配器只映射 `noul`，classify 走 `choice` 的映射未落（§18.1 能力表
-标「受限」）。
+「三个选项都不够合适」——这正是该字段存在的理由（告警而非硬选）。§3.10 已把
+`choice` 的 `probabilities` 映射成 classify 的 `scores`，并规定 `none_probability`
+≥ 0.2 时本次降级；本例即触发该分支的典型输入。
 
 ### 对照：openai 协议的 logprobs
 

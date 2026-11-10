@@ -21,6 +21,6 @@ pub use client::{
     VisionOutcome,
 };
 pub use systemone::{
-    SystemOneQuestion, SystemOneRequest, SystemOneResponse, build_request, endpoint,
-    parse_decide_output,
+    SystemOneQuestion, SystemOneRequest, SystemOneResponse, build_classify_request, build_request,
+    endpoint, parse_classify_output, parse_decide_output,
 };

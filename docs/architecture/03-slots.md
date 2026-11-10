@@ -342,8 +342,13 @@ models:
 **解析规则**：
 
 1. `slots.<name>: <model-id>` 写了 → 显式覆盖；
-2. 否则：按 `models` 声明顺序，找 `serves` 含该槽位的第一个模型；
+2. 否则：`serves` 含该槽位的模型里，显式写了 `source: systemone` 的优先（§18.1
+   「能用 systemone 的模型就用它」）；没有再按 `models` 声明顺序取第一个；
 3. 都没有 → 该槽位为空（§3.8）。
+
+**不做同一次调用的跨协议重试**：协议在配置期选定，运行时源不可用按 §3.8 降级到
+L0、形状不符按 §3.11 降级并告警，不临时换另一个协议重发——两条路径的概率性质
+不同（校准 vs 自报），换协议会让同一次返回的语义漂移。
 
 **显式覆盖示例**（可选，不写也行）：
 
@@ -390,7 +395,7 @@ slots:
 | 条件 | adapter |
 |---|---|
 | `source: local` | `native` |
-| `source: systemone` → 槽位 `decide` | `native` |
+| `source: systemone` → 槽位 `classify` / `decide` | `native` |
 | `source: rerank` → 槽位 `rerank` | `native` |
 | 外部协议（`openai` / `anthropic` / `responses`）→ 槽位 `classify` / `decide` | `json` |
 | 外部协议 → 槽位 `summarize` / `vision` | `text` |
@@ -415,7 +420,7 @@ slots:
 | 输出形状可转换 | 模型输出能稳定转成目标槽位的契约形状（本节适配器表） | 把 `choice` 的 `confidence` 当 `probability`，是把「选项间相对置信」与「二元肯定概率」混成一个量，属静默转换，禁止（见下） |
 
 **判据的落点是 §18.1 的协议能力表**：表里每个「不可用 / 受限」都必须能归到
-这两条之一；`classify` 对 systemone 标「受限」是形状可转换但适配未落，不是信息不足；
+这两条之一；`classify` 对 systemone 判「可用」是形状可转换且映射已落（见下），不是信息不足；
 `rerank` 协议对其余四个槽位标「不可用」是只返回排序结果、缺文本 / 概率 / 图像输出
 通道（输入信息不足），而 `rerank × rerank` 的「可用」是信息充分且形状可转。
 **这张表在代码里由 `capability` 模块固化为唯一可执行落点**（`source × slot` 判定）：
@@ -436,11 +441,22 @@ systemone 的原生形状最接近 §3.2 的 decide 契约，因此走 `native`�
 | 协议 → 槽位 | 每个 `noul` 答案的数值 → 对应问题的 `probability`；问题名 `q0` / `q1` 按序还原回槽位问题的顺序 |
 | 概率语义 | `noul` 是「该问题的肯定回答为真的概率」，与 §7.2 门控同向：`p ≥ 0.85` 采用、`0.60 ≤ p < 0.85` 标 LOW_CONFIDENCE、`p < 0.60` 两视图都给 |
 
-**只接受 `noul` 类型**。协议另有 `choice` 与 `score` 两种类型，但 §3.2 的槽位契约
-**没有类型维度**——槽位只问「这个问题的概率是多少」，不表达「从哪几个选项里选」。
-所以：上游返回 `choice` / `score` 时，按 §3.11 的「形状不符」处理（该次降级、
-连续失败后禁用该槽位并告警），**不做静默转换**——把 `choice` 的 `confidence` 当成
-`probability` 会把「选项间的相对置信」与「二元肯定概率」混为一谈，两者不是同一个量。
+**classify 走 `choice`**（§18.1 能力表「可用」）：
+
+| 方向 | 映射 |
+|---|---|
+| 槽位 classify → 协议 | 单个命名问题 `q0`：`type: "choice"`，`instructions` 固定措辞，`criteria` 为 `{<标签>: <标签>}` 的 map（官方 `criteria` 的键是选项名、值是描述；槽位只有标签名，用标签名本身，不注入额外语义）；`state` 写 `input.text` |
+| 协议 → 槽位 | `probabilities` 按标签名一一映射成 `scores`；`choice` / `confidence` 不参与映射 |
+| 概率语义 | `probabilities` 是校准的逐选项概率（和为 1），产出 `calibrated: true`；`none_probability ≥ 0.2`（官方建议阈值，附件 E.10）表示「无合适选项」，本次按 §3.11 形状不符降级，不返回分数 |
+
+缺标签、类型不符、概率越界、`none_probability` 越阈值都按 §3.11 降级并给可行动理由。
+
+**decide 只接受 `noul` 类型，classify 只接受 `choice` 类型**。§3.2 的槽位契约
+**没有类型维度**——decide 只问「这个问题的概率是多少」，classify 只问「每个标签的分数」。
+协议另有 `score` 类型，两个槽位都不用它；类型不符按 §3.11 的「形状不符」处理
+（该次降级、连续失败后禁用该槽位并告警），**不做静默转换**——把 `choice` 的
+`confidence` 当成 `probability` 会把「选项间的相对置信」与「二元肯定概率」混为一谈，
+两者不是同一个量。
 
 **与 `adapter: json` 的差别在概率性质**：systemone 走 `native`，产出的是校准
 概率，按 §3.10 的「非校准概率必须标注」不适用（不标 `UNCALIBRATED`）；`json`

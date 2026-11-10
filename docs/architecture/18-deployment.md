@@ -157,17 +157,17 @@ models:
 |---|---|---|---|---|---|---|
 | summarize | 可用 | 可用 | 可用 | **不可用** | **不可用** | systemone 只做判定，不生成文本；rerank 协议只做排序 |
 | vision | 可用 | 可用 | 可用 | 可用 | **不可用** | systemone 的 `images` 需后端模型带 vision tower（本机 4B MLX 构建带） |
-| classify | 可用（JSON schema） | 可用（JSON / tool use） | 可用（structured outputs） | **受限** | **不可用** | systemone 的 `choice` 类型返回逐选项 `probabilities`，但 §3.10 的 systemone 适配器本轮只映射 `noul`；走 `choice` 的 classify 映射未落 |
+| classify | 可用（JSON schema） | 可用（JSON / tool use） | 可用（structured outputs） | **可用（choice → 逐标签分数）** | **不可用** | systemone 的 `choice` 返回逐选项校准概率，按 §3.10 映射成每个标签的分数；`choice` / `confidence` 字段不参与映射 |
 | decide | **受限** | **受限** | **受限** | **可用（给校准概率）** | **不可用** | systemone 的 `noul` = P(yes)，直接满足 §3.2 decide 契约与 §7.2 门控 |
 | rerank | **受限** | **受限** | **受限** | **不可用** | **可用（原生排序）** | systemone 无排序接口；`source: rerank` 走原生 `/v1/rerank` |
 
 **这张表是 §3.10「信息充分 ∧ 形状可转换」的判例**：每个「不可用」都能归到输入
 信息不足（systemone 不生成文本、无排序接口；rerank 协议只返回排序结果，缺文本 /
-概率 / 图像输出通道），每个「受限」归到输出形状可转但适配未落或概率非校准；
-`rerank × rerank` 的「可用」是信息充分且形状可转的原生端点；`classify` 的「受限」不是信息不足，是 `choice` 映射未落
-（§3.10）。代码侧由 `capability` 模块按本表固化 `source × slot` 判定，作为运行时
-前置准入的唯一可执行落点——文档表是权威，代码判定与它逐格一致。不因配置里写了
-`serves` 就认为能力成立（§3.11）。
+概率 / 图像输出通道），每个「受限」归到输出形状可转但概率非校准或适配未落；
+`rerank × rerank` 的「可用」是信息充分且形状可转的原生端点；`classify × systemone`
+的「可用」是形状可转换且映射已落（§3.10）。代码侧由 `capability` 模块按本表固化
+`source × slot` 判定，作为运行时前置准入的唯一可执行落点——文档表是权威，代码判定
+与它逐格一致。不因配置里写了 `serves` 就认为能力成立（§3.11）。
 
 #### json 适配器：通用 chat 端点的 classify / decide 形状
 
@@ -182,6 +182,7 @@ models:
 
 两类分数都是模型自报值、非校准（§3.10 的 json 适配器行）；返回需标 `calibrated: false`，
 高风险场景用原生实现或云端复核（§7.2）。形状不符按 §3.11 降级。
+`classify` / `decide` 走 systemone 的原生路径见下节，不走本节 json 适配器。
 
 #### text 适配器：通用 chat 端点的协议形状
 
@@ -277,6 +278,17 @@ models:
 带概率的答案集合」逐字对应。§13.4 讨论的方案 A / B（每工具单独调 / turn 级
 批处理）因此可以直接作用在 systemone 上，不需要为它再设计一套调用形态。
 
+#### classify：choice → 逐标签分数
+
+`classify` 槽位走 `choice`，映射规则与请求/响应形状见 §3.10「systemone 适配器」。
+本节只记协议侧事实：`choice` 问题的 `criteria` 是 **map**（键为选项名、值为该选项的
+描述，来源见附件 E.10）；响应 `probabilities` 是全选项的校准概率分布（和为 1），
+另给 `choice`（最高概率项）与 `confidence`（分布集中度）。toolgate 只取
+`probabilities` 按标签名映射成 §3.2 的 `scores`，**不读 `choice` / `confidence`**
+（把 `confidence` 当 `probability` 属静默转换，§3.10 禁止）。`none_probability`
+≥ 0.2（官方建议阈值，附件 E.10）表示「无合适选项」，本次按 §3.11 形状不符降级，
+不返回分数。
+
 **本机实测**（2026-11-09，127.0.0.1:8090 的 StartLux-Decision-v1.1-4B-AutoThink）：
 
 | # | state | 问题（措辞） | noul | 含义 |
@@ -327,7 +339,10 @@ models:
 | `source` | **模型来源**（部署形态） | 是协议的选择，不是能力等级（§18.1 的总纲：模型来源是部署形态，不是能力等级） |
 
 所以问题不是「decide 只能用 systemone」，而是「**能用 systemone 的模型就用它**」。
-判定类槽位可以用任何协议——差别在**概率的性质**，不在能不能做：
+这条优先级落在配置与绑定：多模型服务同一槽位时优先绑 `source: systemone`（§3.10），
+调用层按绑定来源分流——systemone 走原生原语，其余走 `json` 适配器；**不做同一次
+调用的跨协议重试**（§3.8 / §3.11）。判定类槽位可以用任何协议——差别在
+**概率的性质**，不在能不能做：
 
 | 模型类型 | 协议 | 适配器 | 概率性质 | §7.2 门控 |
 |---|---|---|---|---|
