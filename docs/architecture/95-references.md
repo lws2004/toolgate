@@ -636,3 +636,40 @@ toolgate 上一轮已接它（§18.1）。
 返回 `meta.rerank="applied"`、`slmStatus.rerank="ready"`、`hits=25`，命中顺序由字典序
 变为相关度序（`f1,f8,f9,f10,f2,...`），stderr 无降级告警。**实测**，命令与样本数如上；
 该次调用前 8090 的 decide 服务已停，不参与本验证。
+
+## E.12 classify × systemone 真机实测（2026-11-10）
+
+用途：`source: systemone` 的 classify 原生路径（§3.10 / §18.1）在真实上游服务上的
+形状与端到端验收。按 §4「正文只写决策」，实测 / 背景一律放附件 E。
+
+**服务**：d3-nano（GGUF Q8_0，`~/models/d3-nano-gguf/vllm-d3-nano-Q8_0.gguf`），
+llama-server 常驻 `127.0.0.1:8082`，提供 `/v1/systemone`。2026-11-10 复核：
+`/health` 返回 200；E.10 记录的 `127.0.0.1:8090`（StartLux-Decision）此时已停、
+连接被拒，不参与本次验证——后续实测改用在线的 d3-nano。
+
+**协议探测**（本机 macOS、2026-11-10、loopback、无鉴权；数字均为**实测**。
+命令形态：`curl -sS -m 20 -X POST http://127.0.0.1:8082/v1/systemone -H 'Content-Type: application/json' -d '<请求体>'`）：
+
+| 请求 | 条件 | 结果 |
+|---|---|---|
+| `noul` | state 为含语法错误的 Python 代码，问「有语法错误吗」 | HTTP 200，0.125 s；`{"q0":{"type":"noul","noul":0.9151341080593624}}` |
+| `choice` | state 为构建日志，`criteria={"has_error":"has_error","is_binary":"is_binary"}` | HTTP 200，0.062 s；`{"q0":{"type":"choice","choice":"has_error","probabilities":{"has_error":0.9993513730440129,"is_binary":0.0006486269559872602},"confidence":0.9921953634272557}}` |
+| 别名 `/v1/decisions` | 最小 noul 请求 | HTTP 404（该实现只注册 `/v1/systemone`） |
+
+要点：`choice` 响应给 `probabilities` / `choice` / `confidence`，本次**未带**
+`none_probability`——印证 §3.10 把它当可选字段、且不把 `confidence` 当概率的约定。
+
+**toolgate 端到端实测**：`cargo run -q -p toolgate-core --example classify_e2e
+--features external-protocols`（示例见 `crates/toolgate-core/examples/classify_e2e.rs`）。
+配置只写 `source: systemone` / `base_url: http://127.0.0.1:8082` /
+`model: d3-nano` / `mode: http` / `serves: [classify]`，调用 `SlotClient::classify`：
+
+- 绑定解析：`model=Some("d3")`、`source=Some(SystemOne)`、`adapter=Some(Native)`；
+- 返回：`scores={"has_error": 0.9993513730440128, "is_binary": 0.0006486269559872602}`、
+  `calibrated=true`、`latency_ms=97`，stderr 无降级告警；
+- 分数与上游 `probabilities` 逐项一致，验证 `choice → scores` 映射与
+  `calibrated: true` 的落地。
+
+**口径**：延迟是单次本地 loopback 调用的墙钟观测（97 ms 含 HTTP 与解析），
+不作槽位延迟预算基准（预算口径见 §3.1 / 附件 E.3.2）；本例只验形状与映射，
+不验分类质量。

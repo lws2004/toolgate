@@ -287,7 +287,7 @@ models:
 `probabilities` 按标签名映射成 §3.2 的 `scores`，**不读 `choice` / `confidence`**
 （把 `confidence` 当 `probability` 属静默转换，§3.10 禁止）。`none_probability`
 ≥ 0.2（官方建议阈值，附件 E.10）表示「无合适选项」，本次按 §3.11 形状不符降级，
-不返回分数。
+不返回分数。真机端到端实测见附件 E.12（d3-nano :8082）。
 
 **本机实测**（2026-11-09，127.0.0.1:8090 的 StartLux-Decision-v1.1-4B-AutoThink）：
 
