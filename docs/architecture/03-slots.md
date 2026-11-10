@@ -484,6 +484,21 @@ systemone 的原生形状最接近 §3.2 的 decide 契约，因此走 `native`�
 `UNCALIBRATED` 告知（slot / adapter）；高风险判定只能用 `native`，或由云端复核
 （§7.2）。这是「LLM 也能做 decide」与「门控可信」之间的边界。
 
+**三原语与槽位的完整映射（决策，不是待办）**：
+
+| 原语 | 答案形状 | 槽位归属 |
+|---|---|---|
+| `noul` | 每个问题一个校准概率 | `decide`（§3.2 二元契约） |
+| `choice` | 互斥选项的逐项概率分布 | `classify`（§3.10 的 choice → scores 映射） |
+| `score` | 有序量表的连续位置 + 逐级分布 | **无槽位** |
+
+`score` 不新增第 6 个槽位，也不给 `decide` 契约加问题类型维度：五个槽位是固定
+词汇表（§3.1），A-4 已否决「让一个槽位承担三种问题形状」
+（[architecture-review-2026-11-09-typed-decide-align.md](../architecture-review-2026-11-09-typed-decide-align.md)
+第 5 节）。工具层的有序量表判定（§5.1 的 severity、§10.1 的 need_pixels）继续由
+§5.1 的二元分解承接。要用 `score` 原生形状，须按 A-4 第 5.3 节的两条触发条件
+重开评审；附件 E.13 的对照实测只满足其中一部分证据，不构成重开依据。
+
 **两个典型场景**：
 
 - 只配 jev（`serves: [classify, decide]`）：classify 与 decide 共用一个模型实例，
