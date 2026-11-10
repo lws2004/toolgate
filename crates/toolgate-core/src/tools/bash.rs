@@ -360,15 +360,6 @@ async fn run_decide(ctx: &ToolContext, body: &str) -> Option<DecideRun> {
         questions: L1_QUESTIONS.iter().map(|q| (*q).to_owned()).collect(),
     };
     let outcome = client.decide(&input).await.ok()?;
-    // §15.2 判定日志：写失败不影响工具结果（观测性不进主路径）。
-    let _ = crate::decision_log::append(
-        "bash",
-        None,
-        client.decide_model_name().as_deref(),
-        &input,
-        &outcome,
-    )
-    .await;
     // 按固定 key 归并：answers 的键是问题原文，先按顺序映射到稳定 key。
     let probs: BTreeMap<String, f64> = L1_QUESTION_KEYS
         .iter()
@@ -383,8 +374,20 @@ async fn run_decide(ctx: &ToolContext, body: &str) -> Option<DecideRun> {
             ((*key).to_owned(), probability)
         })
         .collect();
+    let decision = merge_decision(&probs);
+    // §15.2 判定日志：confidence 按 §7.3 口径在归并结论后传入——它是「被采纳结论
+    // 所依赖的问题概率最小值」，不是全部问题的最小值。写失败不影响工具结果
+    // （观测性不进主路径）。
+    let _ = crate::decision_log::append(
+        "bash",
+        Some(decision.confidence),
+        client.decide_model_name().as_deref(),
+        &input,
+        &outcome,
+    )
+    .await;
     Some(DecideRun {
-        decision: merge_decision(&probs),
+        decision,
         gate: outcome.gate,
     })
 }

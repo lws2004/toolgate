@@ -567,14 +567,6 @@ impl EditDecider for SlotDecider<'_> {
     fn decide<'a>(&'a self, input: &'a DecideInput) -> EditFuture<'a> {
         Box::pin(async move {
             let outcome = self.client.decide(input).await.ok()?;
-            let _ = crate::decision_log::append(
-                "edit",
-                None,
-                self.client.decide_model_name().as_deref(),
-                input,
-                &outcome,
-            )
-            .await;
             let probs: BTreeMap<String, f64> = EDIT_QUESTION_KEYS
                 .iter()
                 .zip(EDIT_QUESTIONS.iter())
@@ -588,7 +580,19 @@ impl EditDecider for SlotDecider<'_> {
                     ((*key).to_owned(), probability)
                 })
                 .collect();
-            Some((merge_edit_decision(&probs), outcome.gate))
+            let decision = merge_edit_decision(&probs);
+            // §15.2 判定日志：confidence 按 §7.3 口径在归并结论后传入——它是「被采纳
+            // 结论所依赖的问题概率最小值」，不是全部问题的最小值。写失败不影响
+            // 工具结果（观测性不进主路径）。
+            let _ = crate::decision_log::append(
+                "edit",
+                Some(decision.confidence),
+                self.client.decide_model_name().as_deref(),
+                input,
+                &outcome,
+            )
+            .await;
+            Some((decision, outcome.gate))
         })
     }
 }
