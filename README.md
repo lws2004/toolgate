@@ -6,10 +6,11 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Status](https://img.shields.io/badge/architectural--review-v2-yellow)
 
-> **状态**：架构已迭代到 v2（围绕本地小模型）并已审阅，阶段 0（架构定稿）完成；
-> 实现阶段自 2026-11-09 起按 §14 路线图推进，阶段 1 与阶段 1.5 已落地。
-> 代码不再是纯 v1 骨架：已落地错误契约、槽位契约、告知协议、决策表、理解链与兼容层；
-> 本地模型后端仍属可选层（§19.6），尚未接入。差距表见
+> **状态**：架构已迭代到 v2（围绕本地小模型）并已审阅；实现按 §14 路线图推进，
+> 阶段 0–5 与 §17.2 安全底线已落地，验证基线见
+> [实现进度表](docs/implementation-status.md)。
+> 本地模型接入层已落地（decide / classify / summarize / rerank / vision 五槽位适配）；
+> `embedded` 推理后端仍属可选层（§19.6），未接入。差距表见
 > [架构文档 §13](docs/architecture/11-runtime.md#13-现有实现与新架构的差距)，
 > 升级说明见 [v1 → v2 升级指南](docs/upgrade-v1-to-v2.md)。
 
@@ -62,7 +63,7 @@
 | task | 累积输出 → 状态判断 + 增量摘要 |
 | write / edit | 挡不住什么，但前四个要有输出对象 |
 
-## 快速开始（v1 骨架，无本地模型）
+## 快速开始（默认构建，不含外部协议客户端）
 
 > 平台范围：第一期只支持 macOS（Apple Silicon 优先）；Windows / Linux 为后续规划（架构 §19.7）。
 
@@ -102,7 +103,7 @@ cargo build --release
 
 ## 当前代码状态
 
-v1 骨架，57 个测试通过（以 `cargo test` 输出为准），release 构建零警告：
+默认构建的测试与验证基线以 [实现进度表](docs/implementation-status.md) 为准，release 构建零警告：
 
 - 双阈值截断（2000 行 / 50KB）
 - 按内容位置分治的落盘（read 不落盘，bash/search 落盘）
@@ -111,8 +112,8 @@ v1 骨架，57 个测试通过（以 `cargo test` 输出为准），release 构�
 - 行锚点（可选模式）
 - MCP stdio 传输（三版本协商）
 
-**v2 需要的本地模型接入层尚未实现**——按「先定架构，后写实现」的
-顺序，等架构审阅通过再动手。
+**剩余项与边界**：可选层（`embedded` 推理后端）与条件触发项（有损 WebP、流式输出）
+按 §19.6 / §14 的触发条件处理；逐项状态见 [实现进度表](docs/implementation-status.md)。
 
 ## 许可
 
