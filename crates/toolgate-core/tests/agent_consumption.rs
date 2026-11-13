@@ -195,3 +195,48 @@ async fn notices_go_to_both_channels() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// §5.2：files 只枚举路径——绑定语义槽位、给了 query 且 intent=auto 也不重排、
+/// 不报 SLOT_UNAVAILABLE。补 `plan` 单测覆盖不到的工具级路径（绑定与否都不改变行为）。
+#[tokio::test]
+async fn files_mode_skips_rerank_even_with_bound_slots() {
+    use std::sync::Arc;
+
+    use toolgate_core::config::load_config;
+    use toolgate_core::slm::SlotClient;
+
+    let dir = workspace("files-slot");
+    std::fs::write(dir.join("alpha.txt"), "alpha\n").expect("写测试文件");
+    let cfg_path = dir.join("config.yaml");
+    std::fs::write(
+        &cfg_path,
+        "models:\n  fake-emb:\n    source: embedding\n    mode: http\n    base_url: http://127.0.0.1:1\n    model: fake\n    serves: [embedding]\n",
+    )
+    .expect("写配置");
+    let cfg = load_config(&cfg_path).expect("配置合法").expect("配置存在");
+    let mut ctx = ToolContext::new(&dir).expect("上下文");
+    ctx.slm = Some(Arc::new(SlotClient::new(cfg)));
+
+    let resp = dispatch(
+        "search",
+        &json!({
+            "mode": "files",
+            "pattern": "txt",
+            "query": "按语义排序",
+            "intent": "auto",
+            "path": "."
+        }),
+        &ctx,
+    )
+    .await
+    .expect("search 成功");
+
+    assert_eq!(resp.meta["rerank"], json!("skipped"));
+    assert!(resp.meta["embedding"].is_null(), "files 不应拿 embedding");
+    let body = text_of(&resp);
+    assert!(
+        !body.contains("SLOT_UNAVAILABLE"),
+        "files 不应报槽位不可用：{body}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

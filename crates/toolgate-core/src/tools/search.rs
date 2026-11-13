@@ -41,7 +41,7 @@ pub fn spec() -> ToolSpec {
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "content 模式是正则表达式；files 模式是文件名子串或通配符"
+                    "description": "content 模式是行匹配正则；files 模式是文件名子串或通配符"
                 },
                 "query": {
                     "type": "string",

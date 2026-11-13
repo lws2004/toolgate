@@ -45,7 +45,7 @@
 |---|---|---|
 | classify | 文本 + 候选标签 → 每标签分数 | < 20ms |
 | rerank | query + N 候选 → N 个分数 | < 100ms（N=300） |
-| embedding | 文本列表 → 向量列表 | < 50ms / 批（N≤32，估算） |
+| embedding | 文本列表 → 向量列表 | < 100ms / 批（N≤32；实测 71ms） |
 | decide | state（可含图）+ 命名问题 → 每问题概率 | < 30ms |
 | summarize | 文本 → 文本或 JSON | < 1s |
 | vision | 图片 + 任务 → 文本 / 坐标 / OCR | < 2s |

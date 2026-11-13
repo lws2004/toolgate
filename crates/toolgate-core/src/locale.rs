@@ -161,8 +161,8 @@ fn en(zh: &str) -> Option<&'static str> {
         "content 搜内容，files 枚举文件路径" => {
             "content searches file contents; files enumerates paths"
         }
-        "content 模式是正则表达式；files 模式是文件名子串或通配符" => {
-            "content mode is a regular expression; files mode is a filename substring or glob"
+        "content 模式是行匹配正则；files 模式是文件名子串或通配符" => {
+            "content mode matches a line regex; files mode takes a filename substring or glob"
         }
         "检索起点目录或文件，默认工作目录" => {
             "Search root directory or file; defaults to cwd"

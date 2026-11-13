@@ -162,16 +162,17 @@ token 数以响应 `usage.prompt_tokens` 为准；拟合
 
 ### E.3.2 各槽位本机实测（原 §6.5）
 
-已测的四个槽位（classify/decide、rerank、summarize、vision）按 §3.1 的契约各测一次
-典型负载，用来校准 §3.1 的延迟预算表；embedding 槽位于 2026-11-13 只验证了
-bge-m3 原生端点的输出正确性（§18.1），延迟未测，故不入表。
+已测的五个槽位（classify/decide、rerank、summarize、vision、embedding）按 §3.1 的契约各测一次
+典型负载，用来校准 §3.1 的延迟预算表；embedding 的延迟于 2026-11-13 补测（批量 32 条与单条两个点），
+口径见下。
 
 **embedding 那一次的口径**（2026-11-13，Apple M2 Max / 96 GiB）：服务为
 `mlx-community_bge-m3-mlx-8bit`（:10020，OpenAI 兼容 `/v1/embeddings`，dim=1024）；
 样本 25 条（hi 5 / mid 8 / lo 12，均含关键词 database）+ 1 条自然语言 query
 「database connection pool exhausted max_connections」，余弦相似度 hi 0.9425 /
-0.9154 / 0.9093 / 0.9071 / 0.8859，mid 0.6712，lo 0.7276（排序正确，全部 hi 在前）；
-延迟未测。本章不据此下延迟结论。
+0.9154 / 0.9093 / 0.9071 / 0.8859，mid 0.6712，lo 0.7276（排序正确，全部 hi 在前）。
+延迟补测（同一端点、预热后）：32 条批量 5 轮 65.5 / 75.8 / 74.4 / 68.1 / 71.2 ms，
+中位 71.2 ms；单条 11.2 ms；向量 dim=1024。
 硬件与口径同 §6.4（Apple M2 Max / 96 GiB / rapid-mlx 1.0.0）；除特别标注外
 其余槽位都用本机已有权重（StartLux / d3-nano / jina / PaddleOCR-VL），**没有再为槽位测量下载新模型**；§6.4 的两个 LFM 权重是为 prefill 实测拉取的。
 
@@ -181,6 +182,7 @@ bge-m3 原生端点的输出正确性（§18.1），延迟未测，故不入表�
 | rerank | `jina-reranker-v3.5-mlx`（本地，listwise，block 125） | N=10 / 125 / 300 文档 | 94 / 1818 / 5223 ms | <100 ms 每批；N=300 <300 ms / <1.2 s |
 | summarize | `LFM3-1.7B-MLX-8bit`（本地） | prefill 拟合 + 生成 | 1703 tok/s prefill + 36.4 ms 固定开销 | <1 s / <2 s |
 | vision | `PaddleOCR-VL-1.6-8bit`（本地） | 65 KB / 191 token 图；233 KB / 2831 token 图 | 264 ms / 5165 ms | <2 s / <5 s |
+| embedding | `mlx-community_bge-m3-mlx-8bit`（:10020，dim=1024） | 32 条文本批 / 单条 | 32 条批 71.2 ms（5 轮中位，65.5–75.8）；单条 11.2 ms | <100 ms / 批（N≤32，本机重标） |
 
 **读法与边界**
 
@@ -199,6 +201,8 @@ bge-m3 原生端点的输出正确性（§18.1），延迟未测，故不入表�
   但它的定位是判定服务的**超时兜底**，不是主判定（§3.4）。两者都**受输入长度
   支配**，与 §6.4 的生成侧结论一致。d1-2B 本机无权重、未测；网关 `d1` 后端是
   云端 d1-ultra，与本机 d3-nano 不是同一个模型，见 §3.4。
+- **embedding 只测了批量与单条两个点**：32 条批 71.2 ms 高于原 50 ms 预算，按本机口径
+  重标为 100 ms（§3.1）；单条 11.2 ms 说明批量成本近线性随条数增长，不是固定开销。
 - summarize 的生成侧 364.6 / 126.9 tok/s 来自不同采样口径（独立基准短输出 /
   `bench --tier speed` greedy），按 §15.5 都标实测但不可互换。
 
