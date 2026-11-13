@@ -12,7 +12,7 @@
 | read | 读文本/图片/URL | 解码、嗅探、截断；URL 走 fetch.provider | decide 判类型 / sensitivity / best_view；summarize 结构化；vision 看图 | raw / summary / structured / visual |
 | write | 新建或整体覆盖 | 建父目录、写前快照 | 无 | 原文确认 + 快照路径 |
 | edit | 局部修改 | 匹配、锚点校验、快照 | decide 槽位解释失败原因 | diff / 失败归因 |
-| search | 内容检索 / 文件枚举 | 遍历、正则、上限 | rerank 槽位（命中 > 20） | 全部 / top-k / 结构化 |
+| search | 内容检索 / 文件枚举 | 遍历、pattern（content 正则；files 子串·通配）、上限 | rerank 或 embedding 槽位（命中 > 20） | 全部 / top-k / 结构化 |
 | bash | 一次性命令 | 执行、截断、落盘 | decide 判错；summarize 摘要 | raw / summary / structured |
 | task | 后台长任务 | 进程管理、增量读取 | decide 判状态；summarize 摘要 | 原始增量 / 摘要 + 状态 |
 
@@ -795,29 +795,55 @@ decide 槽位契约是**二元形状**——「每个问题一个概率」，没
 漏洞，是「解释器白名单没做」的结果——要么补白名单（但那会堵掉正经的脚本用法），
 要么承认它是有意为之：脚本由模型自己写，风险由 §17 的边界承担。这一条列进 §15.4。
 
-### 5.2 search —— rerank 由独立槽位承担
+### 5.2 search —— pattern 匹配 + 语义重排（rerank 优先，embedding 退路）
 
 ```text
-L0 检索（正则 / 通配符），拿全部命中
-L0 若命中数 ≤ 20，直接返回（没必要 rerank）
-L1 rerank 槽位（仅当命中数 > 20）：
-     对候选按「与 query 意图的相关性」打分，返回 top-k 的顺序
+L0 匹配（content 用正则；files 用文件名子串 / 通配符），拿全部命中
+L0 若命中数 ≤ 20，直接返回（没必要语义重排）
+L1 语义重排（仅当命中数 > 20、提供 query、且 content 模式）：
+     候选 = pattern 命中的行；语义查询 = 调用方给的 query（自然语言）
+     优先 rerank 槽位：按「候选与 query 意图的相关性」打分，返回 top-k 顺序
+     否则若 embedding 可用：对 query 与每个候选行各取向量，按余弦相似度排序
+       （有界：只算本次命中行、无索引、无持久状态；候选 ≤200、单条 ≤4096 字符、
+        每批 ≤32 条，批间维度不一致即整体放弃）
+     两者都不可用：按命中顺序返回
 L0 协商：按 intent 返回全部 / top-k / 结构化列表
 ```
 
-设计要点：**只在候选多时才 rerank**。20 条以内的命中，rerank 的延迟
-反而超过收益。
+设计要点：
 
-#### rerank 接线的落地口径
+- **`pattern` 与 `query` 分工，不复用同一字段**。`pattern` 决定「哪些行算命中」：
+  content 模式是正则表达式（不做通配或子串推断），files 模式是文件名子串 /
+  通配符（纯机械 L0）；`query` 决定「命中后怎么排」（自然语言的语义查询，喂给
+  重排槽位）。旧口径让 `query` 同时充当正则与语义查询，既不能写通配，又会在
+  关键词查询时把关键词本身当成「语义」喂给 ranker，产生与预期反向的排序
+  （实测见附件 E）。本次修正为两字段分离：`pattern` 必填、`query` 可选（仅在
+  需要语义重排时提供）。旧输入里的 `query` 正则写法要迁到 `pattern`，否则会按
+  字面正则失败（迁移说明见 [upgrade-v1-to-v2.md](../upgrade-v1-to-v2.md)）。
+- **只在候选多时才重排**。20 条以内的命中，重排延迟反而超过收益。阈值作用于
+  本次返回的候选数（受 `max_results` 上限 200 约束），不是遍历到的全部匹配数。
+- **files 模式不重排**：命中是文件路径，语义相似度对路径几乎没有意义；
+  files 模式只用 `pattern` 做文件名子串 / 通配匹配。
 
-工具层按「绑定 + 能力矩阵非 Unavailable」判定 rerank 是否可用，不硬编码：
+#### 语义重排的接线落地口径
 
-- 命中数 > 20 且槽位可用 → 真实调用 rerank 槽位，按 `results`（已按 score
-  降序、覆盖全部命中、index 指向原始位置，§3.2）重排命中行后，再做确定性截断；
-  返回、落盘与结构化事实共用同一份顺序；
-- 调用失败 / 槽位不可用 → `rerank` 状态降级为 `unavailable`，按命中顺序返回并按
-  §4.4b 发 `SLOT_UNAVAILABLE` 告知，**不谎报 applied**（§4.6）；
-- 分数只用作顺序，不作为置信度门控输入。通用 LLM 走 `ordered` 时是自报值、非校准（§18.1「受限」，按 §3.10 标 `UNCALIBRATED`）；`source: rerank` 的 `relevance_score` 是专用 ranker 的相关性分数（§18.1「可用」），同为非校准概率，但两条路径的分数语义与告知口径不同（§18.1）。
+工具层按「绑定 + 能力矩阵非 Unavailable」判定槽位是否可用，不硬编码；
+重排优先级是 rerank > embedding > 命中顺序：
+
+- 命中数 > 20、content 模式、rerank 可用且有 `query` → 真实调用 rerank 槽位，按
+  `results`（已按 score 降序、覆盖全部命中、index 指向原始位置，§3.2）重排命中
+  行后，再做确定性截断；返回、落盘与结构化事实共用同一份顺序；
+- rerank 不可用而 embedding 可用且有 `query` → 对 `query` 与候选行分批取向量
+  （每批 ≤32 条、候选 ≤200、单条 ≤4096 字符，§3.2 embedding 契约；批间维度
+  不一致即整体放弃），按余弦相似度降序排序后截断；`meta.rerank` 标 `embedding`
+  以示区分（不是 rerank 的 `applied`），`meta.embedding` 给出
+  `candidates` / `textsTruncated` / `batches` 统计；
+- 两个槽位都不可用、或调用失败 → 降级为命中顺序返回，按 §4.4b 发
+  `SLOT_UNAVAILABLE` 告知，**不谎报 applied**（§4.6）；
+- 分数只用作顺序，不作为置信度门控输入。通用 LLM 走 `ordered` 时是自报值、
+  非校准（§18.1「受限」，按 §3.10 标 `UNCALIBRATED`）；`source: rerank` 的
+  `relevance_score` 是专用 ranker 的相关性分数、embedding 的余弦是向量相似度，
+  三者都是非校准量，但语义与告知口径不同（§18.1）。
 
 ### 5.3 read —— 文本与图片两条路
 

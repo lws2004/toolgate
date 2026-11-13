@@ -25,7 +25,7 @@
 
 | 分册 | 章节 | 内容 | 什么时候读 |
 |---|---|---|---|
-| [03-slots.md](architecture/03-slots.md) | §3 | 五个能力槽位与替换判据 | 要接模型、换模型时 |
+| [03-slots.md](architecture/03-slots.md) | §3 | 六个能力槽位与替换判据 | 要接模型、换模型时 |
 | [04-tools.md](architecture/04-tools.md) | §4–§5 | 三层结构、intent、六个工具 | 要实现或改工具时 |
 | [06-cost.md](architecture/06-cost.md) | §6–§7 | 成本模型、介入判据 | 要定成本与阈值时 |
 | [08-isolation.md](architecture/08-isolation.md) | §8 | 数据隔离：四档、规则、回退 | 要定隔离策略时 |

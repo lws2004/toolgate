@@ -1,6 +1,6 @@
 //! 槽位契约层（§3.2 / §3.8 / §3.11）与置信度门控（§7.2）。
 //!
-//! 本模块只定义五个能力槽位的输入输出形状、形状校验，以及「槽位全空仍能跑」
+//! 本模块只定义六个能力槽位的输入输出形状、形状校验，以及「槽位全空仍能跑」
 //! 的可用性与降级决策。它不含模型后端、不做配置解析、不发起调用：
 //! 模型后端属可选层（§19.6），配置解析与工具接入属后续阶段。
 //!
@@ -13,7 +13,7 @@ use serde_json::Value;
 
 // ---------- 槽位词汇与可用性 ----------
 
-/// 五个能力槽位（§3.1）。架构只定义槽位契约，不绑定具体模型。
+/// 六个能力槽位（§3.1）。架构只定义槽位契约，不绑定具体模型。
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotKind {
@@ -22,15 +22,17 @@ pub enum SlotKind {
     Decide,
     Summarize,
     Vision,
+    Embedding,
 }
 
 impl SlotKind {
-    pub const ALL: [SlotKind; 5] = [
+    pub const ALL: [SlotKind; 6] = [
         SlotKind::Classify,
         SlotKind::Rerank,
         SlotKind::Decide,
         SlotKind::Summarize,
         SlotKind::Vision,
+        SlotKind::Embedding,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -40,6 +42,7 @@ impl SlotKind {
             SlotKind::Decide => "decide",
             SlotKind::Summarize => "summarize",
             SlotKind::Vision => "vision",
+            SlotKind::Embedding => "embedding",
         }
     }
 }
@@ -52,6 +55,7 @@ pub struct SlotSet {
     pub decide: bool,
     pub summarize: bool,
     pub vision: bool,
+    pub embedding: bool,
 }
 
 impl SlotSet {
@@ -66,6 +70,7 @@ impl SlotSet {
             decide: true,
             summarize: true,
             vision: true,
+            embedding: true,
         }
     }
 
@@ -79,6 +84,7 @@ impl SlotSet {
                 SlotKind::Decide => set.decide = true,
                 SlotKind::Summarize => set.summarize = true,
                 SlotKind::Vision => set.vision = true,
+                SlotKind::Embedding => set.embedding = true,
             }
         }
         set
@@ -91,11 +97,12 @@ impl SlotSet {
             SlotKind::Decide => self.decide,
             SlotKind::Summarize => self.summarize,
             SlotKind::Vision => self.vision,
+            SlotKind::Embedding => self.embedding,
         }
     }
 
     pub fn all_empty(&self) -> bool {
-        !self.classify && !self.rerank && !self.decide && !self.summarize && !self.vision
+        !self.classify && !self.rerank && !self.decide && !self.summarize && !self.vision && !self.embedding
     }
 
     /// §7.3：降级要标注哪些槽位不可用。
@@ -233,6 +240,54 @@ impl RerankOutput {
             }
             seen[r.index] = true;
             prev = r.score;
+        }
+        Ok(())
+    }
+}
+
+// ---------- embedding（§3.2） ----------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingInput {
+    pub texts: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingOutput {
+    pub vectors: Vec<Vec<f64>>,
+}
+
+impl EmbeddingOutput {
+    /// §3.2：texts 长度 1-32；vectors 与 texts 等长同序；每条等维且分量有限。
+    pub fn validate(&self, input: &EmbeddingInput) -> Result<(), ContractViolation> {
+        let n = input.texts.len();
+        if !(1..=32).contains(&n) {
+            return Err(ContractViolation::new(format!(
+                "texts 长度 {n} 不在 1-32 内"
+            )));
+        }
+        if self.vectors.len() != n {
+            return Err(ContractViolation::new(format!(
+                "vectors 长度 {} 与 texts 长度 {n} 不一致",
+                self.vectors.len()
+            )));
+        }
+        let dim = self.vectors.first().map(Vec::len).unwrap_or(0);
+        if dim == 0 {
+            return Err(ContractViolation::new("向量维度为 0"));
+        }
+        for (i, vector) in self.vectors.iter().enumerate() {
+            if vector.len() != dim {
+                return Err(ContractViolation::new(format!(
+                    "第 {i} 条向量维度 {} 与首条维度 {dim} 不一致",
+                    vector.len()
+                )));
+            }
+            if vector.iter().any(|x| !x.is_finite()) {
+                return Err(ContractViolation::new(format!("第 {i} 条向量含非有限分量")));
+            }
         }
         Ok(())
     }
@@ -424,6 +479,7 @@ pub fn degrade_action(slot: SlotKind) -> DegradeAction {
         SlotKind::Decide => DegradeAction::RawPath,
         SlotKind::Summarize => DegradeAction::TruncatedWithPointer,
         SlotKind::Vision => DegradeAction::OriginalImageOrMetadata,
+        SlotKind::Embedding => DegradeAction::KeepHitOrder,
     }
 }
 
@@ -542,7 +598,7 @@ mod tests {
         (input, output)
     }
 
-    /// §15.7 契约测试：五个槽位各一组固定样本，断言输出形态与类型。
+    /// §15.7 契约测试：六个槽位各一组固定样本，断言输出形态与类型。
     #[test]
     fn all_slot_contracts_roundtrip_and_validate() {
         let (ci, co) = classify_pair();
@@ -682,7 +738,7 @@ mod tests {
 
     #[test]
     fn slot_kind_all_covered_and_serde_stable() {
-        assert_eq!(SlotKind::ALL.len(), 5);
+        assert_eq!(SlotKind::ALL.len(), 6);
         for kind in SlotKind::ALL {
             match kind {
                 SlotKind::Classify => {}
@@ -690,6 +746,7 @@ mod tests {
                 SlotKind::Decide => {}
                 SlotKind::Summarize => {}
                 SlotKind::Vision => {}
+                SlotKind::Embedding => {}
             }
             assert_eq!(serde_json::to_value(kind).unwrap(), json!(kind.as_str()));
         }
@@ -700,12 +757,12 @@ mod tests {
     fn slot_set_default_is_all_empty() {
         let set = SlotSet::none();
         assert!(set.all_empty());
-        assert_eq!(set.empty_slots().len(), 5);
+        assert_eq!(set.empty_slots().len(), 6);
         assert!(!SlotSet::all().all_empty());
         assert!(SlotSet::all().empty_slots().is_empty());
     }
 
-    /// §3.10 示例：两个模型的 serves 覆盖四个槽位，rerank 为空。
+    /// §3.10 示例：两个模型的 serves 覆盖四个槽位，rerank 与 embedding 为空。
     #[test]
     fn slot_set_from_serves_matches_declaration() {
         let set = SlotSet::from_serves(&[
@@ -716,7 +773,10 @@ mod tests {
         ]);
         assert!(!set.all_empty());
         assert!(!set.is_available(SlotKind::Rerank));
-        assert_eq!(set.empty_slots(), vec![SlotKind::Rerank]);
+        assert_eq!(
+            set.empty_slots(),
+            vec![SlotKind::Rerank, SlotKind::Embedding]
+        );
         assert!(set.is_available(SlotKind::Classify));
         assert!(set.is_available(SlotKind::Vision));
     }
@@ -744,6 +804,41 @@ mod tests {
             degrade_action(SlotKind::Vision),
             DegradeAction::OriginalImageOrMetadata
         );
+        // §3.8：两个语义槽位都缺失时，search 都退回命中顺序。
+        assert_eq!(
+            degrade_action(SlotKind::Embedding),
+            DegradeAction::KeepHitOrder
+        );
+    }
+
+    /// §3.2 embedding 契约：条数 / 等维 / 有限分量都要拒绝，不是只断言非空。
+    #[test]
+    fn embedding_validate_rejects_malformed_shapes() {
+        let input = EmbeddingInput {
+            texts: vec!["a".to_owned(), "b".to_owned()],
+        };
+        let ok = EmbeddingOutput {
+            vectors: vec![vec![0.1, 0.2], vec![0.3, 0.4]],
+        };
+        assert!(ok.validate(&input).is_ok());
+        let short = EmbeddingOutput {
+            vectors: vec![vec![0.1, 0.2]],
+        };
+        assert!(short.validate(&input).is_err());
+        let ragged = EmbeddingOutput {
+            vectors: vec![vec![0.1, 0.2], vec![0.3]],
+        };
+        assert!(ragged.validate(&input).is_err());
+        let nan = EmbeddingOutput {
+            vectors: vec![vec![0.1, 0.2], vec![f64::NAN, 0.4]],
+        };
+        assert!(nan.validate(&input).is_err());
+        let empty = EmbeddingInput { texts: vec![] };
+        assert!(ok.validate(&empty).is_err());
+        let too_many = EmbeddingInput {
+            texts: (0..33).map(|i| i.to_string()).collect(),
+        };
+        assert!(ok.validate(&too_many).is_err());
     }
 
     /// §7.2 三档边界。

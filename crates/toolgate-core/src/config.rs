@@ -1,4 +1,4 @@
-//! 配置层：解析配置文件，做语法 / 结构 / 语义三层校验，并解析五个槽位的绑定。
+//! 配置层：解析配置文件，做语法 / 结构 / 语义三层校验，并解析六个槽位的绑定。
 //!
 //! 只判定「配置错误」（§18.9 前三层）：语法错、结构错、语义错一律 fail loud，
 //! 一次列全所有错误。资源失败（模型文件缺失、显存不足）属运行期降级，不在本模块（§3.8）。
@@ -109,6 +109,8 @@ pub enum ModelSource {
     SystemOne,
     /// 原生 /v1/rerank 重排序端点（ADR 0007，§18.1）。
     Rerank,
+    /// 原生 /v1/embeddings 向量端点（§18.1）。
+    Embedding,
 }
 
 impl ModelSource {
@@ -122,6 +124,7 @@ impl ModelSource {
             ModelSource::Responses => "responses",
             ModelSource::SystemOne => "systemone",
             ModelSource::Rerank => "rerank",
+            ModelSource::Embedding => "embedding",
         }
     }
 
@@ -134,6 +137,7 @@ impl ModelSource {
                 | ModelSource::Responses
                 | ModelSource::SystemOne
                 | ModelSource::Rerank
+                | ModelSource::Embedding
         )
     }
 }
@@ -307,7 +311,7 @@ pub struct SlotBinding {
     pub explicit: bool,
 }
 
-/// 解析完成的配置：模型清单 + 显式覆盖 + 五个槽位的绑定。
+/// 解析完成的配置：模型清单 + 显式覆盖 + 六个槽位的绑定。
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolvedConfig {
     /// 模型清单，保持 YAML 声明顺序（§3.10 的自动绑定按此顺序取第一个）。
@@ -318,7 +322,7 @@ pub struct ResolvedConfig {
     pub slm: SlmConfig,
     /// 路径语义配置（§17.2）。
     pub paths: PathsConfig,
-    /// 五个槽位的绑定，顺序同 SlotKind::ALL。
+    /// 六个槽位的绑定，顺序同 SlotKind::ALL。
     pub bindings: Vec<SlotBinding>,
 }
 
@@ -337,10 +341,10 @@ const SLM_FIELDS: &str = "mode / probe / disable_after_failures / embedded / htt
 const EMBEDDED_FIELDS: &str = "backend / model_dir / max_resident_models / idle_ttl_seconds";
 /// http 段合法字段。
 const HTTP_FIELDS: &str = "base_url";
-/// 五个槽位名。
-const SLOT_NAMES: &str = "classify / rerank / decide / summarize / vision";
+/// 六个槽位名。
+const SLOT_NAMES: &str = "classify / rerank / decide / summarize / vision / embedding";
 /// source 枚举的合法值。
-const SOURCE_VALUES: &str = "auto / local / openai / anthropic / responses / systemone / rerank";
+const SOURCE_VALUES: &str = "auto / local / openai / anthropic / responses / systemone / rerank / embedding";
 /// mode 枚举的合法值。
 const MODE_VALUES: &str = "auto / embedded / http";
 /// adapter 枚举的合法值。
@@ -415,12 +419,12 @@ const EN_CONFIG_TEXT: &[(&str, &str)] = &[
         "This field is not in the legal field set of the http section; check the spelling or remove it",
     ),
     (
-        "把槽位名改成五个合法槽位之一",
-        "Change the slot name to one of the five legal slots",
+        "把槽位名改成六个合法槽位之一",
+        "Change the slot name to one of the six legal slots",
     ),
     (
-        "槽位名只能是五个合法槽位之一",
-        "A slot name must be one of the five legal slots",
+        "槽位名只能是六个合法槽位之一",
+        "A slot name must be one of the six legal slots",
     ),
     (
         "在 models 里定义该模型，或把这里改成已存在的模型 id",
@@ -703,7 +707,7 @@ pub fn resolve_source(model: &ModelConfig) -> Result<ModelSource, ConfigError> {
         field: "models.<id>.source".to_owned(),
         value: model.base_url.clone(),
         expected: SOURCE_VALUES.to_owned(),
-        fix: "显式写 source（见 §18.1 的 source 表；systemone / rerank 不参与 auto 推断）".to_owned(),
+        fix: "显式写 source（见 §18.1 的 source 表；systemone / rerank / embedding 不参与 auto 推断）".to_owned(),
     })
 }
 
@@ -757,12 +761,16 @@ pub fn resolve_adapter(model: &ModelConfig, slot: SlotKind, source: ModelSource)
         return adapter;
     }
     match source {
-        ModelSource::Local | ModelSource::SystemOne | ModelSource::Rerank => Adapter::Native,
+        ModelSource::Local
+        | ModelSource::SystemOne
+        | ModelSource::Rerank
+        | ModelSource::Embedding => Adapter::Native,
         ModelSource::Auto => Adapter::Json,
         ModelSource::Openai | ModelSource::Anthropic | ModelSource::Responses => match slot {
             SlotKind::Classify | SlotKind::Decide => Adapter::Json,
             SlotKind::Summarize | SlotKind::Vision => Adapter::Text,
             SlotKind::Rerank => Adapter::Ordered,
+            SlotKind::Embedding => Adapter::Json,
         },
     }
 }
@@ -863,7 +871,7 @@ fn parse_serves(value: &YamlValue, field: &str, errors: &mut Vec<ConfigError>) -
                     field: item_field,
                     value: Some(name.clone()),
                     expected: SLOT_NAMES.to_owned(),
-                    fix: "把槽位名改成五个合法槽位之一".to_owned(),
+                    fix: "把槽位名改成六个合法槽位之一".to_owned(),
                 }),
             },
             other => errors.push(type_error(&item_field, other, "槽位名（字符串）")),
@@ -894,7 +902,7 @@ fn parse_slots(
                 field,
                 value: Some(name.clone()),
                 expected: SLOT_NAMES.to_owned(),
-                fix: "槽位名只能是五个合法槽位之一".to_owned(),
+                fix: "槽位名只能是六个合法槽位之一".to_owned(),
             });
             continue;
         }
@@ -1071,7 +1079,7 @@ fn parse_paths(value: Option<&YamlValue>, errors: &mut Vec<ConfigError>) -> Path
 
 // ---------- 内部：绑定与取值辅助 ----------
 
-/// 解析五个槽位的绑定（§3.10）：显式覆盖优先；否则 `source: systemone` 的模型优先，
+/// 解析六个槽位的绑定（§3.10）：显式覆盖优先；否则 `source: systemone` 的模型优先，
 /// 没有再按 models 声明顺序取第一个 serves 命中的模型（§18.1「能用 systemone 就用它」）。
 fn build_bindings(
     models: &[ModelEntry],
@@ -1129,7 +1137,7 @@ fn slot_from_str(name: &str) -> Option<SlotKind> {
 fn default_mode_for_slot(slot: SlotKind) -> SlmMode {
     match slot {
         SlotKind::Classify | SlotKind::Decide => SlmMode::Embedded,
-        SlotKind::Rerank | SlotKind::Summarize | SlotKind::Vision => SlmMode::Http,
+        SlotKind::Rerank | SlotKind::Summarize | SlotKind::Vision | SlotKind::Embedding => SlmMode::Http,
     }
 }
 
@@ -1333,6 +1341,7 @@ fn parse_source_value(text: &str) -> Option<ModelSource> {
         "responses" => Some(ModelSource::Responses),
         "systemone" => Some(ModelSource::SystemOne),
         "rerank" => Some(ModelSource::Rerank),
+        "embedding" => Some(ModelSource::Embedding),
         _ => None,
     }
 }
@@ -1391,14 +1400,14 @@ mod tests {
             .bindings
             .iter()
             .find(|binding| binding.slot == slot)
-            .expect("五个槽位都应有绑定")
+            .expect("六个槽位都应有绑定")
     }
 
     fn errors_of(text: &str) -> Vec<ConfigError> {
         parse_config(text, "test.yaml").expect_err("应当报错").items
     }
 
-    /// §3.10 + §3.8：最小配置能解析，两个模型覆盖四个槽位，rerank 为空。
+    /// §3.10 + §3.8：最小配置能解析，两个模型覆盖四个槽位，rerank 与 embedding 为空。
     #[test]
     fn minimal_config_parses_and_binds() {
         let config = parse_config(
@@ -1407,7 +1416,7 @@ mod tests {
         )
         .expect("最小配置应当解析成功");
         assert_eq!(config.models.len(), 2);
-        assert_eq!(config.bindings.len(), 5);
+        assert_eq!(config.bindings.len(), 6);
         assert_eq!(
             binding(&config, SlotKind::Classify).model_id.as_deref(),
             Some("jev")
@@ -1472,12 +1481,25 @@ mod tests {
         assert_eq!(classify.adapter, Some(Adapter::Native));
     }
 
-    /// §3.8：一个模型都不配时，五个槽位全空但仍然成功。
+    /// §3.10：只写 serves 不写 slots 时，槽位按模型声明自动绑定（含 embedding）。
+    #[test]
+    fn serves_alone_auto_binds_every_declared_slot() {
+        let config = parse_config(
+            "models:\n  bge:\n    source: embedding\n    base_url: http://127.0.0.1:10020\n    model: bge-m3\n    serves: [embedding]\n",
+            "test.yaml",
+        )
+        .expect("应解析成功");
+        let bound = binding(&config, SlotKind::Embedding);
+        assert_eq!(bound.model_id.as_deref(), Some("bge"));
+        assert!(matches!(bound.source, Some(ModelSource::Embedding)));
+    }
+
+    /// §3.8：一个模型都不配时，六个槽位全空但仍然成功。
     #[test]
     fn empty_config_leaves_all_slots_unbound() {
         let config = parse_config("", "test.yaml").expect("空配置应当解析成功");
         assert!(config.models.is_empty());
-        assert_eq!(config.bindings.len(), 5);
+        assert_eq!(config.bindings.len(), 6);
         for slot in SlotKind::ALL {
             assert_eq!(binding(&config, slot).model_id, None);
         }
@@ -1520,7 +1542,7 @@ mod tests {
         assert_eq!(errors[0].value.as_deref(), Some("gpt"));
         assert_eq!(
             errors[0].expected,
-            "auto / local / openai / anthropic / responses / systemone / rerank"
+            "auto / local / openai / anthropic / responses / systemone / rerank / embedding"
         );
     }
 
@@ -1587,7 +1609,7 @@ mod tests {
         assert_eq!(errors[0].code, "CONFIG_SOURCE_UNRESOLVED");
         assert_eq!(
             errors[0].fix,
-            "显式写 source（见 §18.1 的 source 表；systemone / rerank 不参与 auto 推断）"
+            "显式写 source（见 §18.1 的 source 表；systemone / rerank / embedding 不参与 auto 推断）"
         );
     }
 
@@ -1673,13 +1695,13 @@ mod tests {
         assert_eq!(errors[0].field, "models.jev.serves[1]");
     }
 
-    /// §3.10：slots 键不是合法槽位名被拒。
+    /// §3.10：slots 键不是合法槽位名被拒（embedding 现已是合法槽位）。
     #[test]
     fn slots_key_must_be_a_legal_slot() {
-        let errors = errors_of("slots:\n  embedding: jev\n");
+        let errors = errors_of("slots:\n  bogus: jev\n");
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, "CONFIG_UNKNOWN_SLOT");
-        assert_eq!(errors[0].field, "slots.embedding");
+        assert_eq!(errors[0].field, "slots.bogus");
     }
 
     /// §18.9：YAML 语法错要报出位置。

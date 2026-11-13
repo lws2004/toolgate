@@ -571,7 +571,7 @@ mod tests {
         assert_eq!(meta["intent"], json!("raw"));
         assert!(meta["confidence"].is_null());
         let status = meta["slmStatus"].as_object().expect("slmStatus 是对象");
-        assert_eq!(status.len(), 5);
+        assert_eq!(status.len(), 6);
         for kind in SlotKind::ALL {
             assert_eq!(status[kind.as_str()], json!("unavailable"));
         }

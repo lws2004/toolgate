@@ -1,6 +1,6 @@
 //! 跨槽位服务能力判定（§3.10 准入 / §18.1 协议能力表）。
 //!
-//! 槽位形状固定（§3.2）：五个槽位的输入输出契约不随模型变。一个模型要服务
+//! 槽位形状固定（§3.2）：六个槽位的输入输出契约不随模型变。一个模型要服务
 //! 非原生槽位，需两条同时成立（§3.10「信息充分 ∧ 形状可转换」）：
 //!   ① 输入信息充分：目标槽位要求的信息都在该模型能拿到的输入里；
 //!   ② 输出形状可转换：模型输出能稳定转成目标槽位契约形状（§3.10 适配器表）。
@@ -70,6 +70,10 @@ fn systemone(slot: SlotKind) -> Capability {
             CapabilityGrade::Unavailable,
             "无排序接口，拿不到 rerank 所需的候选集打分；从 serves 移除 rerank，或改用支持排序的来源",
         ),
+        SlotKind::Embedding => cap(
+            CapabilityGrade::Unavailable,
+            "无向量化接口，拿不到 embedding 所需的定长向量；从 serves 移除 embedding，或改用 embedding 来源",
+        ),
     }
 }
 
@@ -96,6 +100,10 @@ fn llm_protocol(slot: SlotKind) -> Capability {
             CapabilityGrade::Limited,
             "协议无原生排序接口，需 ordered 适配器产出排序列表且分数非校准；改用专用 reranker 来源",
         ),
+        SlotKind::Embedding => cap(
+            CapabilityGrade::Unavailable,
+            "通用 chat 协议无原生向量端点；从 serves 移除 embedding，或改用 source: embedding",
+        ),
     }
 }
 
@@ -113,9 +121,23 @@ fn rerank(slot: SlotKind) -> Capability {
     }
 }
 
+/// §18.1：原生 embedding 协议只产出向量，不做判定 / 生成 / 排序 / 传图。
+fn embedding(slot: SlotKind) -> Capability {
+    match slot {
+        SlotKind::Embedding => cap(
+            CapabilityGrade::Available,
+            "原生 /v1/embeddings 返回定长向量，满足 §3.2 的 embedding 契约",
+        ),
+        _ => cap(
+            CapabilityGrade::Unavailable,
+            "embedding 协议只返回向量，缺文本 / 概率 / 排序 / 图像输出通道；从 serves 移除该槽位或改用其它来源",
+        ),
+    }
+}
+
 /// §19.6 / §3.11：当前构建是否包含该来源所需的协议客户端。
 ///
-/// 外部协议来源（openai / anthropic / responses / systemone）走 HTTP 客户端，
+/// 外部协议来源（openai / anthropic / responses / systemone / rerank / embedding）走 HTTP 客户端，
 /// 属可选层——默认构建关闭 `external-protocols`，此时即使配置绑定了也**不可用**。
 /// 已绑定不等于能用：状态不能谎报 `ready`（§7.3）。
 pub fn client_available(source: ModelSource) -> bool {
@@ -124,7 +146,8 @@ pub fn client_available(source: ModelSource) -> bool {
         | ModelSource::Anthropic
         | ModelSource::Responses
         | ModelSource::SystemOne
-        | ModelSource::Rerank => cfg!(feature = "external-protocols"),
+        | ModelSource::Rerank
+        | ModelSource::Embedding => cfg!(feature = "external-protocols"),
         ModelSource::Auto | ModelSource::Local => true,
     }
 }
@@ -148,6 +171,7 @@ pub fn source_slot_capability(source: ModelSource, slot: SlotKind) -> Capability
     match source {
         ModelSource::SystemOne => systemone(slot),
         ModelSource::Rerank => rerank(slot),
+        ModelSource::Embedding => embedding(slot),
         ModelSource::Openai | ModelSource::Anthropic | ModelSource::Responses => llm_protocol(slot),
         ModelSource::Auto | ModelSource::Local => cap(
             CapabilityGrade::Unspecified,
@@ -160,7 +184,7 @@ pub fn source_slot_capability(source: ModelSource, slot: SlotKind) -> Capability
 mod tests {
     use super::*;
 
-    const SOURCES: [ModelSource; 7] = [
+    const SOURCES: [ModelSource; 8] = [
         ModelSource::Auto,
         ModelSource::Local,
         ModelSource::Openai,
@@ -168,6 +192,7 @@ mod tests {
         ModelSource::Responses,
         ModelSource::SystemOne,
         ModelSource::Rerank,
+        ModelSource::Embedding,
     ];
 
     /// §19.6：外部协议来源的可用性随构建 feature 变化；local / auto 恒可用。
@@ -180,6 +205,7 @@ mod tests {
             ModelSource::Responses,
             ModelSource::SystemOne,
             ModelSource::Rerank,
+            ModelSource::Embedding,
         ] {
             assert_eq!(client_available(source), expected_external, "{source:?}");
             let matrix_usable = source_slot_capability(source, SlotKind::Decide).grade
@@ -220,7 +246,7 @@ mod tests {
         assert!(!source_slot_usable(ModelSource::SystemOne, SlotKind::Summarize));
     }
 
-    /// §18.1 表 6 来源 × 5 槽位全覆盖，且每条都带理由。
+    /// §18.1 表 8 来源 × 6 槽位全覆盖，且每条都带理由。
     #[test]
     fn matrix_covers_every_source_and_slot() {
         for source in SOURCES {
@@ -241,9 +267,10 @@ mod tests {
         assert_eq!(grade(SlotKind::Classify), G::Available);
         assert_eq!(grade(SlotKind::Decide), G::Available);
         assert_eq!(grade(SlotKind::Vision), G::Available);
+        assert_eq!(grade(SlotKind::Embedding), G::Unavailable);
     }
 
-    /// §18.1 rerank 列：只有 rerank 槽位可用，其余四个槽位不可用。
+    /// §18.1 rerank 列：只有 rerank 槽位可用，其余五个槽位不可用。
     #[test]
     fn rerank_row_matches_spec_table() {
         use CapabilityGrade as G;
@@ -254,6 +281,7 @@ mod tests {
             SlotKind::Decide,
             SlotKind::Summarize,
             SlotKind::Vision,
+            SlotKind::Embedding,
         ] {
             assert_eq!(grade(slot), G::Unavailable, "{slot:?}");
         }
@@ -278,6 +306,7 @@ mod tests {
             ] {
                 assert_eq!(grade(slot), G::Available, "{source:?}/{slot:?}");
             }
+            assert_eq!(grade(SlotKind::Embedding), G::Unavailable, "{source:?}");
         }
     }
 

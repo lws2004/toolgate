@@ -22,9 +22,9 @@
 | 进程外（http，loopback） | +1-3ms（本机回环） | 数据出进程但不出机器 | 多实例共享、模型大、要故障隔离 |
 | 远程 | +网络延迟 | 数据出机器 | 不推荐（违背数据隔离） |
 
-**为什么不是五个槽位一律进程内**：进程内的收益是省掉 IPC 的 1-3ms，这笔收益只在
+**为什么不是六个槽位一律进程内**：进程内的收益是省掉 IPC 的 1-3ms，这笔收益只在
 「端到端预算几十毫秒」的槽位上成立。§3.1 的预算里只有 classify（<20ms）与
-decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank（批处理）
+decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank（批处理）、embedding（批处理）
 的预算比 IPC 大两三个数量级，进程内省下的时间可以忽略，却要把数 GB 的模型
 装进工具进程。
 
@@ -35,10 +35,11 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
 | rerank | http | 批处理、N 可变；570M 模型常驻换不来收益 |
 | summarize | http | 预算 <1s；生成模型较大，进程内常驻不划算 |
 | vision | http | 预算 <2s；多模态后端平台绑定最重 |
+| embedding | http | 批处理、N 可变；向量模型常驻换不来收益 |
 
 **30B 级 agent 模型不归本节管**：它是本地 agent（客户端）的模型，由客户端部署
 与加载，不需要 toolgate 进程背；同机共存时用进程外服务避免争内存（§21.7.9）。
-本节的模型适配层只服务五个槽位（2B 级）。
+本节的模型适配层只服务六个槽位（2B 级）。
 
 **进程内默认还有三个前提**，任一不满足就该整机走 http：
 
@@ -57,8 +58,8 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
    实例（§3.10 的 serves）；实例是进程级单例，引用计数归零才能卸载。
 2. **常驻上限默认 2 个模型实例，热槽位优先。** classify / decide 指向同一模型时
    共用一个实例（参考实现就是这种形态）；指向不同模型时两个都常驻，冷槽位不再
-   驻留。冷槽位按 LRU 竞争剩余名额。依据是参考实现的内存账：五个槽位全常驻
-   约 10GB（4B + 2.2B + 1.7B + 1.9B + 0.57B 的 8bit 权重，估算值，未含运行时
+   驻留。冷槽位按 LRU 竞争剩余名额。依据是参考实现的内存账：六个槽位全常驻
+   约 11GB（4B + 2.2B + 1.7B + 1.9B + 0.57B rerank + 0.57B embedding 的 8bit 权重，估算值，未含运行时
    开销），普通开发机放不下。上限可配（`slm.embedded.max_resident_models`）；
    启动时按模型文件大小估算常驻内存，估算值超过物理内存 50% 即拒绝启动。
 3. **加载时机：热槽位启动时预加载，冷槽位首次调用时懒加载。** 预加载在后台
@@ -113,9 +114,10 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
 | `responses` | OpenAI Responses | 同上 | 同上 | OpenAI Responses 兼容服务 |
 | `systemone` | TypeSafe SystemOne（`/v1/systemone`） | 同上 | 同上 | StartLux-Decision 等类型化判定服务 |
 | `rerank` | 原生重排序端点（`/v1/rerank`） | 同上 | 同上 | jina-reranker 等专用 listwise reranker |
+| `embedding` | 原生向量端点（`/v1/embeddings`） | 同上 | 同上 | bge-m3 等 embedding 服务 |
 | `auto` | 按 URL 推断 | `path` 或 `base_url` + `model` | 推断为上面某一种，规则见下 | 地址已含协议信息时 |
 
-**`base_url` 口径**：`openai` / `anthropic` / `responses` 的 `base_url` 是含 `/v1` 的 API 根（如 `http://127.0.0.1:8080/v1`）；`systemone` / `rerank` 是不含 `/v1` 的**服务根地址**，客户端自行拼 `/v1/systemone` / `/v1/rerank`。两者不可混用，否则会拼出 `/v1/v1/...`。
+**`base_url` 口径**：`openai` / `anthropic` / `responses` 的 `base_url` 是含 `/v1` 的 API 根（如 `http://127.0.0.1:8080/v1`）；`systemone` / `rerank` / `embedding` 是不含 `/v1` 的**服务根地址**，客户端自行拼 `/v1/systemone` / `/v1/rerank` / `/v1/embeddings`。三者不可与含 `/v1` 的 API 根混用，否则会拼出 `/v1/v1/...`。
 
 ```yaml
 models:
@@ -124,7 +126,7 @@ models:
     path: ~/.toolgate/models/jev
     serves: [classify, decide]
   lfm3-vl:
-    source: auto              # auto（默认）| local | openai | anthropic | responses | systemone | rerank
+    source: auto              # auto（默认）| local | openai | anthropic | responses | systemone | rerank | embedding
     base_url: http://127.0.0.1:8080/v1
     model: lfm3-vl
     api_key_env: TOOLGATE_MODEL_KEY   # 可选；密钥从环境变量读，不落配置
@@ -140,30 +142,32 @@ models:
 5. host 是 `api.openai.com` → `openai`；`api.anthropic.com` → `anthropic`；
 6. 都不命中 → **启动失败**，要求显式写 `source`。
 
-**这六条顺序不变，`systemone` 与 `rerank` 都不进自动推断。** `base_url` 写的是服务根地址
+**这六条顺序不变，`systemone`、`rerank` 与 `embedding` 都不进自动推断。** `base_url` 写的是服务根地址
 时，根地址里没有任何协议特征可据此判断后端属于哪个独立协议族——同一个根地址
 既能挂 OpenAI 兼容端点，也能挂 systemone、rerank 等独立协议端点。按本节的保守
 推断原则（§1.4.4 的可行动失败：猜错协议比报错更糟），
-**`systemone` 与 `rerank` 都必须显式写 `source`**。
+**`systemone`、`rerank` 与 `embedding` 都必须显式写 `source`**。
 
 显式写 `source: systemone` 时，`base_url` 指向服务根地址，客户端自行拼
-`/v1/systemone` 路径；`source: rerank` 同口径，客户端拼 `/v1/rerank`（形状见下）。
+`/v1/systemone` 路径；`source: rerank` 同口径，客户端拼 `/v1/rerank`；`source: embedding` 拼 `/v1/embeddings`（形状见 §3.2）。
 
 不做启动探测：探测要发真实请求，且错误响应形状不可靠；猜错协议比报错更糟（§1.4.4 的可行动失败）。
 
-**协议能力不是能力等价**：五类接口是「传输形态」，各槽位能否用要看接口能力（适配器见 §3.10）：
+**协议能力不是能力等价**：六类接口是「传输形态」，各槽位能否用要看接口能力（适配器见 §3.10）：
 
-| 槽位 | openai | anthropic | responses | systemone | rerank | 说明 |
-|---|---|---|---|---|---|---|
-| summarize | 可用 | 可用 | 可用 | **不可用** | **不可用** | systemone 只做判定，不生成文本；rerank 协议只做排序 |
-| vision | 可用 | 可用 | 可用 | 可用 | **不可用** | systemone 的 `images` 需后端模型带 vision tower（本机 4B MLX 构建带） |
-| classify | 可用（JSON schema） | 可用（JSON / tool use） | 可用（structured outputs） | **可用（choice → 逐标签分数）** | **不可用** | systemone 的 `choice` 返回逐选项校准概率，按 §3.10 映射成每个标签的分数；`choice` / `confidence` 字段不参与映射 |
-| decide | **受限** | **受限** | **受限** | **可用（给校准概率）** | **不可用** | systemone 的 `noul` = P(yes)，直接满足 §3.2 decide 契约与 §7.2 门控 |
-| rerank | **受限** | **受限** | **受限** | **不可用** | **可用（原生排序）** | systemone 无排序接口；`source: rerank` 走原生 `/v1/rerank` |
+| 槽位 | openai | anthropic | responses | systemone | rerank | embedding | 说明 |
+|---|---|---|---|---|---|---|---|
+| summarize | 可用 | 可用 | 可用 | **不可用** | **不可用** | **不可用** | systemone 只做判定，不生成文本；rerank / embedding 只做排序 / 向量，不生成文本 |
+| vision | 可用 | 可用 | 可用 | 可用 | **不可用** | **不可用** | systemone 的 `images` 需后端模型带 vision tower（本机 4B MLX 构建带） |
+| classify | 可用（JSON schema） | 可用（JSON / tool use） | 可用（structured outputs） | **可用（choice → 逐标签分数）** | **不可用** | **不可用** | systemone 的 `choice` 返回逐选项校准概率，按 §3.10 映射成每个标签的分数；`choice` / `confidence` 字段不参与映射 |
+| decide | **受限** | **受限** | **受限** | **可用（给校准概率）** | **不可用** | **不可用** | systemone 的 `noul` = P(yes)，直接满足 §3.2 decide 契约与 §7.2 门控 |
+| rerank | **受限** | **受限** | **受限** | **不可用** | **可用（原生排序）** | **不可用** | systemone 无排序接口；`source: rerank` 走原生 `/v1/rerank`；embedding 只给向量，排序由工具层余弦实现（§5.2），不在槽位内 |
+| embedding | **不可用** | **不可用** | **不可用** | **不可用** | **不可用** | **可用（原生向量）** | 只有 `source: embedding` 的 `/v1/embeddings` 满足 §3.2 embedding 契约；其余协议无向量输出通道 |
 
 **这张表是 §3.10「信息充分 ∧ 形状可转换」的判例**：每个「不可用」都能归到输入
-信息不足（systemone 不生成文本、无排序接口；rerank 协议只返回排序结果，缺文本 /
-概率 / 图像输出通道），每个「受限」归到输出形状可转但概率非校准或适配未落；
+信息不足（systemone 不生成文本、无排序 / 向量接口；rerank 协议只返回排序结果，
+embedding 协议只返回向量，两者都缺文本 / 概率 / 图像输出通道），每个「受限」归到
+输出形状可转但概率非校准或适配未落；
 `rerank × rerank` 的「可用」是信息充分且形状可转的原生端点；`classify × systemone`
 的「可用」是形状可转换且映射已落（§3.10）。代码侧由 `capability` 模块按本表固化
 `source × slot` 判定，作为运行时前置准入的唯一可执行落点——文档表是权威，代码判定
@@ -222,7 +226,7 @@ models:
 | 槽位 → 协议 | `POST /v1/rerank`，`{"model": <models.<id>.model>, "query": ..., "documents": [...]}`；`model` 不做别名推断。与上游启动名是否一致无法在配置期判定（§18.1 不做启动探测），上游返回 `model_not_found` 时按 §18.9 第四层 / §3.11 首次使用校验降级并告警（§7.3），不在配置期 fail loud |
 | 协议 → 槽位 | `results[].{index, relevance_score}` → `RerankResult{index, score}`；`document` 等额外字段丢弃；再按 §3.2 校验覆盖全部输入、index 指向原始位置、按 score 降序 |
 
-`RerankInput.top_n` 不透传（上游是否支持本轮未实测）；槽位按 §3.2 返回覆盖全部输入的完整 `results`，截断由工具层按 §5.2 的确定性截断完成（与 `ordered` 路径「`top_n` 透传但 results 仍须覆盖全部候选」对照）。形状不符按 §3.11 降级。能力表中 `rerank` 协议对其余四个槽位判为「不可用」；`serves` 是声明不是承诺（§3.11），声明阶段不因此拒绝配置，运行时按 §3.11 前置准入拒绝并降级。`relevance_score` 是相关性分数、非校准概率，只用作顺序、不作置信度门控输入（§5.2、§18.1）；`UNCALIBRATED` 告知只适用于自报概率的 `ordered` 路径。HTTP 发送在 `external-protocols` feature 后（§19.6）。
+`RerankInput.top_n` 不透传（上游是否支持本轮未实测）；槽位按 §3.2 返回覆盖全部输入的完整 `results`，截断由工具层按 §5.2 的确定性截断完成（与 `ordered` 路径「`top_n` 透传但 results 仍须覆盖全部候选」对照）。形状不符按 §3.11 降级。能力表中 `rerank` 与 `embedding` 协议对各自其余五个槽位判为「不可用」；`serves` 是声明不是承诺（§3.11），声明阶段不因此拒绝配置，运行时按 §3.11 前置准入拒绝并降级。`relevance_score` 是相关性分数、非校准概率，只用作顺序、不作置信度门控输入（§5.2、§18.1）；`UNCALIBRATED` 告知只适用于自报概率的 `ordered` 路径。HTTP 发送在 `external-protocols` feature 后（§19.6）。
 
 #### vision 适配器的协议形状
 
@@ -371,7 +375,7 @@ models:
 
 **边界**：本节只管协议选择，不改 §3.2 的槽位契约、也不改 §5.1 的问题定义。
 
-**部署约束**：外部来源（`openai` / `anthropic` / `responses` / `systemone` / `rerank` / `auto` 解析为外部协议时）`mode` 只能是 `http`；`embedded` 只适用于 `source: local`。非法组合启动即失败（fail loud）。`base_url` 不写时用 `slm.http.base_url`。
+**部署约束**：外部来源（`openai` / `anthropic` / `responses` / `systemone` / `rerank` / `embedding` / `auto` 解析为外部协议时）`mode` 只能是 `http`；`embedded` 只适用于 `source: local`。非法组合启动即失败（fail loud）。`base_url` 不写时用 `slm.http.base_url`。
 
 **数据边界**：外部协议默认只接受 loopback（127.0.0.1 / localhost）。远程 endpoint 会让数据出机器，违背 §8 的隔离目标——必须显式配置 `allow_remote: true` 并在启动时告警；第一期不实现远程来源。
 
@@ -951,7 +955,7 @@ cargo build --release    # 产出一个可执行文件，无运行时依赖
 |---|---|
 | agent 框架 | 只依赖 MCP 协议（§18.2） |
 | 云端模型 | 工具层不知道对面是谁（§11） |
-| 本地模型 | 五个槽位，参考实现是四个模型族（jev / jina-reranker / LFM3 / LFM3-VL），全部可替换（§3、§18.1） |
+| 本地模型 | 六个槽位，参考实现是五个模型族（jev / jina-reranker / bge-m3 / LFM3 / LFM3-VL），全部可替换（§3、§18.1） |
 | 操作系统 | 第一期 macOS；长期目标是不绑定（§19.7） |
 
 **但「通用」不等于「万能」**。§15.3 列了六类不适用场景：
@@ -1011,7 +1015,7 @@ cargo build --release    # 产出一个可执行文件，无运行时依赖
 | 能力 | 形态 | 隔离方式 | 为什么不做进默认层 |
 |---|---|---|---|
 | 本地模型推理（embedded） | llama.cpp / MLX 的 Rust 绑定或动态库 | Cargo feature `slm-embedded`（待实现） | C++ / Apple 框架绑定破坏单二进制，native 崩溃会带走整个进程（§18.1） |
-| 外部模型协议客户端（openai / anthropic / responses / systemone / rerank） | HTTP 客户端库 `reqwest`（Cargo feature `external-protocols`） | 默认关闭；配置外部 `source`（openai / anthropic / responses / systemone / rerank / auto）时启用 | 默认层不引入 HTTP 客户端；纯本地路径不需要（§18.1） |
+| 外部模型协议客户端（openai / anthropic / responses / systemone / rerank / embedding） | HTTP 客户端库 `reqwest`（Cargo feature `external-protocols`） | 默认关闭；配置外部 `source`（openai / anthropic / responses / systemone / rerank / embedding / auto）时启用 | 默认层不引入 HTTP 客户端；纯本地路径不需要（§18.1） |
 | WebP 编码 | ffmpeg / cwebp 子进程 | 运行时检测命令是否存在（§10.2b） | 为约 3.5% 的体积收益引入 C 依赖不值得（§10.2b 的三条判据） |
 | fetch provider | 外部子进程（dsh-web-fetch / pi / opencli / moli / command） | `fetch.provider` 配置，默认 `none` | 取数能力由客户端生态提供，不内建网络栈 |
 
@@ -1026,7 +1030,7 @@ GC 运行时、日志聚合客户端。它们会把「本地常驻小工具」�
 单二进制（§19.3）。默认关闭该 feature 时，`reqwest` 完全不进默认构建。
 
 **默认构建不含 HTTP 客户端时的行为**：配置了外部 `source`（`openai` /
-`anthropic` / `responses` / `systemone` / `rerank`）的槽位**按 §3.8 降级并告警**，归类为
+`anthropic` / `responses` / `systemone` / `rerank` / `embedding`）的槽位**按 §3.8 降级并告警**，归类为
 资源层失败（§18.9 四层校验的第四层），**不是配置错误**——配置本身合法，缺的是
 这个构建里的后端能力。判定发生在启动时发现「该 feature 未编入」，不是配置解析
 阶段。

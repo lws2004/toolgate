@@ -64,7 +64,7 @@
 | 本地 agent | 进程外、由 30B 级本地模型驱动的 agent 循环，通过 MCP 消费 6 个工具；不是 toolgate 的组件，也不是槽位 | §21.7 |
 | 第一期 | v2 首版（阶段 1–4），平台范围只含 macOS（§19.7） | §19.7 |
 | L0–L4 | 成本阶梯：确定性 / 判定 / 生成 / 视觉 / 云端 | §2.1、§6.1 |
-| 槽位 | 能力契约，不是具体模型：classify / rerank / decide / summarize / vision | §3.1 |
+| 槽位 | 能力契约，不是具体模型：classify / rerank / decide / summarize / vision / embedding | §3.1 |
 | embedded / http | 槽位模型的两种部署形态：进程内动态库 / 本机回环 HTTP 服务 | §18.1 |
 | intent | 调用方表达的输出偏好：raw / summary / structured / visual / auto | §4.2 |
 | spill | 超限输出的落盘副本 + 指针 | §9.1 |

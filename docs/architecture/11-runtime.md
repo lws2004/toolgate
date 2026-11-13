@@ -94,7 +94,7 @@ dsh-ledger-compact 的对照与六条借鉴见附件 E.5。
 
 | 模块 | 工作量 | 依赖 |
 |---|---|---|
-| SLM 客户端（五个槽位的契约适配：classify / rerank / decide / summarize / vision） | 中 | 本地推理后端（llama.cpp / MLX / vLLM） |
+| SLM 客户端（六个槽位的契约适配：classify / rerank / embedding / decide / summarize / vision） | 中 | 本地推理后端（llama.cpp / MLX / vLLM） |
 | embedded 推理后端（动态库加载、模型实例与常驻管理、故障边界，§18.1） | 大 | llama.cpp / MLX 的 Rust 绑定 |
 | 判定封装（命名问题 → 带概率的答案） | 中 | decide 槽位的接口形态 |
 | `_meta` 解析 + 协议兼容层（2026-07-28 无握手 + 标准 initialize 握手） | 中 | MCP 传输层 |
@@ -211,7 +211,7 @@ PTC 里每次子调用仍是一个独立的 MCP 请求，工具层不做批量�
 
 ### 阶段 1：SLM 接入层
 
-- 五个槽位的客户端适配（classify / rerank / decide / summarize / vision）
+- 六个槽位的客户端适配（classify / rerank / embedding / decide / summarize / vision）
 - 判定封装：把「命名问题」映射到 decide 槽位的输入格式
 - 置信度门控
 - 降级路径（模型不可用时静默回退到 L0）
@@ -227,9 +227,10 @@ PTC 里每次子调用仍是一个独立的 MCP 请求，工具层不做批量�
 验收目标在 §3.2 的 decide 契约与 §7.2 的门控里已经定案，本轮没有改动任何架构
 决策，只是首次有端到端实测证据。systemone 协议本身见 §18.1。
 
-**尚未覆盖的部分**（不影响本条验收）：五个槽位的客户端适配五条全落——decide
-（systemone / noul）、summarize（text 适配器）、rerank（ordered 适配器）、vision
-（多模态 chat 适配器）、classify（json 适配器，模型自报分数、非校准）；
+**尚未覆盖的部分**（不影响本条验收）：六个槽位的客户端适配六条全落——decide
+（systemone / noul）、summarize（text 适配器）、rerank（ordered 适配器）、
+embedding（原生 `/v1/embeddings` 适配器，余弦排序在工具层）、vision（多模态 chat
+适配器）、classify（json 适配器，模型自报分数、非校准）；
 §13.4 的 turn 聚合钩子（方案 B）随阶段 1.5 与阶段 4 落地；`external-protocols`
 feature 默认关闭，默认构建下这条路径不可用（§19.6）。
 

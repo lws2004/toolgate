@@ -50,7 +50,7 @@ async fn raw_intent_keeps_every_tool_off_the_model() {
             "edit",
             json!({ "path": "a.txt", "edits": [{ "oldText": "hello", "newText": "hi" }] }),
         ),
-        ("search", json!({ "mode": "content", "query": "hi" })),
+        ("search", json!({ "mode": "content", "pattern": "hi" })),
         ("bash", json!({ "binary": "/bin/echo", "args": ["ok"] })),
         ("task", json!({ "action": "list" })),
     ];
@@ -61,7 +61,7 @@ async fn raw_intent_keeps_every_tool_off_the_model() {
         let status = resp.meta["slmStatus"]
             .as_object()
             .unwrap_or_else(|| panic!("{tool} 缺 slmStatus：{:?}", resp.meta));
-        assert_eq!(status.len(), 5, "{tool} slmStatus 应有五个槽位");
+        assert_eq!(status.len(), 6, "{tool} slmStatus 应有六个槽位");
         for (slot, state) in status {
             assert_eq!(
                 state, "unavailable",
@@ -145,7 +145,7 @@ async fn structured_content_stays_stable() {
     assert!(edit.meta.get("snapshot").is_some(), "edit 返回快照");
     assert!(edit.meta["facts"]["diff"].is_string(), "edit facts.diff");
 
-    let search = dispatch("search", &json!({ "mode": "content", "query": "A" }), &ctx)
+    let search = dispatch("search", &json!({ "mode": "content", "pattern": "A" }), &ctx)
         .await
         .expect("search 成功");
     assert!(search.meta["hits"].is_u64(), "search hits");

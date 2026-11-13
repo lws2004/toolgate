@@ -7,7 +7,7 @@
 > **更新纪律**：每次改动落地后更新对应行（状态 + 证据）。判断下一步只读本文件，
 > 不要重新扫描代码与架构正文——那既慢又容易与事实源漂移。
 >
-> 最后更新：2026-11-10（§15.2 判定日志 confidence 接线补齐：bash/task/edit 三条路径改在归并结论后传入；验证基线 454/448）
+> 最后更新：2026-11-13（embedding 槽位接入 + search 语义重排退路：query 拆 pattern/query、rerank 优先 embedding 兜底；验证基线 471）
 
 ## 怎么用
 
@@ -29,13 +29,14 @@
 
 | 项 | 状态 | 架构依据 | 证据 |
 |---|---|---|---|
-| 五槽位客户端适配 | 完成 | §3.2 / §3.10 / §18.1 | `crates/toolgate-core/src/slm/`（systemone / text / ordered / vision / json）；`toolgate decide` 端到端实测见 §14 |
+| 六槽位客户端适配 | 完成 | §3.2 / §3.9 / §3.10 / §18.1 | `crates/toolgate-core/src/slm/`（systemone / text / embedding / ordered / vision / json）；`toolgate decide` 端到端实测见 §14 |
 | 判定封装（命名问题 → 带概率答案） | 完成 | §3.2 / §7.2 | `decision.rs`、`slm/systemone.rs` |
 | 置信度门控 | 完成 | §7.2 | `slots.rs` ConfidenceGate（Adopt / AdoptWithLowConfidence / BothViews） |
 | 降级路径（槽位不可用回退 L0） | 完成 | §3.8 | 各工具 `unavailable` 分支 + `SLOT_UNAVAILABLE` 告知 |
 | 错误自检三层 + ErrorCode 12 值域 | 完成 | §1.4.5 | `error.rs`；测试 `every_error_carries_next_steps` |
 | slmStatus 状态真实性（构建可用性） | 完成 | §7.3 / §19.6 | `capability::client_available` / `source_slot_usable`：默认构建下外部协议来源标 `unavailable`，不再谎报 `ready`；测试按 feature 分支 |
 | source: rerank 专属协议（ADR 0007） | 完成 | §18.1 / §3.5 / ADR 0007 | `config.rs` 的 `ModelSource::Rerank`、`capability.rs` 能力矩阵新列、`slm/rerank_protocol.rs`（原生 `/v1/rerank` 请求/响应）、client 按 source 分流的 HTTP 路径；7 个新单测；`toolgate config check --config` 实测 rerank 绑定 `native`；feature 构建真机 `call search`（25 命中）实测 `meta.rerank=applied`、`slmStatus.rerank=ready`（附件 E.11） |
+| embedding 槽位（OpenAI 兼容 `/v1/embeddings`） | 完成 | §3.9 / §18.1 | `slm/embedding_protocol.rs`（请求 `{model,input:texts}`、响应按 `data[].index` 升序还原向量、5 个协议单测）+ `client.embedding` HTTP 路径；`capability.rs` 六格矩阵该格 Available；`search_path.rs` 余弦重排退路与 `tools/search.rs` 分批（≤32 条）接线；`config check` 实测 bge-m3 绑定 `native` |
 | classify × systemone 原生路径（choice → 逐标签分数） | 完成 | §3.10 / §18.1 | `slm/systemone.rs` 的 `build_classify_request` / `parse_classify_output`（criteria 选项 map、probabilities → scores、none_probability ≥ 0.2 降级，5 个协议单测）；`capability.rs` 该格由 Limited 改 Available；`slm/client.rs` 按 source 分流到 `/v1/systemone`（`calibrated: true`）；`config.rs` 多模型同槽位优先绑 systemone 源（1 个新单测）；默认 / feature 双构建测试通过；d3-nano（:8082）真机端到端实测见附件 E.12 |
 
 ## 阶段 1.5：兼容性
@@ -54,7 +55,7 @@
 | bash：decide 九问 + summarize | 完成 | §5.1 / §7.2 | `bash_path.rs`；`gate_notices` |
 | read 图片：vision 理解 + decide 七问 + need_pixels 三档 | 完成 | §5.3 / §10.1 | `read.rs` plan_image；真实 UI 截图复核通过（imageKind=ui_screenshot、hasText=true、need_pixels 概率 0.90），vision 端到端待本机视觉模型 |
 | read 文本：decide 十问 + summarize 结构化 | 完成 | §5.3 | `read_path.rs`（file_kind / sensitivity / best_view） |
-| search：rerank 接线 | 完成 | §5.2 | `search_path.rs`；命中 > 20 且槽位可用才调用 |
+| search：语义重排接线 | 完成 | §5.2 | `search_path.rs`；query 必填主体由 pattern 承担、可选自然语言 query 决定排序：命中 > 20 且 query 非空时 rerank 优先，rerank 槽位不可用而 embedding 可用则按余弦重排；两者都不可用保持命中顺序并告知 |
 | edit：四级匹配 + decide 归因 | 完成 | §5.4 | `edit_path.rs`；p ≥ 0.85 才自动写回 |
 | task：decide 七问 + summarize | 完成 | §5.5 | `task_path.rs` |
 | write：§5.7 改动后事实返回 | 完成 | §5.7 | `write.rs`；与 edit 共用 `unified_diff` |
@@ -115,7 +116,7 @@
 
 | 命令 | 结果（2026-11-10 复测） |
 |---|---|
-| `cargo test --workspace` | 454 passed（默认构建；含 4 个阶段 5 集成用例、1 个 MCP 握手序列用例、3 个判定日志单测、7 个 rerank 协议单测与 6 个 classify × systemone 新增单测） |
+| `cargo test --workspace` | 471 passed（默认构建；含 4 个阶段 5 集成用例、1 个 MCP 握手序列用例、3 个判定日志单测、7 个 rerank 协议单测、6 个 classify × systemone 单测与 embedding 协议 7 / search 语义重排与 files 门 7 / 自动绑定 1 等新增单测） |
 | `cargo test --workspace --features external-protocols` | 448 passed（feature 构建；6 个默认构建专属的降级测试被 cfg 隔离，另含 3 个判定日志单测、7 个 rerank 协议单测与 6 个 classify × systemone 新增单测） |
 | `cargo clippy --workspace --all-targets` | No issues |
 | `cargo clippy --workspace --all-targets --features external-protocols` | No issues |

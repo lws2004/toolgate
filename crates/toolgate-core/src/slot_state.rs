@@ -52,7 +52,7 @@ pub enum FailureKind {
     ShapeMismatch,
 }
 
-/// 五个槽位的状态表。match 穷举，新增槽位即编译失败。
+/// 六个槽位的状态表。match 穷举，新增槽位即编译失败。
 fn slot_index(kind: SlotKind) -> usize {
     match kind {
         SlotKind::Classify => 0,
@@ -60,11 +60,12 @@ fn slot_index(kind: SlotKind) -> usize {
         SlotKind::Decide => 2,
         SlotKind::Summarize => 3,
         SlotKind::Vision => 4,
+        SlotKind::Embedding => 5,
     }
 }
 
 pub struct SlotHealthMap {
-    entries: [SlotHealth; 5],
+    entries: [SlotHealth; 6],
     max_failures: u32,
 }
 
@@ -290,10 +291,10 @@ mod tests {
     }
 
     #[test]
-    fn all_reports_five_slots_in_fixed_order() {
+    fn all_reports_six_slots_in_fixed_order() {
         let m = health();
         let rows = m.all();
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 6);
         let kinds: Vec<SlotKind> = rows.iter().map(|(k, _)| *k).collect();
         assert_eq!(kinds, SlotKind::ALL.to_vec());
     }

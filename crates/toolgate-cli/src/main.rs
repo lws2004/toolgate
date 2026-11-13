@@ -5,7 +5,7 @@
 //!   status             打印进程身份 uid/gid（§17.2 权限越界）
 //!   list               列出工具及其入参 schema
 //!   call <tool> [json] 直接调用一次工具（调试用）
-//!   config check       校验配置文件并打印五个槽位的最终绑定（§18.9）
+//!   config check       校验配置文件并打印六个槽位的最终绑定（§18.9）
 //!   decide             调用 decide 槽位判定一次（调试用）
 //!   summarize          调用 summarize 槽位摘要一段文本（调试用）
 //!
@@ -36,7 +36,7 @@ const USAGE: &str = "\
   status                打印进程身份 uid/gid，供无握手客户端核对权限（§17.2）
   list                  列出全部工具与入参 schema
   call <工具名> [JSON]   直接调用一次工具，参数是 JSON 对象（调试用）
-  config check          校验配置文件并打印五个槽位的最终绑定（§18.9）
+  config check          校验配置文件并打印六个槽位的最终绑定（§18.9）
   decide                调用 decide 槽位判定一次并打印概率与门控结论（调试用）
   summarize             调用 summarize 槽位摘要一段文本（调试用）
 
@@ -67,7 +67,7 @@ Subcommands:
   status                Print the process identity uid/gid for handshake-less clients (§17.2)
   list                  List all tools and their input schemas
   call <tool> [JSON]     Invoke one tool directly (debug only)
-  config check          Validate the config file and print the five slot bindings (§18.9)
+  config check          Validate the config file and print the six slot bindings (§18.9)
   decide                Run one decide-slot judgment and print probabilities and the gate
   summarize             Summarize a text with the summarize slot (debug only)
 
@@ -115,7 +115,7 @@ impl SlotRow {
             .collect()
     }
 
-    /// 五个槽位全空：无配置文件时的内置默认（§3.8）。
+    /// 六个槽位全空：无配置文件时的内置默认（§3.8）。
     fn empty() -> Vec<Self> {
         SlotKind::ALL
             .iter()
@@ -956,7 +956,7 @@ fn run_config_check(lang: Language, config_path: Option<&Path>, json_out: bool) 
             } else {
                 println!(
                     "{}",
-                    tf(lang, "未找到配置文件，使用内置默认（五个槽位全空）", &[])
+                    tf(lang, "未找到配置文件，使用内置默认（六个槽位全空）", &[])
                 );
                 print_slot_rows(lang, &rows);
             }
@@ -1058,7 +1058,7 @@ fn report_errors(lang: Language, errors: &ConfigErrors, json_out: bool) {
     }
 }
 
-/// 打印五个槽位的最终绑定（§3.10 可审计）。
+/// 打印六个槽位的最终绑定（§3.10 可审计）。
 fn print_slot_rows(lang: Language, rows: &[SlotRow]) {
     println!("{}", tf(lang, "槽位绑定（§3.10）：", &[]));
     for row in rows {

@@ -9,7 +9,7 @@
 > **状态**：架构已迭代到 v2（围绕本地小模型）并已审阅；实现按 §14 路线图推进，
 > 阶段 0–5 与 §17.2 安全底线已落地，验证基线见
 > [实现进度表](docs/implementation-status.md)。
-> 本地模型接入层已落地（decide / classify / summarize / rerank / vision 五槽位适配）；
+> 本地模型接入层已落地（decide / classify / summarize / rerank / embedding / vision 六槽位适配）；
 > `embedded` 推理后端仍属可选层（§19.6），未接入。差距表见
 > [架构文档 §13](docs/architecture/11-runtime.md#13-现有实现与新架构的差距)，
 > 升级说明见 [v1 → v2 升级指南](docs/upgrade-v1-to-v2.md)。
@@ -36,15 +36,16 @@
 
 协商层由新增的 intent 参数控制：raw / summary / structured / visual / auto。
 
-## 本地模型层：五个能力槽位
+## 本地模型层：六个能力槽位
 
-**架构不绑定任何具体模型**。它定义五个槽位，每个槽位有确定的输入输出
+**架构不绑定任何具体模型**。它定义六个槽位，每个槽位有确定的输入输出
 契约与延迟预算；具体模型是可替换的实现。
 
 | 槽位 | 输入 → 输出 | 延迟预算 |
 |---|---|---|
 | classify | 文本 + 候选标签 → 每标签分数 | < 20ms |
 | rerank | query + N 候选 → N 个分数 | < 100ms（N=300） |
+| embedding | 文本列表 → 向量列表 | < 50ms / 批（N≤32，估算） |
 | decide | state（可含图）+ 命名问题 → 每问题概率 | < 30ms |
 | summarize | 文本 → 文本或 JSON | < 1s |
 | vision | 图片 + 任务 → 文本 / 坐标 / OCR | < 2s |

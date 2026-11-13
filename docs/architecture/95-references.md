@@ -162,7 +162,16 @@ token 数以响应 `usage.prompt_tokens` 为准；拟合
 
 ### E.3.2 各槽位本机实测（原 §6.5）
 
-五个槽位按 §3.1 的契约各测一次典型负载，用来校准 §3.1 的延迟预算表。
+已测的四个槽位（classify/decide、rerank、summarize、vision）按 §3.1 的契约各测一次
+典型负载，用来校准 §3.1 的延迟预算表；embedding 槽位于 2026-11-13 只验证了
+bge-m3 原生端点的输出正确性（§18.1），延迟未测，故不入表。
+
+**embedding 那一次的口径**（2026-11-13，Apple M2 Max / 96 GiB）：服务为
+`mlx-community_bge-m3-mlx-8bit`（:10020，OpenAI 兼容 `/v1/embeddings`，dim=1024）；
+样本 25 条（hi 5 / mid 8 / lo 12，均含关键词 database）+ 1 条自然语言 query
+「database connection pool exhausted max_connections」，余弦相似度 hi 0.9425 /
+0.9154 / 0.9093 / 0.9071 / 0.8859，mid 0.6712，lo 0.7276（排序正确，全部 hi 在前）；
+延迟未测。本章不据此下延迟结论。
 硬件与口径同 §6.4（Apple M2 Max / 96 GiB / rapid-mlx 1.0.0）；除特别标注外
 其余槽位都用本机已有权重（StartLux / d3-nano / jina / PaddleOCR-VL），**没有再为槽位测量下载新模型**；§6.4 的两个 LFM 权重是为 prefill 实测拉取的。
 

@@ -18,19 +18,19 @@ use crate::bash_path::intent_tag;
 use crate::locale::{Language, tf};
 use crate::notice::{Notice, SlotFallback, budgeted_notices};
 use crate::search_path::{
-    RerankState, SearchShape, WalkLimits, WalkOutcome, apply_rerank, plan_search,
-    resolve_search_intent, structured_facts,
+    RerankState, SearchPlan, SearchShape, WalkLimits, WalkOutcome, apply_rerank, embedding_order,
+    plan_search, resolve_search_intent, structured_facts,
 };
-use crate::slots::{RerankInput, SlotKind};
+use crate::slots::{EmbeddingInput, RerankInput, SlotKind};
 use crate::truncate::{MAX_MATCH_LINE_LENGTH, truncate_head};
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "search",
-        description: "能做什么：按正则检索文件内容或按通配符枚举文件路径；结果超过 2000 行 / 50KB 保留头部并落盘。 \
-                      不能做什么：不解析网页 JS；不返回图片；rerank 槽位可用时按相关度重排，不可用时按命中顺序返回并告知（§3.8）。 \
+        description: "能做什么：content 模式用正则检索文件内容，files 模式用文件名子串 / 通配符枚举路径；content 命中超过 20 条且提供 query 时，用 rerank（优先）或 embedding 余弦按语义重排（files 不重排）；结果超过 2000 行 / 50KB 保留头部并落盘。 \
+                      不能做什么：不解析网页 JS；不返回图片；两个语义槽位都不可用或未提供 query 时按命中顺序返回并告知（§3.8）。 \
                       什么时候用别的工具：已知路径读全文用 read；修改用 edit / write；跑命令用 bash。",
-        description_en: "Can: regex content search or glob file enumeration; head-truncates past 2000 lines / 50KB and spills; reorders hits by relevance when the rerank slot is available. Cannot: run page JS or return images; when rerank is unavailable it keeps hit order and says so (§3.8). Use instead: read for a known path, edit / write to modify, bash to run commands.",
+        description_en: "Can: content mode uses regex over file contents, files mode lists paths by filename substring / glob; for content, over 20 hits with a query reorder by relevance via rerank (preferred) or embedding cosine (files never reorders); head-truncates past 2000 lines / 50KB and spills. Cannot: run page JS or return images; without query or when both semantic slots are unavailable it keeps hit order and says so (§3.8). Use instead: read for a known path, edit / write to modify, bash to run commands.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -39,9 +39,13 @@ pub fn spec() -> ToolSpec {
                     "enum": ["content", "files"],
                     "description": "content 搜内容，files 枚举文件路径"
                 },
-                "query": {
+                "pattern": {
                     "type": "string",
                     "description": "content 模式是正则表达式；files 模式是文件名子串或通配符"
+                },
+                "query": {
+                    "type": "string",
+                    "description": "可选的自然语言查询：命中超过 20 条且 rerank / embedding 槽位可用时用于按语义相关度排序"
                 },
                 "path": {
                     "type": "string",
@@ -49,16 +53,17 @@ pub fn spec() -> ToolSpec {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "最多返回多少条结果，默认 200",
-                    "minimum": 1
+                    "description": "最多返回多少条结果，默认 200，上限 200（语义重排只作用于这些候选）",
+                    "minimum": 1,
+                    "maximum": 200
                 },
                 "intent": {
                     "type": "string",
                     "enum": ["raw", "summary", "structured", "visual", "auto"],
-                    "description": "协商层输出形态：raw 全部命中（默认）/ structured 结构化候选列表 / auto 与 summary 仅在命中超过 20 条时尝试 rerank，槽位可用则按相关度重排、不可用则按命中顺序返回并告知 / visual 不适用"
+                    "description": "协商层输出形态：raw 全部命中（默认）/ structured 结构化候选列表 / auto 与 summary 仅在命中超过 20 条且提供 query 时尝试语义重排，优先 rerank、其次 embedding，都不成则按命中顺序返回并告知 / visual 不适用"
                 }
             },
-            "required": ["mode", "query"]
+            "required": ["mode", "pattern"]
         }),
     }
 }
@@ -75,14 +80,17 @@ async fn run_with_limits(
 ) -> Result<ToolResponse, ToolError> {
     let lang = ctx.language;
     let mode = required_str(args, "mode")?;
-    let query = required_str(args, "query")?;
+    let pattern = required_str(args, "pattern")?;
+    // query 是可选的语义查询：只有它参与重排；pattern 只决定命中。
+    let query = optional_str(args, "query");
     // §17.2：检索起点同样过根校验，默认 "." 解析后必须落在允许根内。
     let root = ctx.resolve_file(optional_str(args, "path").unwrap_or("."))?;
-    let max_results = optional_usize(args, "max_results").unwrap_or(200);
+    // §5.2：返回候选决定重排规模，运行期同样限幅，防止绕过 schema 的调用。
+    let max_results = optional_usize(args, "max_results").unwrap_or(200).clamp(1, 200);
 
     let (raw, hit_count, walk) = match mode {
-        "content" => search_content(&root, query, max_results, limits)?,
-        "files" => list_files(&root, query, max_results, limits)?,
+        "content" => search_content(&root, pattern, max_results, limits)?,
+        "files" => list_files(&root, pattern, max_results, limits)?,
         other => {
             return Err(ToolError::bad_argument(format!(
                 "mode 只能是 content 或 files，收到 {other}"
@@ -92,42 +100,79 @@ async fn run_with_limits(
 
     let intent = resolve_search_intent(args).map_err(ToolError::bad_argument)?;
     // §3.10：槽位可用性按绑定 + 能力矩阵真实判定，不硬编码（§7.3 状态要真实）。
-    let rerank_available = ctx.slm.as_ref().is_some_and(|client| {
-        client.is_bound(SlotKind::Rerank)
-            && client
-                .source_for_slot(SlotKind::Rerank)
-                .map(|source| crate::capability::source_slot_usable(source, SlotKind::Rerank))
-                .unwrap_or(true)
-    });
-    let mut plan =
-        plan_search(intent, hit_count, rerank_available).map_err(ToolError::bad_argument)?;
+    let slot_available = |slot: SlotKind| {
+        ctx.slm.as_ref().is_some_and(|client| {
+            client.is_bound(slot)
+                && client
+                    .source_for_slot(slot)
+                    .map(|source| crate::capability::source_slot_usable(source, slot))
+                    .unwrap_or(true)
+        })
+    };
+    let rerank_available = slot_available(SlotKind::Rerank);
+    let embedding_available = slot_available(SlotKind::Embedding);
+    let has_query = query.is_some_and(|text| !text.is_empty());
+    let mut plan = plan_search(
+        intent,
+        hit_count,
+        rerank_available,
+        embedding_available,
+        has_query,
+    )
+    .map_err(ToolError::bad_argument)?;
+    // §5.2：files 模式只枚举路径，不参与语义重排（重排只对 content 命中行有意义）。
+    confine_rerank_to_content(mode, &mut plan);
 
-    // §5.2：只有 TopK 路径真实调用 rerank；失败按 §3.8 退到命中顺序并告知，
+    // §5.2：TopK 路径先试 rerank，失败再退 embedding 余弦；都不成按命中顺序并告知，
     // 绝不谎报 applied（§4.6）。
     let mut rerank_order: Option<Vec<usize>> = None;
+    let mut embedding_meta: Option<Value> = None;
     if plan.shape == SearchShape::TopK {
         let documents: Vec<String> = raw.lines().map(str::to_owned).collect();
-        let input = RerankInput {
-            query: query.to_owned(),
-            documents,
-            top_n: None,
-        };
-        let attempted = match ctx.slm.as_ref() {
-            Some(client) => client.rerank(&input).await.ok(),
-            None => None,
-        };
-        match attempted {
-            Some(outcome) => {
+        let semantic_query = query.unwrap_or_default();
+        let mut applied = false;
+        if plan.rerank == RerankState::Applied {
+            let input = RerankInput {
+                query: semantic_query.to_owned(),
+                documents: documents.clone(),
+                top_n: None,
+            };
+            let attempted = match ctx.slm.as_ref() {
+                Some(client) => client.rerank(&input).await.ok(),
+                None => None,
+            };
+            if let Some(outcome) = attempted {
                 rerank_order = Some(outcome.output.results.iter().map(|r| r.index).collect());
+                applied = true;
             }
-            None => {
-                plan.rerank = RerankState::Unavailable;
-                plan.shape = SearchShape::All;
-                plan.notices.push(Notice::SlotUnavailable {
-                    slot: "rerank".to_owned(),
-                    fallback: SlotFallback::Mechanical,
-                });
-            }
+        }
+        let embedding_attempt = if !applied && embedding_available && has_query {
+            embedding_rerank(ctx, semantic_query, &documents).await
+        } else {
+            None
+        };
+        if let Some(attempt) = embedding_attempt {
+            rerank_order = Some(attempt.order);
+            plan.rerank = RerankState::Embedding;
+            embedding_meta = Some(json!({
+                "candidates": attempt.candidates,
+                "textsTruncated": attempt.truncated_texts,
+                "batches": attempt.batches,
+            }));
+            applied = true;
+        }
+        if !applied {
+            let failed_slot = if plan.rerank == RerankState::Embedding {
+                "embedding"
+            } else {
+                "rerank"
+            };
+            plan.rerank = RerankState::Unavailable;
+            plan.shape = SearchShape::All;
+            plan.notices.push(Notice::SlotUnavailable {
+                slot: failed_slot.to_owned(),
+                fallback: SlotFallback::Mechanical,
+            });
         }
     }
 
@@ -166,12 +211,14 @@ async fn run_with_limits(
 
     let mut meta = json!({
         "mode": mode,
+        "pattern": pattern,
         "query": query,
         "hits": hit_count,
         "truncated": truncation.truncated,
         "spill": spilled,
         "intent": intent_tag(intent),
         "rerank": plan.rerank.as_str(),
+        "embedding": embedding_meta,
         "walk": {
             "files": walk.files,
             "truncated": walk.truncated(),
@@ -196,6 +243,107 @@ async fn run_with_limits(
         meta["facts"] = facts;
     }
     Ok(ToolResponse::text(content).with_meta(meta))
+}
+
+/// §5.2：语义重排只对 content 命中行有意义；files 只枚举路径——不重排、不协商槽位，
+/// 因此也不应报 SLOT_UNAVAILABLE（files 的 `meta.rerank` 恒为 skipped）。
+fn confine_rerank_to_content(mode: &str, plan: &mut SearchPlan) {
+    if mode == "content" {
+        return;
+    }
+    if plan.shape == SearchShape::TopK {
+        plan.shape = SearchShape::All;
+    }
+    plan.rerank = RerankState::Skipped;
+    plan.notices.clear();
+}
+
+/// §5.2 / §3.8：embedding 退路的单次尝试结果；统计进 meta 便于核对有界性。
+struct EmbeddingAttempt {
+    order: Vec<usize>,
+    candidates: usize,
+    truncated_texts: usize,
+    batches: usize,
+}
+
+/// §3.2：单条文本只取前 4096 字符，避免一行吃掉整段预算。
+const MAX_EMBED_CHARS: usize = 4096;
+/// §3.2：候选行硬上限；返回候选已由 max_results 限幅，这里再兜底。
+const MAX_EMBED_DOCUMENTS: usize = 200;
+/// §3.2：每批条数上限。
+const EMBED_BATCH_SIZE: usize = 32;
+
+fn clip_text(text: &str) -> (String, bool) {
+    if text.chars().count() <= MAX_EMBED_CHARS {
+        (text.to_owned(), false)
+    } else {
+        (text.chars().take(MAX_EMBED_CHARS).collect(), true)
+    }
+}
+
+/// §3.2：按候选上限与单条上限组装待取向量的文本（query 在首位）。
+fn embedding_texts(query: &str, documents: &[String]) -> (Vec<String>, usize) {
+    let candidates = documents.len().min(MAX_EMBED_DOCUMENTS);
+    let mut texts = Vec::with_capacity(candidates + 1);
+    let mut truncated = 0usize;
+    let (query_text, was_truncated) = clip_text(query);
+    truncated += usize::from(was_truncated);
+    texts.push(query_text);
+    for document in documents.iter().take(candidates) {
+        let (text, was_truncated) = clip_text(document);
+        truncated += usize::from(was_truncated);
+        texts.push(text);
+    }
+    (texts, truncated)
+}
+
+/// §3.2：拼接各批向量后校验条数与跨批维度；任何不符即整体放弃，不猜语义。
+/// 单批内的同维由 EmbeddingOutput::validate 保证，这里只保证批间一致与条数对齐。
+fn assemble_embedding_vectors(
+    vectors: Vec<Vec<f64>>,
+    expected: usize,
+) -> Option<(Vec<f64>, Vec<Vec<f64>>)> {
+    if vectors.len() != expected {
+        return None;
+    }
+    let dim = vectors.first()?.len();
+    if vectors.iter().any(|vector| vector.len() != dim) {
+        return None;
+    }
+    let mut iter = vectors.into_iter();
+    let query_vec = iter.next()?;
+    let document_vecs: Vec<Vec<f64>> = iter.collect();
+    Some((query_vec, document_vecs))
+}
+
+/// §5.2 / §3.8：embedding 退路。把 query 与候选行按 ≤32 条分批送 /v1/embeddings，
+/// 取回同序、同维向量后按余弦相似度返回行号。任何一批失败或跨批维度不一致即整体
+/// 放弃，由调用方按命中顺序降级——无索引、无状态、有界（候选 ≤200、单条 ≤4096 字符）。
+async fn embedding_rerank(
+    ctx: &ToolContext,
+    query: &str,
+    documents: &[String],
+) -> Option<EmbeddingAttempt> {
+    let client = ctx.slm.as_ref()?;
+    let (texts, truncated_texts) = embedding_texts(query, documents);
+    let mut vectors: Vec<Vec<f64>> = Vec::with_capacity(texts.len());
+    let mut batches = 0usize;
+    for chunk in texts.chunks(EMBED_BATCH_SIZE) {
+        batches += 1;
+        let input = EmbeddingInput {
+            texts: chunk.to_vec(),
+        };
+        // 任何一批失败（超时、形状不符、槽位禁用）都整体放弃，由调用方按命中顺序降级。
+        let outcome = client.embedding(&input).await.ok()?;
+        vectors.extend(outcome.output.vectors);
+    }
+    let (query_vec, document_vecs) = assemble_embedding_vectors(vectors, texts.len())?;
+    Some(EmbeddingAttempt {
+        order: embedding_order(&query_vec, &document_vecs),
+        candidates: document_vecs.len(),
+        truncated_texts,
+        batches,
+    })
 }
 
 /// 内容检索：正则逐行匹配，返回 路径:行号:内容。
@@ -415,7 +563,7 @@ mod tests {
     async fn raw_intent_matches_v1_behavior() {
         let (ctx, dir) = ctx_with_hits("raw", 3);
         let resp = run(
-            &json!({ "mode": "content", "query": "hit", "intent": "raw" }),
+            &json!({ "mode": "content", "pattern": "hit", "intent": "raw" }),
             &ctx,
         )
         .await
@@ -435,7 +583,7 @@ mod tests {
     async fn small_hits_auto_stays_raw() {
         let (ctx, dir) = ctx_with_hits("small", 5);
         let resp = run(
-            &json!({ "mode": "content", "query": "hit", "intent": "auto" }),
+            &json!({ "mode": "content", "pattern": "hit", "query": "hit line", "intent": "auto" }),
             &ctx,
         )
         .await
@@ -462,7 +610,7 @@ mod tests {
         .expect("配置应当解析成功");
         ctx.slm = Some(std::sync::Arc::new(crate::slm::SlotClient::new(cfg)));
         let resp = run(
-            &json!({ "mode": "content", "query": "hit", "intent": "auto" }),
+            &json!({ "mode": "content", "pattern": "hit", "query": "hit line", "intent": "auto" }),
             &ctx,
         )
         .await
@@ -476,7 +624,7 @@ mod tests {
     async fn many_hits_auto_degrades_with_slot_unavailable() {
         let (ctx, dir) = ctx_with_hits("many", 25);
         let resp = run(
-            &json!({ "mode": "content", "query": "hit", "intent": "auto" }),
+            &json!({ "mode": "content", "pattern": "hit", "query": "hit line", "intent": "auto" }),
             &ctx,
         )
         .await
@@ -495,7 +643,7 @@ mod tests {
     async fn structured_intent_returns_candidate_json() {
         let (ctx, dir) = ctx_with_hits("structured", 3);
         let resp = run(
-            &json!({ "mode": "content", "query": "hit", "intent": "structured" }),
+            &json!({ "mode": "content", "pattern": "hit", "intent": "structured" }),
             &ctx,
         )
         .await
@@ -514,7 +662,7 @@ mod tests {
     async fn visual_intent_is_rejected_actionably() {
         let (ctx, dir) = ctx_with_hits("visual", 1);
         let err = run(
-            &json!({ "mode": "content", "query": "hit", "intent": "visual" }),
+            &json!({ "mode": "content", "pattern": "hit", "intent": "visual" }),
             &ctx,
         )
         .await
@@ -537,7 +685,7 @@ mod tests {
             max_depth: 2,
             ..WalkLimits::default()
         };
-        let resp = run_with_limits(&json!({ "mode": "content", "query": "hit" }), &ctx, limits)
+        let resp = run_with_limits(&json!({ "mode": "content", "pattern": "hit" }), &ctx, limits)
             .await
             .expect("run ok");
         let crate::tools::Content::Text(body) = &resp.content[0] else {
@@ -562,7 +710,7 @@ mod tests {
             max_files: 2,
             ..WalkLimits::default()
         };
-        let resp = run_with_limits(&json!({ "mode": "files", "query": "*.txt" }), &ctx, limits)
+        let resp = run_with_limits(&json!({ "mode": "files", "pattern": "*.txt" }), &ctx, limits)
             .await
             .expect("run ok");
         let crate::tools::Content::Text(body) = &resp.content[0] else {
@@ -582,7 +730,7 @@ mod tests {
             max_duration: std::time::Duration::ZERO,
             ..WalkLimits::default()
         };
-        let err = run_with_limits(&json!({ "mode": "content", "query": "hit" }), &ctx, limits)
+        let err = run_with_limits(&json!({ "mode": "content", "pattern": "hit" }), &ctx, limits)
             .await
             .unwrap_err();
         let view = crate::error::govern_error(&err);
@@ -596,7 +744,7 @@ mod tests {
     async fn small_tree_is_not_marked_truncated() {
         let (ctx, dir) = ctx_with_hits("no-trunc", 3);
         let resp = run_with_limits(
-            &json!({ "mode": "files", "query": "*.txt" }),
+            &json!({ "mode": "files", "pattern": "*.txt" }),
             &ctx,
             WalkLimits::default(),
         )
@@ -616,12 +764,101 @@ mod tests {
     async fn root_outside_allowed_roots_is_refused() {
         let (ctx, dir) = ctx_with_hits("root-guard", 1);
         let err = run(
-            &json!({ "mode": "files", "query": "*.txt", "path": "/etc" }),
+            &json!({ "mode": "files", "pattern": "*.txt", "path": "/etc" }),
             &ctx,
         )
         .await
         .unwrap_err();
         assert_eq!(crate::error::govern_error(&err).code, "ISOLATION_REFUSED");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// §5.2：files 模式不参与语义重排——TopK 计划在 files 下被降回命中顺序。
+    #[test]
+    fn files_mode_downgrades_topk_plan() {
+        let mut plan = SearchPlan {
+            shape: SearchShape::TopK,
+            rerank: RerankState::Applied,
+            notices: vec![],
+        };
+        confine_rerank_to_content("files", &mut plan);
+        assert_eq!(plan.shape, SearchShape::All);
+        assert_eq!(plan.rerank, RerankState::Skipped);
+
+        // content 模式不动 TopK 计划。
+        let mut plan = SearchPlan {
+            shape: SearchShape::TopK,
+            rerank: RerankState::Embedding,
+            notices: vec![],
+        };
+        confine_rerank_to_content("content", &mut plan);
+        assert_eq!(plan.shape, SearchShape::TopK);
+        assert_eq!(plan.rerank, RerankState::Embedding);
+
+        // 两槽位都不可用的计划（shape 已是 All）在 files 下也不能报 unavailable。
+        let intent = resolve_search_intent(&json!({ "intent": "auto" })).expect("intent");
+        let mut plan = plan_search(intent, 25, false, false, true).expect("plan");
+        assert_eq!(plan.rerank, RerankState::Unavailable);
+        confine_rerank_to_content("files", &mut plan);
+        assert_eq!(plan.shape, SearchShape::All);
+        assert_eq!(plan.rerank, RerankState::Skipped);
+        assert!(plan.notices.is_empty(), "files 不协商槽位，不应报 SLOT_UNAVAILABLE");
+    }
+
+    /// §4.2：schema 契约——pattern 必填、query 可选、max_results 有上限。
+    #[test]
+    fn spec_requires_pattern_and_caps_results() {
+        let spec = spec();
+        let schema = &spec.input_schema;
+        assert_eq!(schema["required"], json!(["mode", "pattern"]));
+        assert_eq!(schema["properties"]["max_results"]["maximum"], json!(200));
+        assert!(schema["properties"]["query"].get("required").is_none());
+    }
+
+    /// §3.2：单条文本截断到 4096 字符，并返回截断标记供 meta 统计。
+    #[test]
+    fn clip_text_caps_long_lines() {
+        let long = "a".repeat(MAX_EMBED_CHARS + 10);
+        let (text, truncated) = clip_text(&long);
+        assert_eq!(text.chars().count(), MAX_EMBED_CHARS);
+        assert!(truncated);
+        let (text, truncated) = clip_text("short");
+        assert_eq!(text, "short");
+        assert!(!truncated);
+    }
+
+    /// §3.2：候选超 200 条只取前 200（query 占首位），截断计数按实际条数累计。
+    #[test]
+    fn embedding_texts_caps_candidates_and_counts_truncation() {
+        let documents: Vec<String> = (0..250)
+            .map(|i| {
+                if i % 50 == 0 {
+                    "b".repeat(MAX_EMBED_CHARS + 1)
+                } else {
+                    "line".to_string()
+                }
+            })
+            .collect();
+        let (texts, truncated) = embedding_texts("query", &documents);
+        assert_eq!(texts.len(), MAX_EMBED_DOCUMENTS + 1, "query 占首位");
+        assert_eq!(truncated, 4, "0/50/100/150 四条超长，i=200 已被剔除");
+        assert_eq!(texts[0], "query");
+        assert!(texts.iter().all(|t| t.chars().count() <= MAX_EMBED_CHARS));
+    }
+
+    /// §3.2：跨批向量条数不符或维度不一致时整体放弃，不返回可疑排序。
+    #[test]
+    fn assemble_embedding_vectors_rejects_short_or_ragged_batches() {
+        let good = vec![vec![0.1, 0.2], vec![0.3, 0.4], vec![0.5, 0.6]];
+        let (query, docs) = assemble_embedding_vectors(good, 3).expect("形状一致应通过");
+        assert_eq!(query, vec![0.1, 0.2]);
+        assert_eq!(docs.len(), 2);
+
+        // 期望 4 条、实到 3 条：少一条（第二批缺项）。
+        assert!(assemble_embedding_vectors(vec![vec![0.1, 0.2]; 3], 4).is_none());
+        // 跨批维度不一致（第二批 3 维）。
+        assert!(assemble_embedding_vectors(vec![vec![0.1, 0.2], vec![0.3, 0.4, 0.5]], 2).is_none());
+        // 连 query 向量都没有。
+        assert!(assemble_embedding_vectors(Vec::new(), 0).is_none());
     }
 }

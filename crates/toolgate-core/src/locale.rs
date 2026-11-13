@@ -442,8 +442,8 @@ fn en(zh: &str) -> Option<&'static str> {
             "{notices}\n[Image] {file_name} · {mime}{dims} · {size}\nPath: {path}\n\nCannot provide image content: the vision slot is not configured and the upstream model does not accept images.\nOptions:\n- If you can view the file another way, use the path above\n- Configure the vision slot and retry\n- File name and dimensions are enough if that is all you need"
         }
         // CLI 侧（§18.9 配置层）：配置检查与槽位绑定的输出文案
-        "未找到配置文件，使用内置默认（五个槽位全空）" => {
-            "No config file found; using built-in defaults (all five slots empty)"
+        "未找到配置文件，使用内置默认（六个槽位全空）" => {
+            "No config file found; using built-in defaults (all six slots empty)"
         }
         "配置检查通过" => "Config check passed",
         "槽位绑定（§3.10）：" => "Slot bindings (§3.10):",

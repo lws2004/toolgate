@@ -10,6 +10,7 @@
 pub mod classify_protocol;
 pub mod client;
 pub mod decide_protocol;
+pub mod embedding_protocol;
 pub mod ordered_protocol;
 pub mod rerank_protocol;
 pub mod systemone;
@@ -17,8 +18,8 @@ pub mod text_protocol;
 pub mod vision_protocol;
 
 pub use client::{
-    ClassifyOutcome, DecideOutcome, RerankOutcome, SlotCallError, SlotClient, SummarizeOutcome,
-    VisionOutcome,
+    ClassifyOutcome, DecideOutcome, EmbeddingOutcome, RerankOutcome, SlotCallError, SlotClient,
+    SummarizeOutcome, VisionOutcome,
 };
 pub use systemone::{
     SystemOneQuestion, SystemOneRequest, SystemOneResponse, build_classify_request, build_request,

@@ -18,12 +18,14 @@ pub const RERANK_THRESHOLD: usize = 20;
 /// rerank 状态，写进结构化事实便于程序判断（不进模型可见文本）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RerankState {
-    /// 命中数未过阈值，无需 rerank。
+    /// 命中数未过阈值或缺少语义 query，无需重排。
     Skipped,
-    /// 需要 rerank 但槽位不可用，按命中顺序降级返回。
+    /// 需要重排但 rerank 与 embedding 槽位都不可用，按命中顺序降级返回。
     Unavailable,
-    /// 槽位可用，按 top-k 顺序返回。
+    /// rerank 槽位可用，按 top-k 顺序返回。
     Applied,
+    /// rerank 不可用但 embedding 槽位可用，按余弦相似度顺序返回（§3.8 退路）。
+    Embedding,
 }
 
 impl RerankState {
@@ -32,6 +34,7 @@ impl RerankState {
             RerankState::Skipped => "skipped",
             RerankState::Unavailable => "unavailable",
             RerankState::Applied => "applied",
+            RerankState::Embedding => "embedding",
         }
     }
 }
@@ -61,18 +64,22 @@ pub fn resolve_search_intent(args: &Value) -> Result<Intent, String> {
     resolve_intent(args, &CompatConfig::default())
 }
 
-fn slot_unavailable() -> Notice {
+fn slot_unavailable(slot: &str) -> Notice {
     Notice::SlotUnavailable {
-        slot: "rerank".to_owned(),
+        slot: slot.to_owned(),
         fallback: SlotFallback::Mechanical,
     }
 }
 
-/// §5.2 的协商层。rerank_slot_available 本阶段恒 false，但可用分支先落地。
+/// §5.2 的协商层：pattern 决定命中、query 决定排序；重排优先 rerank，其次 embedding。
+///
+/// 只有命中数过阈值且提供了语义 query 才重排；两个槽位都不可用时按命中顺序返回并告知。
 pub fn plan_search(
     intent: Intent,
     hits: usize,
     rerank_slot_available: bool,
+    embedding_slot_available: bool,
+    has_query: bool,
 ) -> Result<SearchPlan, String> {
     let plan = match intent {
         Intent::Raw => SearchPlan {
@@ -91,7 +98,7 @@ pub fn plan_search(
             rerank: RerankState::Skipped,
             notices: vec![],
         },
-        Intent::Auto | Intent::Summary if !needs_rerank(hits) => SearchPlan {
+        Intent::Auto | Intent::Summary if !needs_rerank(hits) || !has_query => SearchPlan {
             shape: SearchShape::All,
             rerank: RerankState::Skipped,
             notices: vec![],
@@ -103,12 +110,19 @@ pub fn plan_search(
                     rerank: RerankState::Applied,
                     notices: vec![],
                 }
+            } else if embedding_slot_available {
+                // §3.8 退路：rerank 缺失时用 embedding 余弦相似度排序。
+                SearchPlan {
+                    shape: SearchShape::TopK,
+                    rerank: RerankState::Embedding,
+                    notices: vec![],
+                }
             } else {
                 // §3.8：按命中顺序返回；§7.3：降级必须显式告知。
                 SearchPlan {
                     shape: SearchShape::All,
                     rerank: RerankState::Unavailable,
-                    notices: vec![slot_unavailable()],
+                    notices: vec![slot_unavailable("rerank")],
                 }
             }
         }
@@ -155,6 +169,35 @@ pub fn apply_rerank(raw: &str, order: &[usize]) -> String {
         }
     }
     out
+}
+
+/// §5.2 / §3.8：rerank 不可用时的向量退路。query 与候选行向量先归一化再点积，
+/// 按余弦相似度降序返回原始行号；维度不一致的候选排到末尾（NEG_INFINITY，稳定排序）。
+pub fn embedding_order(query: &[f64], docs: &[Vec<f64>]) -> Vec<usize> {
+    let mut scored: Vec<(usize, f64)> = docs
+        .iter()
+        .enumerate()
+        .map(|(index, doc)| (index, cosine(query, doc)))
+        .collect();
+    // 稳定排序：分数相同保持命中顺序。
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().map(|(index, _)| index).collect()
+}
+
+fn cosine(a: &[f64], b: &[f64]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return f64::NEG_INFINITY;
+    }
+    let (mut dot, mut na, mut nb) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
 }
 
 /// §5.2 structured 路径的结构化事实。
@@ -272,12 +315,12 @@ mod tests {
 
     #[test]
     fn raw_and_small_auto_need_no_rerank() {
-        let raw = plan_search(Intent::Raw, 100, false).unwrap();
+        let raw = plan_search(Intent::Raw, 100, false, false, true).unwrap();
         assert_eq!(raw.shape, SearchShape::All);
         assert_eq!(raw.rerank, RerankState::Skipped);
         assert!(raw.notices.is_empty());
 
-        let small = plan_search(Intent::Auto, 20, false).unwrap();
+        let small = plan_search(Intent::Auto, 20, false, false, true).unwrap();
         assert_eq!(small.shape, SearchShape::All);
         assert_eq!(small.rerank, RerankState::Skipped);
         assert!(small.notices.is_empty());
@@ -285,7 +328,7 @@ mod tests {
 
     #[test]
     fn many_hits_without_slot_degrades_with_notice() {
-        let plan = plan_search(Intent::Auto, 25, false).unwrap();
+        let plan = plan_search(Intent::Auto, 25, false, false, true).unwrap();
         assert_eq!(plan.shape, SearchShape::All);
         assert_eq!(plan.rerank, RerankState::Unavailable);
         assert_eq!(plan.notices.len(), 1);
@@ -296,22 +339,48 @@ mod tests {
 
     #[test]
     fn many_hits_with_slot_uses_topk() {
-        let plan = plan_search(Intent::Summary, 25, true).unwrap();
+        let plan = plan_search(Intent::Summary, 25, true, false, true).unwrap();
         assert_eq!(plan.shape, SearchShape::TopK);
         assert_eq!(plan.rerank, RerankState::Applied);
         assert!(plan.notices.is_empty());
     }
 
     #[test]
+    fn many_hits_with_embedding_fallback_uses_topk() {
+        // rerank 不可用但 embedding 可用：按余弦顺序返回（§3.8 退路）。
+        let plan = plan_search(Intent::Auto, 25, false, true, true).unwrap();
+        assert_eq!(plan.shape, SearchShape::TopK);
+        assert_eq!(plan.rerank, RerankState::Embedding);
+        assert!(plan.notices.is_empty());
+    }
+
+    #[test]
+    fn no_query_skips_rerank_even_with_slots() {
+        // 没有语义 query 时即便槽位可用也不重排（pattern 命中即返回）。
+        let plan = plan_search(Intent::Auto, 25, true, true, false).unwrap();
+        assert_eq!(plan.shape, SearchShape::All);
+        assert_eq!(plan.rerank, RerankState::Skipped);
+        assert!(plan.notices.is_empty());
+    }
+
+    #[test]
+    fn embedding_order_sorts_by_cosine_and_bounds_mismatch() {
+        // query 与 doc1 完全同向、doc0 次之；维度不符的 doc2 排末尾。
+        let query = [1.0, 0.0];
+        let docs = vec![vec![0.6, 0.8], vec![1.0, 0.0], vec![9.0]];
+        assert_eq!(embedding_order(&query, &docs), vec![1, 0, 2]);
+    }
+
+    #[test]
     fn structured_shape_has_no_notices() {
-        let plan = plan_search(Intent::Structured, 25, false).unwrap();
+        let plan = plan_search(Intent::Structured, 25, false, false, true).unwrap();
         assert_eq!(plan.shape, SearchShape::Structured);
         assert!(plan.notices.is_empty());
     }
 
     #[test]
     fn visual_is_rejected_actionably() {
-        let err = plan_search(Intent::Visual, 1, false).unwrap_err();
+        let err = plan_search(Intent::Visual, 1, false, false, true).unwrap_err();
         assert!(err.contains("read"));
         assert!(err.contains("raw"));
     }
