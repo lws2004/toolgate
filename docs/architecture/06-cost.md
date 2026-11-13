@@ -125,6 +125,7 @@ token 账；是 F2 或 F3，算的不是 token，是「数据不出本地」值�
 - decide 类判定的成本与「状态长度 × 问题数」成正比（服务端逐问串行、不并发）：判定
   样本截到千字符级、问题集按 intent 分级，不把整份原文与全部问题一起喂（read 文本
   路径的落地口径见 §5.3）。
+- 六个工具的 `tools/list` 声明（description / inputSchema / outputSchema）是每请求常驻固定开销，硬预算 ≤1.5K token（4 B/token ≈ 6000 B）；2026-11-14 本机 release 实测中文 5999 B ≈1.50K、英文 5724 B≈1.43K（六工具字段之和，含 JSON-RPC envelope 键名）。
 - 前缀缓存未在本机验证前，不作为架构杠杆。
 
 实测数据与拟合过程见附件 E.3。

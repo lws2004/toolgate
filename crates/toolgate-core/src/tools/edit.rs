@@ -38,43 +38,28 @@ use crate::slots::DecideInput;
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "edit",
-        description: "能做什么：局部修改文件，支持三种寻址模式——edits 文本匹配（默认）、anchor 行锚点、patch 扁平 unified diff（整段重排/缩进调整时无需转义原文）；三选一，多处匹配或 hunk 不匹配会拒绝，改动前留快照。 \
-                      不能做什么：不承接大块内容摘要；不返回图片；不自动回滚；失败归因在 d1 槽位不可用时按 §3.8 走机械路径并告知。 \
-                      什么时候用别的工具：整段重写用 write；按内容查找用 search；读取用 read。",
-        description_en: "Can: local edits in three addressing modes — edits text matching (default), anchor line anchors, patch flat unified diff (no need to escape the original text when reordering a block); pick exactly one, rejects multiple matches or hunks that do not line up, snapshots before writing. Cannot: summarize large content, return images, auto-rollback; failure attribution degrades to the mechanical path per §3.8 when d1 is unavailable. Use instead: write for a full rewrite, search to find content, read to inspect.",
+        description: "能做什么：局部修改文件，三种寻址——edits 文本匹配（默认）、anchor 行锚点、patch 扁平 diff（重排无需转义），三选一，多处匹配或 hunk 不匹配即拒，改前留快照。不能做什么：不摘要大块内容、不自动回滚。什么时候用别的工具：重写 write、查找 search、读取 read。",
+        description_en: "Can: local edits with three modes — edits text match (default), anchor line anchors, patch flat diff (no escaping on reorder); pick one, reject multiple matches or mismatched hunks, snapshot before writing. Cannot: summarize large content, auto-rollback. Use instead: write for rewrite, search to find, read to inspect.",
         input_schema: json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "目标文件路径。edits / anchor 模式必填；patch 模式可省略，此时从 ---/+++ 文件头推断" },
+                "path": { "type": "string", "description": "目标文件；patch 可推断" },
                 "edits": {
                     "type": "array",
-                    "description": "文本匹配模式的编辑列表。各项都基于原始文件匹配，不要重叠",
+                    "description": "基于原文，不得重叠",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "oldText": { "type": "string", "description": "要替换的原文，需在文件中唯一" },
-                            "newText": { "type": "string", "description": "替换后的内容，删除时传空串" }
+                            "oldText": { "type": "string", "description": "原文，需唯一" },
+                            "newText": { "type": "string", "description": "新内容，删除传空串" }
                         },
                         "required": ["oldText", "newText"]
                     }
                 },
-                "anchor": {
-                    "type": "string",
-                    "description": "行锚点模式：read 返回的 行号#哈希，例如 12#f8a2"
-                },
-                "newText": {
-                    "type": "string",
-                    "description": "行锚点模式下该行的新内容（不含换行）"
-                },
-                "patch": {
-                    "type": "string",
-                    "description": "模式 C：扁平 unified diff 文本（@@ -12,3 +12,5 @@ 与行前缀），原文不需要 JSON 转义。按 hunk 头行号定位并逐行比对上下文，不匹配报 patch 冲突；与 edits / anchor 互斥"
-                },
-                "intent": {
-                    "type": "string",
-                    "enum": ["raw", "summary", "structured", "visual", "auto"],
-                    "description": "协商层输出形态（§4.2）。edit 不产生可协商的大块内容（§4.0），输出形态固定为 diff / 失败归因；intent 仅用于统一校验，非法值 fail loud"
-                }
+                "anchor": { "type": "string", "description": "行号#哈希，如 12#f8a2" },
+                "newText": { "type": "string", "description": "该行新内容" },
+                "patch": { "type": "string", "description": "扁平 diff，互斥 edits/anchor" },
+                "intent": { "type": "string", "enum": ["raw", "summary", "structured", "visual", "auto"], "description": "输出形态 §4.2；fail loud" }
             },
             "required": []
         }),

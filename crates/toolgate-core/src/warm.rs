@@ -144,7 +144,10 @@ mod tests {
     fn entry_limit_discards_cache_instead_of_growing() {
         let cache = WarmCache::default();
         for index in 0..=WARM_MAX_ENTRIES {
-            cache.put(PathBuf::from(format!("/tmp/warm-{index}.txt")), entry(None, 5));
+            cache.put(
+                PathBuf::from(format!("/tmp/warm-{index}.txt")),
+                entry(None, 5),
+            );
         }
         // 第 WARM_MAX_ENTRIES+1 次写入前触发清空，之后只剩最新一条。
         let last = PathBuf::from(format!("/tmp/warm-{WARM_MAX_ENTRIES}.txt"));

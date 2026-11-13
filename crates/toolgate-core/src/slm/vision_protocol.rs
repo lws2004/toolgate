@@ -150,10 +150,12 @@ mod tests {
         assert!(text.contains("文字"));
         assert!(text.contains("只要表格"));
         let ground = build_request(&vision_input(VisionTask::Ground), "demo").unwrap();
-        assert!(ground.messages[0].content[0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("boxes"));
+        assert!(
+            ground.messages[0].content[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("boxes")
+        );
     }
 
     #[test]

@@ -90,7 +90,9 @@ fn en(zh: &str) -> Option<&'static str> {
             "Walk limits keep a glob matching millions of files from saturating time and memory (§17.2)"
         }
         "把 path 缩小到子目录后重试" => "Narrow path to a subdirectory and retry",
-        "或用更精确的 query 减少遍历量" => "Or use a more precise query to reduce the walk",
+        "或用更精确的 query 减少遍历量" => {
+            "Or use a more precise query to reduce the walk"
+        }
         "\n[遍历已截断：递归深度达 {depth} 层且文件数达 {files} 个，结果只覆盖已遍历部分]" => {
             "\n[Walk truncated: depth limit {depth} and file limit {files} both reached; results cover only the walked portion]"
         }
@@ -274,14 +276,18 @@ fn en(zh: &str) -> Option<&'static str> {
         "或改用 edits 文本匹配模式（oldText 需在文件中唯一）" => {
             "Or switch to edits text matching (oldText must be unique in the file)"
         }
-        "hunk 里出现无法识别的行前缀：{line}" => "unrecognized line prefix inside a hunk: {line}",
+        "hunk 里出现无法识别的行前缀：{line}" => {
+            "unrecognized line prefix inside a hunk: {line}"
+        }
         "hunk 头格式不对：{line}" => "malformed hunk header: {line}",
         "hunk 头缺旧侧范围：{line}" => "hunk header lacks the old-side range: {line}",
         "hunk 头缺新侧范围：{line}" => "hunk header lacks the new-side range: {line}",
         "hunk 头的范围要以 {sign} 开头：{line}" => {
             "hunk header range must start with {sign}: {line}"
         }
-        "hunk 头的行号不是数字：{line}" => "hunk header line number is not a number: {line}",
+        "hunk 头的行号不是数字：{line}" => {
+            "hunk header line number is not a number: {line}"
+        }
         "hunk {}（@@ -{},{} +{},{}）的行数与内容不符：头声明旧侧 {} 行 / 新侧 {} 行，体里是 {} / {}" => {
             "hunk {} (@@ -{},{} +{},{}): line counts do not match the body — header says {} old / {} new, body has {} / {}"
         }

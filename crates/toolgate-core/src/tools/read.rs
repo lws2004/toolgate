@@ -35,37 +35,16 @@ use crate::truncate::{TruncationOptions, format_size, truncate_head, truncate_li
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "read",
-        description: "能做什么：读取文本文件（带行号与可选行锚点）或图片；超过 2000 行 / 50KB 头部截断并用 offset 续读；单行自身超 50KB（压缩 JSON、minified 代码）时截断该行、整行落盘并给 pointer；图片按压缩流水线返回或转译。 \
-                      不能做什么：不解析网页 JS（fetch.provider 默认 none）；不跟随符号链接；文本路径的 intent 只影响协商层标注。 \
-                      什么时候用别的工具：按内容查找用 search；局部修改用 edit；整段重写用 write。",
-        description_en: "Can: read text files (line numbers / optional anchors) or images; head-truncates past 2000 lines / 50KB, resume with offset; a single line over 50KB (minified JSON / code) is truncated with the whole line spilled and a pointer returned; images go through the compression pipeline. Cannot: run page JS (fetch.provider defaults to none), follow symlinks; text-path intent only annotates negotiation. Use instead: search to find content, edit for local changes, write for a full rewrite.",
+        description: "能做什么：读文本（行号 / 锚点）或图片，超 2000 行或 50KB 截断、可 offset 续读。不能做什么：不解析网页 JS、不跟随符号链接。什么时候用别的工具：查找 search、局部改 edit、重写 write。",
+        description_en: "Can: read text (line numbers / anchors) or images; truncates past 2000 lines or 50KB, resume with offset. Cannot: run page JS, follow symlinks. Use instead: search to find, edit for local changes, write for rewrite.",
         input_schema: json!({
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "文件路径，相对路径按工作目录解析"
-                },
-                "offset": {
-                    "type": "integer",
-                    "description": "起始行号，1 起始。默认 1",
-                    "minimum": 1
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "最多读取的行数。默认读到文件末尾",
-                    "minimum": 1
-                },
-                "anchor": {
-                    "type": "boolean",
-                    "description": "是否给每行附加 行号#短哈希 锚点，供 edit 的锚点模式使用。\
-                                    大文件反复编辑时开启可省 token，其余场景建议关闭。默认 false"
-                },
-                "intent": {
-                    "type": "string",
-                    "enum": ["raw", "summary", "structured", "visual", "auto"],
-                    "description": "图片协商：visual 给压缩后原图 / structured 给元素列表或 OCR 文本 / auto 按 need_pixels 判定 / raw 与 summary 按 §5.3 分流。文本路径 intent 暂只影响协商层标注"
-                }
+                "path": { "type": "string", "description": "文件路径" },
+                "offset": { "type": "integer", "description": "默认 1", "minimum": 1 },
+                "limit": { "type": "integer", "description": "默认读到底", "minimum": 1 },
+                "anchor": { "type": "boolean", "description": "edit 锚点用，默认 false" },
+                "intent": { "type": "string", "enum": ["raw", "summary", "structured", "visual", "auto"], "description": "输出形态 §4.2" }
             },
             "required": ["path"]
         }),
@@ -541,7 +520,9 @@ async fn text_summarize_response(
         }
         None => bounded,
     };
-    let kind = ruling.map(|r| r.facts.file_kind).unwrap_or(FileKind::Unknown);
+    let kind = ruling
+        .map(|r| r.facts.file_kind)
+        .unwrap_or(FileKind::Unknown);
     let schema = (plan.mode == TextMode::Structured).then(|| text_summarize_schema(kind));
     let input = SummarizeInput {
         text: input_text,
@@ -622,10 +603,7 @@ fn slot_unavailable_reason(
     }
 }
 
-fn fill_slot_unavailable_reasons(
-    notices: &mut [Notice],
-    slm: Option<&crate::slm::SlotClient>,
-) {
+fn fill_slot_unavailable_reasons(notices: &mut [Notice], slm: Option<&crate::slm::SlotClient>) {
     for notice in notices.iter_mut() {
         if let Notice::SlotUnavailable { slot, reason, .. } = notice
             && reason.is_none()
@@ -1060,8 +1038,14 @@ mod tests {
         // §7.3：structured 需要理解结果，vision 与 decide 都不可用 → 两个缺口都如实告知。
         assert_eq!(resp.meta["notices"].as_array().unwrap().len(), 2);
         let structured_notices = resp.meta["notices"].to_string();
-        assert!(structured_notices.contains("vision"), "{structured_notices}");
-        assert!(structured_notices.contains("decide"), "{structured_notices}");
+        assert!(
+            structured_notices.contains("vision"),
+            "{structured_notices}"
+        );
+        assert!(
+            structured_notices.contains("decide"),
+            "{structured_notices}"
+        );
         let _ = std::fs::remove_dir_all(ctx.cwd);
     }
 

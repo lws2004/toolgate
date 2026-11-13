@@ -96,7 +96,11 @@ async fn errors_carry_code_and_next_steps() {
         ("read", json!({ "path": "missing.txt" }), "PATH_NOT_FOUND"),
         ("read", json!({ "path": "/etc/hosts" }), "ISOLATION_REFUSED"),
         ("bash", json!({}), "BAD_ARGUMENT"),
-        ("read", json!({ "path": "a.txt", "intent": "bogus" }), "BAD_ARGUMENT"),
+        (
+            "read",
+            json!({ "path": "a.txt", "intent": "bogus" }),
+            "BAD_ARGUMENT",
+        ),
         ("read", json!({ "path": "." }), "BAD_ARGUMENT"),
         // 超时是 TIMEOUT，不是笼统 FAILED；下一步要求缩小动作或加时。
         (
@@ -198,15 +202,23 @@ async fn structured_content_stays_stable() {
     assert!(edit.meta.get("snapshot").is_some(), "edit 返回快照");
     assert!(edit.meta["facts"]["diff"].is_string(), "edit facts.diff");
 
-    let search = dispatch("search", &json!({ "mode": "content", "pattern": "A" }), &ctx)
-        .await
-        .expect("search 成功");
+    let search = dispatch(
+        "search",
+        &json!({ "mode": "content", "pattern": "A" }),
+        &ctx,
+    )
+    .await
+    .expect("search 成功");
     assert!(search.meta["hits"].is_u64(), "search hits");
     assert_eq!(search.meta["rerank"], json!("skipped"));
 
-    let bash = dispatch("bash", &json!({ "binary": "/bin/echo", "args": ["ok"] }), &ctx)
-        .await
-        .expect("bash 成功");
+    let bash = dispatch(
+        "bash",
+        &json!({ "binary": "/bin/echo", "args": ["ok"] }),
+        &ctx,
+    )
+    .await
+    .expect("bash 成功");
     assert!(bash.meta["exitCode"].is_i64(), "bash exitCode");
     assert_eq!(bash.meta["success"], json!(true));
 
@@ -236,11 +248,11 @@ async fn notices_go_to_both_channels() {
         .as_array()
         .unwrap_or_else(|| panic!("缺 notices：{:?}", resp.meta));
     assert!(!notices.is_empty(), "截断必须有告知");
-    let codes: Vec<&str> = notices
-        .iter()
-        .filter_map(|n| n["code"].as_str())
-        .collect();
-    assert!(codes.contains(&"TRUNCATED"), "告知码应含 TRUNCATED：{codes:?}");
+    let codes: Vec<&str> = notices.iter().filter_map(|n| n["code"].as_str()).collect();
+    assert!(
+        codes.contains(&"TRUNCATED"),
+        "告知码应含 TRUNCATED：{codes:?}"
+    );
     let body = text_of(&resp);
     assert!(
         body.contains("TRUNCATED") || body.contains("截断"),

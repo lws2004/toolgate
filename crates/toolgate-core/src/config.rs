@@ -344,7 +344,8 @@ const HTTP_FIELDS: &str = "base_url";
 /// 六个槽位名。
 const SLOT_NAMES: &str = "classify / rerank / decide / summarize / vision / embedding";
 /// source 枚举的合法值。
-const SOURCE_VALUES: &str = "auto / local / openai / anthropic / responses / systemone / rerank / embedding";
+const SOURCE_VALUES: &str =
+    "auto / local / openai / anthropic / responses / systemone / rerank / embedding";
 /// mode 枚举的合法值。
 const MODE_VALUES: &str = "auto / embedded / http";
 /// adapter 枚举的合法值。
@@ -524,7 +525,11 @@ pub fn parse_config(text: &str, origin: &str) -> Result<ResolvedConfig, ConfigEr
         YamlValue::Null => Mapping::new(),
         YamlValue::Mapping(map) => map,
         other => {
-            errors.push(type_error(origin, &other, "映射（models / slots / slm / paths）"));
+            errors.push(type_error(
+                origin,
+                &other,
+                "映射（models / slots / slm / paths）",
+            ));
             return Err(ConfigErrors { items: errors });
         }
     };
@@ -1137,7 +1142,9 @@ fn slot_from_str(name: &str) -> Option<SlotKind> {
 fn default_mode_for_slot(slot: SlotKind) -> SlmMode {
     match slot {
         SlotKind::Classify | SlotKind::Decide => SlmMode::Embedded,
-        SlotKind::Rerank | SlotKind::Summarize | SlotKind::Vision | SlotKind::Embedding => SlmMode::Http,
+        SlotKind::Rerank | SlotKind::Summarize | SlotKind::Vision | SlotKind::Embedding => {
+            SlmMode::Http
+        }
     }
 }
 
@@ -1960,7 +1967,10 @@ mod tests {
             "test.yaml",
         )
         .expect("应当解析成功");
-        assert_eq!(config.paths.allowed_roots, vec!["/tmp", "/Users/me/project"]);
+        assert_eq!(
+            config.paths.allowed_roots,
+            vec!["/tmp", "/Users/me/project"]
+        );
         let empty = parse_config("", "test.yaml").expect("空配置应当解析成功");
         assert!(empty.paths.allowed_roots.is_empty());
     }

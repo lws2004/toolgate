@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::json;
+use toolgate_core::capability::SlotBlocker;
 use toolgate_core::config::{
     ConfigError, ConfigErrors, ResolvedConfig, default_config_path, load_config,
 };
-use toolgate_core::capability::SlotBlocker;
 use toolgate_core::locale::{Language, localize_value, tf};
 use toolgate_core::slm::{DecideOutcome, SlotCallError, SlotClient, SummarizeOutcome};
 use toolgate_core::slots::{
@@ -413,12 +413,19 @@ fn parse_summarize_args(lang: Language, args: &[String]) -> Result<SummarizeArgs
                 i += 1;
             }
             other => {
-                eprintln!("{}", tf(lang, "未知参数：{other}", &[("other", other.to_owned())]));
+                eprintln!(
+                    "{}",
+                    tf(lang, "未知参数：{other}", &[("other", other.to_owned())])
+                );
                 return Err(ExitCode::FAILURE);
             }
         }
     }
-    Ok(SummarizeArgs { config_path, text, json_out })
+    Ok(SummarizeArgs {
+        config_path,
+        text,
+        json_out,
+    })
 }
 
 /// decide 子命令的参数。
@@ -587,7 +594,14 @@ async fn run_summarize(lang: Language, args: SummarizeArgs) -> ExitCode {
         .find(|b| b.slot == SlotKind::Summarize && b.model_id.is_some());
     if bound.is_none() {
         eprintln!("{}", tf(lang, "summarize 槽位未绑定模型。", &[]));
-        eprintln!("{}", tf(lang, "在配置的 models 里让某个模型的 serves 含 summarize", &[]));
+        eprintln!(
+            "{}",
+            tf(
+                lang,
+                "在配置的 models 里让某个模型的 serves 含 summarize",
+                &[]
+            )
+        );
         return ExitCode::FAILURE;
     }
 
@@ -618,7 +632,14 @@ fn print_summarize_outcome(lang: Language, outcome: &SummarizeOutcome, json_out:
         return ExitCode::SUCCESS;
     }
     println!("{text}");
-    println!("{}", tf(lang, "摘要耗时 {ms} ms", &[("ms", outcome.latency_ms.to_string())]));
+    println!(
+        "{}",
+        tf(
+            lang,
+            "摘要耗时 {ms} ms",
+            &[("ms", outcome.latency_ms.to_string())]
+        )
+    );
     ExitCode::SUCCESS
 }
 
@@ -699,7 +720,11 @@ fn report_slot_error(lang: Language, err: &SlotCallError) {
             );
             eprintln!(
                 "{}",
-                tf(lang, "确认上游形状符合槽位契约（decide 为 noul 概率，summarize 为 chat content）", &[])
+                tf(
+                    lang,
+                    "确认上游形状符合槽位契约（decide 为 noul 概率，summarize 为 chat content）",
+                    &[]
+                )
             );
         }
     }

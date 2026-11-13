@@ -16,8 +16,7 @@ const SYSTEM_PROMPT: &str =
     "你是本地文本处理组件。只输出用户要求的结果，不要解释、不要寒暄、不要 Markdown 围栏。";
 /// 无 schema 的摘要指令（§18.1 text 适配器）：不写这一句，模型会把原文当用户消息
 /// 继续对话，返回「We need to…」式推理过程而不是摘要。
-const SUMMARY_INSTRUCTION: &str =
-    "请把下面的内容压缩成简洁摘要：只保留结论、关键数据与待办，不复述推理过程，不使用 Markdown 围栏。";
+const SUMMARY_INSTRUCTION: &str = "请把下面的内容压缩成简洁摘要：只保留结论、关键数据与待办，不复述推理过程，不使用 Markdown 围栏。";
 const JSON_SYSTEM_PROMPT: &str =
     "你是本地文本处理组件。只输出一个合法的 JSON 对象，不要解释、不要 Markdown 围栏。";
 
@@ -112,8 +111,17 @@ pub fn build_request(
 fn looks_like_reasoning(content: &str) -> bool {
     let head = content.trim_start().to_ascii_lowercase();
     const PREFIXES: &[&str] = &[
-        "we need", "we should", "we will", "let me", "i need", "i'll", "i will", "the user",
-        "sure,", "okay,", "first, i",
+        "we need",
+        "we should",
+        "we will",
+        "let me",
+        "i need",
+        "i'll",
+        "i will",
+        "the user",
+        "sure,",
+        "okay,",
+        "first, i",
     ];
     PREFIXES.iter().any(|prefix| head.starts_with(prefix))
 }
@@ -132,7 +140,9 @@ pub fn parse_output(
         return Err(violation("chat 响应 choices[0].message.content 为空"));
     }
     if choice.finish_reason.as_deref() == Some("length") {
-        return Err(violation("chat 响应因 max_tokens 被截断（finish_reason=length）"));
+        return Err(violation(
+            "chat 响应因 max_tokens 被截断（finish_reason=length）",
+        ));
     }
     if input.schema.is_none() && looks_like_reasoning(content) {
         return Err(violation(

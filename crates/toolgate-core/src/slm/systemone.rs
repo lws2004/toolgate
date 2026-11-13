@@ -33,7 +33,8 @@ pub const CHOICE_TYPE: &str = "choice";
 /// classify 问题的固定 id。
 pub const CLASSIFY_QUESTION_KEY: &str = "q0";
 /// classify 问题的固定措辞（确定性，不随输入变）。
-pub const CLASSIFY_INSTRUCTIONS: &str = "从给定标签中为文本选出最合适的标签，并给出每个标签的概率。";
+pub const CLASSIFY_INSTRUCTIONS: &str =
+    "从给定标签中为文本选出最合适的标签，并给出每个标签的概率。";
 /// none_probability 的降级阈值（官方建议 0.2，附件 E.10）。
 pub const NONE_PROBABILITY_THRESHOLD: f64 = 0.2;
 
@@ -194,7 +195,9 @@ pub fn parse_decide_output(
 ///
 /// `criteria` 用 `{<标签>: <标签>}` 的 map：官方要求键为选项名、值为描述，槽位只有
 /// 标签名，用标签名本身，不注入额外语义。`state` 写待分类文本。
-pub fn build_classify_request(input: &ClassifyInput) -> Result<SystemOneRequest, ContractViolation> {
+pub fn build_classify_request(
+    input: &ClassifyInput,
+) -> Result<SystemOneRequest, ContractViolation> {
     if input.text.is_empty() {
         return Err(classify_violation("classify 的 text 为空"));
     }
@@ -238,10 +241,9 @@ pub fn parse_classify_output(
     response: &SystemOneResponse,
     input: &ClassifyInput,
 ) -> Result<ClassifyOutput, ContractViolation> {
-    let answer = response
-        .answers
-        .get(CLASSIFY_QUESTION_KEY)
-        .ok_or_else(|| classify_violation(format!("响应缺少问题 {CLASSIFY_QUESTION_KEY} 的答案")))?;
+    let answer = response.answers.get(CLASSIFY_QUESTION_KEY).ok_or_else(|| {
+        classify_violation(format!("响应缺少问题 {CLASSIFY_QUESTION_KEY} 的答案"))
+    })?;
     if answer.kind != CHOICE_TYPE {
         return Err(classify_violation(format!(
             "问题 {CLASSIFY_QUESTION_KEY} 的答案类型是 {}，只接受 {CHOICE_TYPE}",
@@ -493,7 +495,9 @@ mod tests {
         let mut input = classify_input();
         input.text = String::new();
         assert_eq!(
-            build_classify_request(&input).expect_err("空 text 应被拒").code,
+            build_classify_request(&input)
+                .expect_err("空 text 应被拒")
+                .code,
             "CAPABILITY_MISMATCH"
         );
         input = classify_input();
@@ -555,9 +559,12 @@ mod tests {
     #[test]
     fn classify_response_none_probability_gate() {
         let high = choice_response(json!({"none_probability": 0.505}));
-        let violation =
-            parse_classify_output(&high, &classify_input()).expect_err("应触发降级");
-        assert!(violation.fact.contains("none_probability"), "{}", violation.fact);
+        let violation = parse_classify_output(&high, &classify_input()).expect_err("应触发降级");
+        assert!(
+            violation.fact.contains("none_probability"),
+            "{}",
+            violation.fact
+        );
         assert!(!violation.next_steps.is_empty());
 
         let low = choice_response(json!({"none_probability": 0.19}));

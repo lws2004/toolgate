@@ -216,15 +216,24 @@ pub const TEXT_FILE_KIND_QUESTIONS: [(&str, FileKind); 5] = [
     ("这段文本是配置文件吗？", FileKind::Config),
     ("这段文本是日志吗？", FileKind::Log),
     ("这段文本是文档吗？", FileKind::Doc),
-    ("这段文本是结构化数据（JSON、CSV、表格等）吗？", FileKind::Data),
+    (
+        "这段文本是结构化数据（JSON、CSV、表格等）吗？",
+        FileKind::Data,
+    ),
 ];
 pub const TEXT_SENSITIVITY_QUESTIONS: [(&str, Sensitivity); 2] = [
     ("这段文本包含密钥、口令或访问令牌吗？", Sensitivity::Secret),
-    ("这段文本包含个人信息（姓名、证件号、联系方式等）吗？", Sensitivity::Personal),
+    (
+        "这段文本包含个人信息（姓名、证件号、联系方式等）吗？",
+        Sensitivity::Personal,
+    ),
 ];
 pub const TEXT_BEST_VIEW_QUESTIONS: [(&str, BestView); 3] = [
     ("这段文本最适合完整通读吗？", BestView::Full),
-    ("这段文本最适合按结构化视图（函数签名、键值树、错误时间线等）阅读吗？", BestView::Structure),
+    (
+        "这段文本最适合按结构化视图（函数签名、键值树、错误时间线等）阅读吗？",
+        BestView::Structure,
+    ),
     ("这段文本最适合只取一个片段吗？", BestView::Fragment),
 ];
 
@@ -1058,7 +1067,12 @@ mod tests {
         let code = text_summarize_schema(FileKind::Code);
         assert!(code["properties"]["signatures"].is_object());
         assert!(code["properties"]["todos"].is_object());
-        assert!(code["required"].as_array().unwrap().contains(&json!("imports")));
+        assert!(
+            code["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("imports"))
+        );
         let log = text_summarize_schema(FileKind::Log);
         assert!(log["properties"]["errors"].is_object());
         assert!(log["properties"]["timeline"].is_object());

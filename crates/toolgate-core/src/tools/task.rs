@@ -52,31 +52,17 @@ fn registry() -> &'static Mutex<HashMap<String, Job>> {
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "task",
-        description: "能做什么：启动、查看、终止后台长任务；action=read 返回累积输出（尾部截断并落盘）与进程状态，卡住/崩溃/报错循环由 decide 槽位判定，intent 协商仅作用于 read。 \
-                      不能做什么：不做任务级断点与完成度判断（归调用方）；decide 槽位不可用时按 §3.8 降级并告知、不编造状态；不返回图片。 \
-                      什么时候用别的工具：一次性等结果的命令用 bash；按内容查找用 search；精确看图用 read。",
-        description_en: "Can: start, inspect and kill background long jobs; action=read returns accumulated output (tail-truncated and spilled) plus process state; intent applies only to read. Cannot: decide task-level checkpoints or completion (caller's job), or fabricate states when the decide slot is unavailable (degrades per §3.8); no images. Use instead: bash for one-shot commands, search to find content, read for precise images.",
+        description: "能做什么：启动/查看/终止后台任务，action=read 返回累积输出（截断落盘）与状态，卡住/崩溃由 decide 判定。不能做什么：不做任务级断点与完成度判断（归调用方）；decide 不可用时按 §3.8 降级告知。什么时候用别的工具：一次性命令 bash、查找 search、看图 read。",
+        description_en: "Can: start/inspect/kill background jobs; action=read returns accumulated output (tail-truncated and spilled) plus state; stuck/crash judged by decide. Cannot: task-level checkpoints or completion (caller's job); says so when decide unavailable (§3.8). Use instead: bash for one-shot, search to find, read for images.",
         input_schema: json!({
             "type": "object",
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["start", "read", "kill", "list"],
-                    "description": "要执行的动作"
-                },
-                "binary": { "type": "string", "description": "start 时必填：可执行程序名" },
-                "args": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "start 时的参数数组"
-                },
-                "cwd": { "type": "string", "description": "start 时的工作目录" },
-                "task_id": { "type": "string", "description": "read / kill 时必填" },
-                "intent": {
-                    "type": "string",
-                    "enum": ["raw", "summary", "structured", "visual", "auto"],
-                    "description": "协商层输出形态，仅作用于 action=read：raw 累积输出加落盘指针（默认）/ summary 状态与增量摘要 / structured 结构化事实 JSON / auto 小于 500 token 给原文，500–2000 token 只判状态，超过 2000 token 再做增量摘要 / visual 不适用"
-                }
+                "action": { "type": "string", "enum": ["start", "read", "kill", "list"], "description": "动作" },
+                "binary": { "type": "string", "description": "start 必填：程序名" },
+                "args": { "type": "array", "items": { "type": "string" }, "description": "start 参数" },
+                "cwd": { "type": "string", "description": "start 工作目录" },
+                "task_id": { "type": "string", "description": "read / kill 必填" },
+                "intent": { "type": "string", "enum": ["raw", "summary", "structured", "visual", "auto"], "description": "输出形态 §4.2" }
             },
             "required": ["action"]
         }),
@@ -126,11 +112,12 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
         .process_group(0);
     // §17.2：后台任务同样不继承父进程环境，只拿白名单。
     super::bash::apply_env_allowlist(&mut command, &cwd);
-    let mut child = command
-        .spawn()
-        .map_err(|e| {
-            ToolError::failed_with(crate::error::ErrorCode::IoError, format!("无法启动 {binary}：{e}"))
-        })?;
+    let mut child = command.spawn().map_err(|e| {
+        ToolError::failed_with(
+            crate::error::ErrorCode::IoError,
+            format!("无法启动 {binary}：{e}"),
+        )
+    })?;
 
     let pid = child.id().unwrap_or(0);
     let output = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -222,9 +209,7 @@ async fn read_output(
         let reg = registry()
             .lock()
             .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?;
-        let job = reg
-            .get(task_id)
-            .ok_or_else(|| ToolError::BadArgument {
+        let job = reg.get(task_id).ok_or_else(|| ToolError::BadArgument {
             code: crate::error::ErrorCode::BadArgument,
             message: format!("没有这个任务：{task_id}"),
             next_steps: vec![
@@ -329,7 +314,10 @@ async fn read_output(
             None => notices.push(Notice::SlotUnavailable {
                 slot: "decide".to_owned(),
                 fallback: SlotFallback::Mechanical,
-                reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(crate::slots::SlotKind::Decide)),
+                reason: ctx
+                    .slm
+                    .as_ref()
+                    .and_then(|c| c.slot_blocker(crate::slots::SlotKind::Decide)),
             }),
         }
     }
@@ -342,7 +330,10 @@ async fn read_output(
             None => notices.push(Notice::SlotUnavailable {
                 slot: "summarize".to_owned(),
                 fallback: SlotFallback::Mechanical,
-                reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(crate::slots::SlotKind::Summarize)),
+                reason: ctx
+                    .slm
+                    .as_ref()
+                    .and_then(|c| c.slot_blocker(crate::slots::SlotKind::Summarize)),
             }),
         }
     }
@@ -513,9 +504,7 @@ async fn kill(args: &Value, lang: Language) -> Result<ToolResponse, ToolError> {
         let reg = registry()
             .lock()
             .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?;
-        let job = reg
-            .get(task_id)
-            .ok_or_else(|| ToolError::BadArgument {
+        let job = reg.get(task_id).ok_or_else(|| ToolError::BadArgument {
             code: crate::error::ErrorCode::BadArgument,
             message: format!("没有这个任务：{task_id}"),
             next_steps: vec![

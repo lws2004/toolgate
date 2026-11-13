@@ -102,7 +102,12 @@ impl SlotSet {
     }
 
     pub fn all_empty(&self) -> bool {
-        !self.classify && !self.rerank && !self.decide && !self.summarize && !self.vision && !self.embedding
+        !self.classify
+            && !self.rerank
+            && !self.decide
+            && !self.summarize
+            && !self.vision
+            && !self.embedding
     }
 
     /// §7.3：降级要标注哪些槽位不可用。

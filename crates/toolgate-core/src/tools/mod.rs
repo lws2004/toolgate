@@ -256,14 +256,9 @@ impl ToolSpec {
         json!({
             "type": "object",
             "properties": {
-                "notices": {
-                    "type": "array",
-                    "description": "§4.4b 告知数组；无告知时省略该字段。与 content 文本同源",
-                    "items": { "type": "object" }
-                }
+                "notices": { "type": "array" }
             },
-            "additionalProperties": true,
-            "description": "structuredContent 是程序可读通道（§4.4）；notices 之外的键为各工具特有的程序事实（路径、行数、退出码等）"
+            "additionalProperties": true
         })
     }
 }

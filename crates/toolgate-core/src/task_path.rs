@@ -36,11 +36,31 @@ pub fn resolve_task_intent(args: &Value) -> Result<Intent, String> {
 /// 收束到机械路径（给已完成步骤 + 机械结果），不中途扩展预算。
 pub fn task_chain() -> Vec<ChainNode> {
     vec![
-        ChainNode { id: 0, action: ChainAction::Recall, depends_on: vec![] },
-        ChainNode { id: 1, action: ChainAction::Recall, depends_on: vec![] },
-        ChainNode { id: 2, action: ChainAction::Decide, depends_on: vec![0, 1] },
-        ChainNode { id: 3, action: ChainAction::Summarize, depends_on: vec![2] },
-        ChainNode { id: 4, action: ChainAction::Merge, depends_on: vec![3] },
+        ChainNode {
+            id: 0,
+            action: ChainAction::Recall,
+            depends_on: vec![],
+        },
+        ChainNode {
+            id: 1,
+            action: ChainAction::Recall,
+            depends_on: vec![],
+        },
+        ChainNode {
+            id: 2,
+            action: ChainAction::Decide,
+            depends_on: vec![0, 1],
+        },
+        ChainNode {
+            id: 3,
+            action: ChainAction::Summarize,
+            depends_on: vec![2],
+        },
+        ChainNode {
+            id: 4,
+            action: ChainAction::Merge,
+            depends_on: vec![3],
+        },
     ]
 }
 
@@ -231,7 +251,11 @@ pub fn structured_facts(
     spill_path: Option<&str>,
     decision: &TaskDecisionFacts,
 ) -> Value {
-    let process_state = if exit_code.is_some() { "exited" } else { "running" };
+    let process_state = if exit_code.is_some() {
+        "exited"
+    } else {
+        "running"
+    };
     json!({
         "processState": process_state,
         "exitCode": exit_code,
@@ -278,13 +302,22 @@ mod tests {
 
     #[test]
     fn state_questions_map_to_one_d1_request() {
-        let req = state_decide_request(None, 12, "line1
-line2");
+        let req = state_decide_request(
+            None,
+            12,
+            "line1
+line2",
+        );
         assert_eq!(req.questions, state_questions());
         assert_eq!(req.questions.len(), 7);
         assert_eq!(req.state["elapsedSecs"], json!(12));
-        assert_eq!(req.state["tail"], json!("line1
-line2"));
+        assert_eq!(
+            req.state["tail"],
+            json!(
+                "line1
+line2"
+            )
+        );
         assert!(req.images.is_none());
     }
 
@@ -362,21 +395,52 @@ line2"));
     /// §5.5：L2 只在摘要路径尝试；auto 的 > 2000 token 条件生效，显式 summary 不受该门槛。
     #[test]
     fn summarize_only_on_summary_path() {
-        assert!(!plan_task(Intent::Auto, AUTO_CHAIN_TOKENS).unwrap().should_summarize);
-        assert!(!plan_task(Intent::Auto, TASK_SUMMARY_TOKENS).unwrap().should_summarize);
-        assert!(plan_task(Intent::Auto, TASK_SUMMARY_TOKENS + 1).unwrap().should_summarize);
-        assert!(plan_task(Intent::Summary, AUTO_CHAIN_TOKENS).unwrap().should_summarize);
+        assert!(
+            !plan_task(Intent::Auto, AUTO_CHAIN_TOKENS)
+                .unwrap()
+                .should_summarize
+        );
+        assert!(
+            !plan_task(Intent::Auto, TASK_SUMMARY_TOKENS)
+                .unwrap()
+                .should_summarize
+        );
+        assert!(
+            plan_task(Intent::Auto, TASK_SUMMARY_TOKENS + 1)
+                .unwrap()
+                .should_summarize
+        );
+        assert!(
+            plan_task(Intent::Summary, AUTO_CHAIN_TOKENS)
+                .unwrap()
+                .should_summarize
+        );
         assert!(!plan_task(Intent::Raw, 10_000).unwrap().should_summarize);
-        assert!(!plan_task(Intent::Structured, 10_000).unwrap().should_summarize);
+        assert!(
+            !plan_task(Intent::Structured, 10_000)
+                .unwrap()
+                .should_summarize
+        );
     }
 
     #[test]
     fn auto_thresholds_split_into_three_paths() {
-        assert_eq!(plan_task(Intent::Auto, AUTO_CHAIN_TOKENS - 1).unwrap().mode, TaskMode::Raw);
-        assert_eq!(plan_task(Intent::Auto, AUTO_CHAIN_TOKENS).unwrap().mode, TaskMode::StateDegraded);
-        assert_eq!(plan_task(Intent::Auto, TASK_SUMMARY_TOKENS).unwrap().mode, TaskMode::StateDegraded);
         assert_eq!(
-            plan_task(Intent::Auto, TASK_SUMMARY_TOKENS + 1).unwrap().mode,
+            plan_task(Intent::Auto, AUTO_CHAIN_TOKENS - 1).unwrap().mode,
+            TaskMode::Raw
+        );
+        assert_eq!(
+            plan_task(Intent::Auto, AUTO_CHAIN_TOKENS).unwrap().mode,
+            TaskMode::StateDegraded
+        );
+        assert_eq!(
+            plan_task(Intent::Auto, TASK_SUMMARY_TOKENS).unwrap().mode,
+            TaskMode::StateDegraded
+        );
+        assert_eq!(
+            plan_task(Intent::Auto, TASK_SUMMARY_TOKENS + 1)
+                .unwrap()
+                .mode,
             TaskMode::SummaryDegraded
         );
     }
@@ -395,7 +459,11 @@ line2"));
     #[test]
     fn decision_triggered_at_threshold_for_all_intents() {
         for intent in [Intent::Summary, Intent::Structured, Intent::Auto] {
-            assert!(!plan_task(intent, AUTO_CHAIN_TOKENS - 1).unwrap().should_decide);
+            assert!(
+                !plan_task(intent, AUTO_CHAIN_TOKENS - 1)
+                    .unwrap()
+                    .should_decide
+            );
             assert!(plan_task(intent, AUTO_CHAIN_TOKENS).unwrap().should_decide);
         }
         assert!(!plan_task(Intent::Raw, 10_000).unwrap().should_decide);
@@ -452,12 +520,18 @@ line2"));
     #[test]
     fn intent_parsing_defaults_to_raw() {
         assert_eq!(resolve_task_intent(&json!({})).unwrap(), Intent::Raw);
-        assert_eq!(resolve_task_intent(&json!({ "intent": "auto" })).unwrap(), Intent::Auto);
+        assert_eq!(
+            resolve_task_intent(&json!({ "intent": "auto" })).unwrap(),
+            Intent::Auto
+        );
         assert!(resolve_task_intent(&json!({ "intent": "bogus" })).is_err());
     }
 
     #[test]
     fn token_estimate_uses_four_bytes() {
-        assert_eq!(estimate_tokens(&"x".repeat(TASK_SUMMARY_TOKENS * 4)), TASK_SUMMARY_TOKENS);
+        assert_eq!(
+            estimate_tokens(&"x".repeat(TASK_SUMMARY_TOKENS * 4)),
+            TASK_SUMMARY_TOKENS
+        );
     }
 }

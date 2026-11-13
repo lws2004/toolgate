@@ -44,10 +44,7 @@ pub fn build_request(input: &EmbeddingInput, model: &str) -> Result<Value, Contr
 /// 兼容 OpenAI 形状 `data[].embedding` + 可选 `data[].index`：全部带 index 时按
 /// index 升序重建顺序并校验 `0..expected` 唯一连续；无 index 时按出现顺序；
 /// 部分带 index 视为形状不符。
-pub fn parse_output(
-    value: &Value,
-    expected: usize,
-) -> Result<EmbeddingOutput, ContractViolation> {
+pub fn parse_output(value: &Value, expected: usize) -> Result<EmbeddingOutput, ContractViolation> {
     let data = value
         .get("data")
         .and_then(Value::as_array)

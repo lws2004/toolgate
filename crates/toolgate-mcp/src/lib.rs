@@ -565,9 +565,15 @@ mod tests {
             json!("unavailable")
         );
         let detail = &resp["result"]["structuredContent"]["slmStatusDetail"]["summarize"];
-        assert_eq!(detail["reason"], json!("no_client"), "reason 与告知枚举一致");
+        assert_eq!(
+            detail["reason"],
+            json!("no_client"),
+            "reason 与告知枚举一致"
+        );
         assert!(
-            detail["nextSteps"].as_array().is_some_and(|v| !v.is_empty()),
+            detail["nextSteps"]
+                .as_array()
+                .is_some_and(|v| !v.is_empty()),
             "每个原因都要带可执行的下一步：{detail}"
         );
         let _ = std::fs::remove_dir_all(&dir);

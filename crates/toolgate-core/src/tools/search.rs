@@ -27,41 +27,17 @@ use crate::truncate::{MAX_MATCH_LINE_LENGTH, truncate_head};
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "search",
-        description: "能做什么：content 模式用正则检索文件内容，files 模式用文件名子串 / 通配符枚举路径；content 命中超过 20 条且提供 query 时，用 rerank（优先）或 embedding 余弦按语义重排（files 不重排）；结果超过 2000 行 / 50KB 保留头部并落盘。 \
-                      不能做什么：不解析网页 JS；不返回图片；两个语义槽位都不可用或未提供 query 时按命中顺序返回并告知（§3.8）。 \
-                      什么时候用别的工具：已知路径读全文用 read；修改用 edit / write；跑命令用 bash。",
-        description_en: "Can: content mode uses regex over file contents, files mode lists paths by filename substring / glob; for content, over 20 hits with a query reorder by relevance via rerank (preferred) or embedding cosine (files never reorders); head-truncates past 2000 lines / 50KB and spills. Cannot: run page JS or return images; without query or when both semantic slots are unavailable it keeps hit order and says so (§3.8). Use instead: read for a known path, edit / write to modify, bash to run commands.",
+        description: "能做什么：content 用正则检索内容，files 按文件名子串 / 通配符枚举；content 命中超 20 且有 query 时用 rerank 或 embedding 重排（files 不）。不能做什么：不解析网页 JS；无 query 或语义不可用时按命中顺序并告知（§3.8）。什么时候用别的工具：读全文 read、修改 edit / write、跑命令 bash。",
+        description_en: "Can: content mode regex over contents, files mode enumerate by substring/glob; content over 20 hits with query reorders via rerank or embedding (files never). Cannot: run page JS; without query or semantic slots keeps hit order and says so (§3.8). Use instead: read for known path, edit/write to modify, bash to run.",
         input_schema: json!({
             "type": "object",
             "properties": {
-                "mode": {
-                    "type": "string",
-                    "enum": ["content", "files"],
-                    "description": "content 搜内容，files 枚举文件路径"
-                },
-                "pattern": {
-                    "type": "string",
-                    "description": "content 模式是行匹配正则；files 模式是文件名子串或通配符"
-                },
-                "query": {
-                    "type": "string",
-                    "description": "可选的自然语言查询：命中超过 20 条且 rerank / embedding 槽位可用时用于按语义相关度排序"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "检索起点目录或文件，默认工作目录"
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "最多返回多少条结果，默认 200，上限 200（语义重排只作用于这些候选）",
-                    "minimum": 1,
-                    "maximum": 200
-                },
-                "intent": {
-                    "type": "string",
-                    "enum": ["raw", "summary", "structured", "visual", "auto"],
-                    "description": "协商层输出形态：raw 全部命中（默认）/ structured 结构化候选列表 / auto 与 summary 仅在命中超过 20 条且提供 query 时尝试语义重排，优先 rerank、其次 embedding，都不成则按命中顺序返回并告知 / visual 不适用"
-                }
+                "mode": { "type": "string", "enum": ["content", "files"], "description": "content 搜内容，files 枚举路径" },
+                "pattern": { "type": "string", "description": "content 行匹配正则；files 文件名子串或通配符" },
+                "query": { "type": "string", "description": "可选，命中超 20 且语义可用时排序" },
+                "path": { "type": "string", "description": "检索起点，默认工作目录" },
+                "max_results": { "type": "integer", "description": "最多条数，默认 200", "minimum": 1, "maximum": 200 },
+                "intent": { "type": "string", "enum": ["raw", "summary", "structured", "visual", "auto"], "description": "输出形态 §4.2" }
             },
             "required": ["mode", "pattern"]
         }),
@@ -86,7 +62,9 @@ async fn run_with_limits(
     // §17.2：检索起点同样过根校验，默认 "." 解析后必须落在允许根内。
     let root = ctx.resolve_file(optional_str(args, "path").unwrap_or("."))?;
     // §5.2：返回候选决定重排规模，运行期同样限幅，防止绕过 schema 的调用。
-    let max_results = optional_usize(args, "max_results").unwrap_or(200).clamp(1, 200);
+    let max_results = optional_usize(args, "max_results")
+        .unwrap_or(200)
+        .clamp(1, 200);
 
     let (raw, hit_count, walk) = match mode {
         "content" => search_content(&root, pattern, max_results, limits)?,
@@ -694,9 +672,13 @@ mod tests {
             max_depth: 2,
             ..WalkLimits::default()
         };
-        let resp = run_with_limits(&json!({ "mode": "content", "pattern": "hit" }), &ctx, limits)
-            .await
-            .expect("run ok");
+        let resp = run_with_limits(
+            &json!({ "mode": "content", "pattern": "hit" }),
+            &ctx,
+            limits,
+        )
+        .await
+        .expect("run ok");
         let crate::tools::Content::Text(body) = &resp.content[0] else {
             panic!("应为文本")
         };
@@ -719,9 +701,13 @@ mod tests {
             max_files: 2,
             ..WalkLimits::default()
         };
-        let resp = run_with_limits(&json!({ "mode": "files", "pattern": "*.txt" }), &ctx, limits)
-            .await
-            .expect("run ok");
+        let resp = run_with_limits(
+            &json!({ "mode": "files", "pattern": "*.txt" }),
+            &ctx,
+            limits,
+        )
+        .await
+        .expect("run ok");
         let crate::tools::Content::Text(body) = &resp.content[0] else {
             panic!("应为文本")
         };
@@ -739,9 +725,13 @@ mod tests {
             max_duration: std::time::Duration::ZERO,
             ..WalkLimits::default()
         };
-        let err = run_with_limits(&json!({ "mode": "content", "pattern": "hit" }), &ctx, limits)
-            .await
-            .unwrap_err();
+        let err = run_with_limits(
+            &json!({ "mode": "content", "pattern": "hit" }),
+            &ctx,
+            limits,
+        )
+        .await
+        .unwrap_err();
         let view = crate::error::govern_error(&err);
         assert_eq!(view.code, "TIMEOUT");
         assert!(!view.next_steps.is_empty(), "超时也要给可执行下一步");
@@ -811,7 +801,10 @@ mod tests {
         confine_rerank_to_content("files", &mut plan);
         assert_eq!(plan.shape, SearchShape::All);
         assert_eq!(plan.rerank, RerankState::Skipped);
-        assert!(plan.notices.is_empty(), "files 不协商槽位，不应报 SLOT_UNAVAILABLE");
+        assert!(
+            plan.notices.is_empty(),
+            "files 不协商槽位，不应报 SLOT_UNAVAILABLE"
+        );
     }
 
     /// §4.2：schema 契约——pattern 必填、query 可选、max_results 有上限。

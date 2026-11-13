@@ -111,9 +111,7 @@ pub fn plan_bash(intent: Intent, tokens: usize) -> Result<BashPlan, String> {
             );
         }
         Intent::Structured => (BashMode::Structured, vec![]),
-        Intent::Auto | Intent::Summary if tokens < AUTO_SUMMARY_TOKENS => {
-            (BashMode::Raw, vec![])
-        }
+        Intent::Auto | Intent::Summary if tokens < AUTO_SUMMARY_TOKENS => (BashMode::Raw, vec![]),
         Intent::Summary | Intent::Auto => (BashMode::SummaryDegraded, vec![]),
     };
     Ok(BashPlan {
@@ -337,7 +335,11 @@ mod tests {
             );
         }
         assert!(!plan_bash(Intent::Raw, 10_000).unwrap().should_decide);
-        assert!(!plan_bash(Intent::Structured, 10_000).unwrap().should_summarize);
+        assert!(
+            !plan_bash(Intent::Structured, 10_000)
+                .unwrap()
+                .should_summarize
+        );
     }
 
     /// §5.1：只有 summary / auto 且到门槛才尝试摘要；raw / structured 不摘要。
@@ -349,10 +351,18 @@ mod tests {
                     .unwrap()
                     .should_summarize
             );
-            assert!(plan_bash(intent, AUTO_SUMMARY_TOKENS).unwrap().should_summarize);
+            assert!(
+                plan_bash(intent, AUTO_SUMMARY_TOKENS)
+                    .unwrap()
+                    .should_summarize
+            );
         }
         assert!(!plan_bash(Intent::Raw, 10_000).unwrap().should_summarize);
-        assert!(!plan_bash(Intent::Structured, 10_000).unwrap().should_summarize);
+        assert!(
+            !plan_bash(Intent::Structured, 10_000)
+                .unwrap()
+                .should_summarize
+        );
     }
 
     #[test]

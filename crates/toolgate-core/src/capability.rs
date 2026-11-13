@@ -183,8 +183,14 @@ impl SlotBlocker {
                 "用 cargo build --release -p toolgate-cli --features external-protocols 重建",
                 "或改用不需要协议客户端的本地来源",
             ],
-            Self::Disabled => &["检查该模型后端是否恢复", "恢复后按 §3.11 重新声明或更换模型"],
-            Self::CallFailed => &["检查该模型服务是否在监听、地址是否可连", "确认服务可用后重试"],
+            Self::Disabled => &[
+                "检查该模型后端是否恢复",
+                "恢复后按 §3.11 重新声明或更换模型",
+            ],
+            Self::CallFailed => &[
+                "检查该模型服务是否在监听、地址是否可连",
+                "确认服务可用后重试",
+            ],
         }
     }
 }
@@ -307,7 +313,10 @@ mod tests {
             built
         );
         // 能力矩阵判不可用的组合，构建可用也仍然不可用。
-        assert!(!source_slot_usable(ModelSource::SystemOne, SlotKind::Summarize));
+        assert!(!source_slot_usable(
+            ModelSource::SystemOne,
+            SlotKind::Summarize
+        ));
     }
 
     /// §4.4b / §18.9：不可用的原因四值域——前两种改配置、`no_client` 重编译、`disabled` 等恢复。
@@ -391,11 +400,7 @@ mod tests {
             let grade = |slot| source_slot_capability(source, slot).grade;
             assert_eq!(grade(SlotKind::Decide), G::Limited, "{source:?}");
             assert_eq!(grade(SlotKind::Rerank), G::Limited, "{source:?}");
-            for slot in [
-                SlotKind::Classify,
-                SlotKind::Summarize,
-                SlotKind::Vision,
-            ] {
+            for slot in [SlotKind::Classify, SlotKind::Summarize, SlotKind::Vision] {
                 assert_eq!(grade(slot), G::Available, "{source:?}/{slot:?}");
             }
             assert_eq!(grade(SlotKind::Embedding), G::Unavailable, "{source:?}");

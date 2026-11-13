@@ -20,20 +20,14 @@ use crate::truncate::{TruncationOptions, truncate_head};
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "write",
-        description: "能做什么：新建文件或整体覆盖已有文件，自动建父目录；覆盖前留写前快照并沿用原文件编码。 \
-                      不能做什么：不产生需要理解的大块内容，因此不做摘要 / 判定（§4.0）；不返回图片；不做局部替换。 \
-                      什么时候用别的工具：局部修改用 edit；按内容查找用 search；读取用 read。",
-        description_en: "Can: create or fully overwrite a file, creating parent dirs; snapshots the old content and keeps its encoding. Cannot: summarize or judge (no large content, §4.0), return images, or do partial replacement. Use instead: edit for local changes, search to find content, read to inspect.",
+        description: "能做什么：新建或整体覆盖文件，自动建父目录，覆盖前留快照并沿用原编码。不能做什么：不摘要 / 判定大块内容（§4.0）、不做局部替换、不返回图片。什么时候用别的工具：局部改用 edit、查找用 search、读取用 read。",
+        description_en: "Can: create or fully overwrite a file, creating parent dirs, snapshot before and keep encoding. Cannot: summarize/judge large content (§4.0), partial replace, return images. Use instead: edit for local changes, search to find, read to inspect.",
         input_schema: json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "目标文件路径" },
                 "content": { "type": "string", "description": "完整文件内容" },
-                "intent": {
-                    "type": "string",
-                    "enum": ["raw", "summary", "structured", "visual", "auto"],
-                    "description": "协商层输出形态（§4.2）。write 不产生可协商的大块内容（§4.0），输出形态固定为写入事实；intent 仅用于统一校验，非法值 fail loud"
-                }
+                "intent": { "type": "string", "enum": ["raw", "summary", "structured", "visual", "auto"], "description": "输出形态 §4.2；fail loud" }
             },
             "required": ["path", "content"]
         }),

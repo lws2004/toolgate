@@ -7,7 +7,7 @@
 > **更新纪律**：每次改动落地后更新对应行（状态 + 证据）。判断下一步只读本文件，
 > 不要重新扫描代码与架构正文——那既慢又容易与事实源漂移。
 >
-> 最后更新：2026-11-13（read 文本判定样本有界 + 问题集按 intent 分级；默认 491 / feature 484）
+> 最后更新：2026-11-14（tools/list 六工具声明瘦身至 ≤1.5K token，中文 5999 B / 英文 5724 B；默认 491 / feature 484）
 
 ## 怎么用
 
@@ -69,6 +69,7 @@
 | 六工具 intent 参数（raw / summary / structured / visual / auto） | 完成 | §4.2 | 测试 `all_specs_declare_intent_output_schema_and_three_part_description` |
 | 结构化输出 schema | 完成 | §4.3 | `ToolSpec::output_schema`（notices 契约 + additionalProperties） |
 | confidence / slmStatus / intent 进 meta | 完成 | §7.3 | `tools/mod.rs` `negotiation_meta` + `inject_negotiation_meta` |
+| tools/list 固定开销 ≤1.5K token | 完成 | §4.7 / §6.4 | 六工具 description+inputSchema+outputSchema 合计实测中文 5999 B≈1.50K、英文 5724 B≈1.43K（4 B/token，2026-11-14 release）；原 2.0K 起只压描述与 schema 文本，字段结构不变 |
 
 ## 阶段 4：优化
 

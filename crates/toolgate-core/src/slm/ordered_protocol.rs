@@ -70,9 +70,8 @@ pub fn parse_output(response: &ChatResponse) -> Result<RerankOutput, ContractVio
     }
     let value: Value =
         serde_json::from_str(content).map_err(|_| violation("content 不是合法 JSON"))?;
-    serde_json::from_value::<RerankOutput>(value).map_err(|_| {
-        violation("content 不是 RerankOutput 形状（缺 results 或字段类型不符）")
-    })
+    serde_json::from_value::<RerankOutput>(value)
+        .map_err(|_| violation("content 不是 RerankOutput 形状（缺 results 或字段类型不符）"))
 }
 
 #[cfg(test)]

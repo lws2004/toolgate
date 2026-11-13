@@ -144,7 +144,10 @@ fn level_rank(level: Level) -> u8 {
 }
 
 fn mechanical(text: &str) -> Sensitivity {
-    if secret_patterns().iter().any(|pattern| pattern.is_match(text)) {
+    if secret_patterns()
+        .iter()
+        .any(|pattern| pattern.is_match(text))
+    {
         return Sensitivity {
             level: Level::Secret,
             score: None,
@@ -152,7 +155,10 @@ fn mechanical(text: &str) -> Sensitivity {
             calibrated: false,
         };
     }
-    if personal_patterns().iter().any(|pattern| pattern.is_match(text)) {
+    if personal_patterns()
+        .iter()
+        .any(|pattern| pattern.is_match(text))
+    {
         return Sensitivity {
             level: Level::Personal,
             score: None,
@@ -242,7 +248,12 @@ mod tests {
 
     #[test]
     fn head_tail_keeps_both_ends() {
-        let text = format!("{}{}{}", "A".repeat(3000), "B".repeat(5000), "C".repeat(3000));
+        let text = format!(
+            "{}{}{}",
+            "A".repeat(3000),
+            "B".repeat(5000),
+            "C".repeat(3000)
+        );
         let window = head_tail(&text);
         assert!(window.starts_with('A'));
         assert!(window.ends_with('C'));
@@ -283,7 +294,10 @@ mod tests {
             source: Source::Classify,
             calibrated: true,
         };
-        assert_eq!(stronger(mechanical_result, classify).source, Source::Classify);
+        assert_eq!(
+            stronger(mechanical_result, classify).source,
+            Source::Classify
+        );
     }
 
     #[test]
@@ -301,4 +315,3 @@ mod tests {
         assert_eq!(meta["calibrated"], true);
     }
 }
-

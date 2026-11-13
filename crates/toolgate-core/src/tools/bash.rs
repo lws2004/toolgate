@@ -104,30 +104,16 @@ fn read_id(flag: &str) -> Option<u32> {
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "bash",
-        description: "能做什么：执行系统命令，只接受程序名 + 参数数组（无 shell 解析层）；输出超过 2000 行 / 50KB 保留尾部并落盘。 \
-                      不能做什么：不接受 shell 字符串、管道与重定向；不返回图片；不做长任务托管。 \
-                      什么时候用别的工具：长任务用 task；按内容查找用 search；改文件用 edit / write；看图用 read。",
-        description_en: "Can: run system commands via program name + args array (no shell parsing); tail-truncates past 2000 lines / 50KB and spills. Cannot: accept shell strings, pipes or redirects, return images, or host long jobs. Use instead: task for long jobs, search to find content, edit / write to modify, read for images.",
+        description: "能做什么：执行系统命令，只接受程序名+参数数组（无 shell），输出超 2000 行或 50KB 保留尾部落盘。不能做什么：不接受 shell 字符串、管道、重定向；不做长任务托管。什么时候用别的工具：长任务 task、查找 search、改文件 edit / write、看图 read。",
+        description_en: "Can: run commands via program name + args array (no shell), tail-truncates past 2000 lines or 50KB. Cannot: shell strings, pipes, redirects, host long jobs. Use instead: task for long jobs, search to find, edit/write to modify, read for images.",
         input_schema: json!({
             "type": "object",
             "properties": {
-                "binary": { "type": "string", "description": "可执行程序名或绝对路径，例如 git" },
-                "args": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "参数数组，例如 [\"status\", \"--short\"]"
-                },
-                "cwd": { "type": "string", "description": "工作目录，默认用上下文的工作目录" },
-                "timeout_secs": {
-                    "type": "integer",
-                    "description": "超时秒数，默认 300",
-                    "minimum": 1
-                },
-                "intent": {
-                    "type": "string",
-                    "enum": ["raw", "summary", "structured", "visual", "auto"],
-                    "description": "协商层输出形态：raw 截断原文加落盘指针（默认）/ summary 失败摘要 / structured 结构化事实 JSON / visual 不适用（看图请用 read）/ auto 输出小于 500 token 给原文，否则走 summary"
-                }
+                "binary": { "type": "string", "description": "程序名或绝对路径" },
+                "args": { "type": "array", "items": { "type": "string" }, "description": "参数数组" },
+                "cwd": { "type": "string", "description": "工作目录，默认上下文目录" },
+                "timeout_secs": { "type": "integer", "description": "超时秒数，默认 300", "minimum": 1 },
+                "intent": { "type": "string", "enum": ["raw", "summary", "structured", "visual", "auto"], "description": "输出形态 §4.2" }
             },
             "required": ["binary"]
         }),
@@ -167,11 +153,12 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         .process_group(0);
     // §17.2：子进程不继承父进程环境，只拿白名单。
     apply_env_allowlist(&mut command, &cwd);
-    let mut child = command
-        .spawn()
-        .map_err(|e| {
-            ToolError::failed_with(crate::error::ErrorCode::IoError, format!("无法启动 {binary}：{e}"))
-        })?;
+    let mut child = command.spawn().map_err(|e| {
+        ToolError::failed_with(
+            crate::error::ErrorCode::IoError,
+            format!("无法启动 {binary}：{e}"),
+        )
+    })?;
     let pid = child.id().unwrap_or(0);
 
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
@@ -194,7 +181,10 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     {
         Ok((out, err, status)) => {
             let status = status.map_err(|e| {
-                ToolError::failed_with(crate::error::ErrorCode::IoError, format!("等待进程失败：{e}"))
+                ToolError::failed_with(
+                    crate::error::ErrorCode::IoError,
+                    format!("等待进程失败：{e}"),
+                )
             })?;
             (out, err, status)
         }
@@ -323,7 +313,10 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
                 notices.push(Notice::SlotUnavailable {
                     slot: "decide".to_owned(),
                     fallback: SlotFallback::Mechanical,
-                    reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(crate::slots::SlotKind::Decide)),
+                    reason: ctx
+                        .slm
+                        .as_ref()
+                        .and_then(|c| c.slot_blocker(crate::slots::SlotKind::Decide)),
                 });
             }
         }
@@ -337,7 +330,10 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
             None => notices.push(Notice::SlotUnavailable {
                 slot: "summarize".to_owned(),
                 fallback: SlotFallback::Mechanical,
-                reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(crate::slots::SlotKind::Summarize)),
+                reason: ctx
+                    .slm
+                    .as_ref()
+                    .and_then(|c| c.slot_blocker(crate::slots::SlotKind::Summarize)),
             }),
         }
     }
