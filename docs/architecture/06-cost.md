@@ -122,6 +122,9 @@ token 账；是 F2 或 F3，算的不是 token，是「数据不出本地」值�
 **决策**：
 - 延迟预算按「固定开销 + prefill + 生成」计算，不把单次推理数字当端到端预算。
 - 超过约 2K token 的原文不整份喂槽位模型；先做确定性召回，拼成有界窗口。
+- decide 类判定的成本与「状态长度 × 问题数」成正比（服务端逐问串行、不并发）：判定
+  样本截到千字符级、问题集按 intent 分级，不把整份原文与全部问题一起喂（read 文本
+  路径的落地口径见 §5.3）。
 - 前缀缓存未在本机验证前，不作为架构杠杆。
 
 实测数据与拟合过程见附件 E.3。
@@ -320,7 +323,7 @@ decide / summarize / vision / embedding），取值是封闭四态：`ready`（�
 
 契约要求：
 
-- `reason` 的枚举与 `SLOT_UNAVAILABLE.reason` 完全一致（`unbound` / `source_slot_mismatch` / `no_client` / `disabled`，§4.4b）；
+- `reason` 的枚举与 `SLOT_UNAVAILABLE.reason` 完全一致（`unbound` / `source_slot_mismatch` / `no_client` / `disabled` / `call_failed`，§4.4b）；
 - `nextSteps` 是最少可执行的下一步，不是文案：每条一句，按顺序尝试；
 - 槽位在 `ready` / `loading` 时该键不出现，不输出空对象。
 

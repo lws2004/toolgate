@@ -91,12 +91,25 @@ async fn errors_carry_code_and_next_steps() {
     let dir = workspace("err");
     let ctx = ToolContext::new(&dir).expect("上下文");
 
-    let cases: [(&str, Value, &str); 5] = [
+    let cases: [(&str, Value, &str); 8] = [
         ("nope", json!({}), "UNKNOWN_TOOL"),
         ("read", json!({ "path": "missing.txt" }), "PATH_NOT_FOUND"),
         ("read", json!({ "path": "/etc/hosts" }), "ISOLATION_REFUSED"),
         ("bash", json!({}), "BAD_ARGUMENT"),
         ("read", json!({ "path": "a.txt", "intent": "bogus" }), "BAD_ARGUMENT"),
+        ("read", json!({ "path": "." }), "BAD_ARGUMENT"),
+        // 超时是 TIMEOUT，不是笼统 FAILED；下一步要求缩小动作或加时。
+        (
+            "bash",
+            json!({ "binary": "sleep", "args": ["2"], "timeout_secs": 1 }),
+            "TIMEOUT",
+        ),
+        // 任务不存在是调用方输入错，不是内部故障。
+        (
+            "task",
+            json!({ "action": "read", "task_id": "missing-task" }),
+            "BAD_ARGUMENT",
+        ),
     ];
     for (tool, args, expected) in cases {
         let err = match dispatch(tool, &args, &ctx).await {
@@ -108,6 +121,46 @@ async fn errors_carry_code_and_next_steps() {
         assert!(!view.fact.is_empty(), "{tool} 缺事实");
         assert!(!view.next_steps.is_empty(), "{tool} 缺可执行下一步");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §5.1 L1.5 / §17.2：输出敏感度只标注不改原文；classify 不可用时回退机械并标 source。
+#[tokio::test]
+async fn sensitive_output_is_marked_without_redaction() {
+    let dir = workspace("sensitive");
+    let mut text = String::new();
+    for i in 0..600 {
+        text.push_str(&format!("line {i}: user@example.com\n"));
+    }
+    std::fs::write(dir.join("contacts.txt"), &text).expect("写测试文件");
+    let ctx = ToolContext::new(&dir).expect("上下文");
+
+    let resp = dispatch(
+        "bash",
+        &json!({ "binary": "/bin/cat", "args": ["contacts.txt"], "intent": "auto" }),
+        &ctx,
+    )
+    .await
+    .expect("bash 读取");
+    let body = text_of(&resp);
+
+    assert!(
+        body.contains("user@example.com"),
+        "只标注，不改原文：{body}"
+    );
+    assert_eq!(resp.meta["sensitivity"]["level"], "personal");
+    assert_eq!(resp.meta["sensitivity"]["source"], "mechanical");
+    let notices = resp.meta["notices"].as_array().expect("notices 数组");
+    assert!(
+        notices
+            .iter()
+            .any(|n| n["code"] == "SENSITIVE" && n["params"]["level"] == "personal"),
+        "缺 SENSITIVE 告知：{notices:?}"
+    );
+    assert!(
+        body.contains("[SENSITIVE] level=personal"),
+        "content 通道缺 SENSITIVE：{body}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

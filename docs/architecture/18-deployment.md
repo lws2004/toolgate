@@ -195,10 +195,10 @@ embedding 协议只返回向量，两者都缺文本 / 概率 / 图像输出通�
 
 | 方向 | 形状 |
 |---|---|
-| 槽位 → 协议 | `model` 取配置的上游模型名；`temperature = 0`（§3.2 同输入同输出）；`messages` 为 system + user 两条，user 放 `text`；有 `schema` 时把 schema 的 JSON 一并写入 user prompt；`max_tokens` 透传 |
+| 槽位 → 协议 | `model` 取配置的上游模型名；`temperature = 0`（§3.2 同输入同输出）；`messages` 为 system + user 两条，user 放摘要要求 + `text`（无 `schema` 时明确要求只输出摘要正文、不复述推理过程）；有 `schema` 时把 schema 的 JSON 一并写入 user prompt；`max_tokens` 透传 |
 | 协议 → 槽位 | 取 `choices[0].message.content`；无 `schema` 时作为 `SummarizeOutput.text`，有 `schema` 时解析成 JSON 给 `data` |
 
-响应形状不符（缺 `choices[0]`、空 content、有 schema 却不是合法 JSON）按 §3.11
+响应形状不符（缺 `choices[0]`、空 content、有 schema 却不是合法 JSON、`finish_reason=length`、无 schema 时 content 是推理过程而非摘要正文）按 §3.11
 形状不符处理：该次降级、连续失败后禁用并告警。**不假设统一包装**（§18.1「响应
 解包」）。`schema` 的 JSON Schema 校验需要校验器，属可选层，本轮只做 JSON 形状解析。
 

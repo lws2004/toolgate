@@ -169,7 +169,9 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     apply_env_allowlist(&mut command, &cwd);
     let mut child = command
         .spawn()
-        .map_err(|e| ToolError::failed(format!("无法启动 {binary}：{e}")))?;
+        .map_err(|e| {
+            ToolError::failed_with(crate::error::ErrorCode::IoError, format!("无法启动 {binary}：{e}"))
+        })?;
     let pid = child.id().unwrap_or(0);
 
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
@@ -191,17 +193,22 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     .await
     {
         Ok((out, err, status)) => {
-            let status = status.map_err(|e| ToolError::failed(format!("等待进程失败：{e}")))?;
+            let status = status.map_err(|e| {
+                ToolError::failed_with(crate::error::ErrorCode::IoError, format!("等待进程失败：{e}"))
+            })?;
             (out, err, status)
         }
         Err(_) => {
             super::kill_process_group(pid).await;
             let _ = child.kill().await;
-            return Err(ToolError::failed(format!(
-                "命令超时（{} 秒）已被终止：{binary} {}",
-                timeout.as_secs(),
-                argv.join(" ")
-            )));
+            return Err(ToolError::failed_with(
+                crate::error::ErrorCode::Timeout,
+                format!(
+                    "命令超时（{} 秒）已被终止：{binary} {}",
+                    timeout.as_secs(),
+                    argv.join(" ")
+                ),
+            ));
         }
     };
 
@@ -265,9 +272,35 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     if let Some(notice) = truncation_notice {
         notices.push(notice);
     }
+
+    // §5.1 L0.5：去重只作用于送给 decide/summarize 的模型输入，content 原文不变。
+    let mut model_body = body.clone();
+    let dedup = if plan.should_decide || plan.should_summarize {
+        crate::semantic_dedup::dedup_tail(ctx, &body).await
+    } else {
+        None
+    };
+    if let Some(dedup) = dedup {
+        meta["dedup"] = json!({
+            "inputLines": dedup.stats.input_lines,
+            "outputLines": dedup.stats.output_lines,
+            "batches": dedup.stats.batches,
+        });
+        model_body = dedup.text;
+    }
+
+    // §5.1 L1.5：非 raw 且达到 500 token 门槛才标注；classify 不可用回退机械。
+    if plan.mode != BashMode::Raw && estimate_tokens(&body) >= 500 {
+        let sensitivity = crate::sensitivity::assess(ctx, &body).await;
+        meta["sensitivity"] = sensitivity.to_meta();
+        if let Some(level) = sensitivity.notice_level() {
+            notices.push(Notice::Sensitive { level });
+        }
+    }
+
     let mut decision_facts = DecisionFacts::default();
     if plan.should_decide {
-        match run_decide(ctx, &body).await {
+        match run_decide(ctx, &model_body).await {
             Some(run) => {
                 notices.extend(gate_notices(run.gate, run.decision.confidence));
                 decision_facts = DecisionFacts {
@@ -299,7 +332,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     // §5.1：L2 摘要只在协商层判定要摘要时跑；不可用只降级并告知，工具照常工作（§7.3）。
     let mut summary_text: Option<String> = None;
     if plan.should_summarize {
-        match run_summarize(ctx, &body, &decision_facts).await {
+        match run_summarize(ctx, &model_body, &decision_facts).await {
             Some(text) => summary_text = Some(text),
             None => notices.push(Notice::SlotUnavailable {
                 slot: "summarize".to_owned(),

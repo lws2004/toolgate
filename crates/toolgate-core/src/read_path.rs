@@ -203,12 +203,14 @@ pub struct TextFacts {
     /// 被选中的 file_kind 类别概率（unknown 时是五类最大概率）。
     pub kind_confidence: f32,
     pub sensitivity: Sensitivity,
-    pub best_view: BestView,
-    /// 被选中的 best_view 类别概率（full 兜底时是三档最大概率）。
-    pub view_confidence: f32,
+    /// 仅当本次判定了 best_view 才有值（只有 auto 需要它决定协商形态）；
+    /// summary / structured 的输出形态已由 intent 定死，不问 best_view，这里为 None。
+    pub best_view: Option<BestView>,
+    /// 被选中的 best_view 类别概率（full 兜底时是三档最大概率）；未判定时为 None。
+    pub view_confidence: Option<f32>,
 }
 
-/// §5.3 文本路径 L1 的十问：file_kind 五类 + sensitivity 两问 + best_view 三档。
+/// §5.3 文本路径 L1 的判定问题表：file_kind 五类 + sensitivity 两问 + best_view 三档。
 pub const TEXT_FILE_KIND_QUESTIONS: [(&str, FileKind); 5] = [
     ("这段文本是源代码吗？", FileKind::Code),
     ("这段文本是配置文件吗？", FileKind::Config),
@@ -226,20 +228,41 @@ pub const TEXT_BEST_VIEW_QUESTIONS: [(&str, BestView); 3] = [
     ("这段文本最适合只取一个片段吗？", BestView::Fragment),
 ];
 
-/// 十问的固定顺序：file_kind 五问 → sensitivity 两问 → best_view 三问。
-pub fn text_decide_questions() -> Vec<String> {
-    TEXT_FILE_KIND_QUESTIONS
+/// §5.3 / §6.4 按 intent 分级的问题集：file_kind 五问 + sensitivity 两问恒问；
+/// best_view 三问只在 intent=auto 时问——summary / structured 的输出形态已由 intent
+/// 定死，问 best_view 纯属白烧判定（decide 成本 ∝ 状态长度 × 问题数，附件 E.3）。
+pub fn text_decide_questions_for(intent: Intent) -> Vec<String> {
+    if matches!(intent, Intent::Raw | Intent::Visual) {
+        return Vec::new();
+    }
+    let mut questions: Vec<String> = TEXT_FILE_KIND_QUESTIONS
         .iter()
         .map(|(question, _)| (*question).to_owned())
-        .chain(TEXT_SENSITIVITY_QUESTIONS.iter().map(|(question, _)| (*question).to_owned()))
-        .chain(TEXT_BEST_VIEW_QUESTIONS.iter().map(|(question, _)| (*question).to_owned()))
-        .collect()
+        .chain(
+            TEXT_SENSITIVITY_QUESTIONS
+                .iter()
+                .map(|(question, _)| (*question).to_owned()),
+        )
+        .collect();
+    if matches!(intent, Intent::Auto) {
+        questions.extend(
+            TEXT_BEST_VIEW_QUESTIONS
+                .iter()
+                .map(|(question, _)| (*question).to_owned()),
+        );
+    }
+    questions
+}
+
+/// 全量十问（auto 口径）：file_kind 五问 → sensitivity 两问 → best_view 三问。
+pub fn text_decide_questions() -> Vec<String> {
+    text_decide_questions_for(Intent::Auto)
 }
 
 /// 归并文本路径 L1 答案（§5.3 的落地口径）：
 /// - file_kind 取五类最大概率，< 0.5 记 unknown；
 /// - sensitivity 安全优先：密钥 ≥ 0.5 取 secret，否则个人信息 ≥ 0.5 取 personal；
-/// - best_view 取三档最大概率，< 0.5 兜底 full。
+/// - best_view 仅在问过（三问都有答案）时取三档最大概率，< 0.5 兜底 full；未问则为 None。
 pub fn merge_text_answers(
     answers: &std::collections::BTreeMap<String, crate::slots::DecideAnswer>,
 ) -> Option<TextFacts> {
@@ -264,22 +287,32 @@ pub fn merge_text_answers(
         Sensitivity::None
     };
     let mut best_view: Option<(BestView, f64)> = None;
+    let mut asked_view = true;
     for (question, view) in TEXT_BEST_VIEW_QUESTIONS {
-        let p = answers.get(question)?.probability;
-        if best_view.is_none_or(|(_, best_p)| p > best_p) {
-            best_view = Some((view, p));
+        match answers.get(question) {
+            Some(answer) => {
+                if best_view.is_none_or(|(_, best_p)| answer.probability > best_p) {
+                    best_view = Some((view, answer.probability));
+                }
+            }
+            None => asked_view = false,
         }
     }
-    let (mut view, view_p) = best_view?;
-    if view_p < 0.5 {
-        view = BestView::Full;
-    }
+    let (best_view, view_confidence) = if asked_view {
+        let (mut view, p) = best_view?;
+        if p < 0.5 {
+            view = BestView::Full;
+        }
+        (Some(view), Some(p as f32))
+    } else {
+        (None, None)
+    };
     Some(TextFacts {
         file_kind,
         kind_confidence: kind_p as f32,
         sensitivity,
-        best_view: view,
-        view_confidence: view_p as f32,
+        best_view,
+        view_confidence,
     })
 }
 
@@ -357,7 +390,7 @@ pub fn plan_text(intent: Intent, facts: Option<&TextFacts>, summarize_available:
         Intent::Summary => to_summary(false),
         Intent::Structured => to_summary(true),
         Intent::Auto => match facts {
-            Some(f) if f.best_view == BestView::Structure => to_summary(true),
+            Some(f) if f.best_view == Some(BestView::Structure) => to_summary(true),
             _ => TextPlan {
                 mode: TextMode::Raw,
                 notices: vec![],
@@ -910,6 +943,41 @@ mod tests {
         assert_eq!(questions[9], TEXT_BEST_VIEW_QUESTIONS[2].0);
     }
 
+    /// §5.3 / §6.4 分级：summary / structured 不判定 best_view（少问 3 题）。
+    #[test]
+    fn text_decide_questions_summary_and_structured_skip_best_view() {
+        for intent in [Intent::Summary, Intent::Structured] {
+            let questions = text_decide_questions_for(intent);
+            assert_eq!(questions.len(), 7);
+            assert_eq!(questions[0], TEXT_FILE_KIND_QUESTIONS[0].0);
+            assert_eq!(questions[6], TEXT_SENSITIVITY_QUESTIONS[1].0);
+            assert!(!questions.iter().any(|q| q == TEXT_BEST_VIEW_QUESTIONS[0].0));
+        }
+        assert_eq!(text_decide_questions_for(Intent::Auto).len(), 10);
+        assert!(text_decide_questions_for(Intent::Raw).is_empty());
+    }
+
+    /// §5.3 未问 best_view 时归并为 None，不假装 full（§4.6「不假装成功」）。
+    #[test]
+    fn text_answers_merge_without_best_view_keeps_none() {
+        let answers = text_answers(
+            &[
+                (FileKind::Log, 0.9),
+                (FileKind::Code, 0.05),
+                (FileKind::Config, 0.02),
+                (FileKind::Doc, 0.02),
+                (FileKind::Data, 0.01),
+            ],
+            0.1,
+            0.1,
+            &[],
+        );
+        let facts = merge_text_answers(&answers).expect("7 问答案足够归并");
+        assert_eq!(facts.file_kind, FileKind::Log);
+        assert_eq!(facts.best_view, None);
+        assert_eq!(facts.view_confidence, None);
+    }
+
     /// §5.3 归并：file_kind 取最大、sensitivity 安全优先、best_view 取最大。
     #[test]
     fn text_answers_merge_kind_sensitivity_and_view() {
@@ -933,8 +1001,8 @@ mod tests {
         assert_eq!(facts.file_kind, FileKind::Code);
         assert!((facts.kind_confidence - 0.9).abs() < 1e-6);
         assert_eq!(facts.sensitivity, Sensitivity::Personal);
-        assert_eq!(facts.best_view, BestView::Structure);
-        assert!((facts.view_confidence - 0.85).abs() < 1e-6);
+        assert_eq!(facts.best_view, Some(BestView::Structure));
+        assert!((facts.view_confidence.unwrap() - 0.85).abs() < 1e-6);
     }
 
     #[test]
@@ -980,8 +1048,8 @@ mod tests {
         );
         let facts = merge_text_answers(&answers).unwrap();
         assert_eq!(facts.file_kind, FileKind::Unknown);
-        assert_eq!(facts.best_view, BestView::Full);
-        assert!((facts.view_confidence - 0.4).abs() < 1e-6);
+        assert_eq!(facts.best_view, Some(BestView::Full));
+        assert!((facts.view_confidence.unwrap() - 0.4).abs() < 1e-6);
     }
 
     /// §5.3 文本路径 L2 schema 按 file_kind 固定。
@@ -1007,15 +1075,21 @@ mod tests {
             file_kind: FileKind::Code,
             kind_confidence: 0.9,
             sensitivity: Sensitivity::None,
-            best_view: BestView::Structure,
-            view_confidence: 0.9,
+            best_view: Some(BestView::Structure),
+            view_confidence: Some(0.9),
         };
         let full = TextFacts {
-            best_view: BestView::Full,
+            best_view: Some(BestView::Full),
             ..structure
         };
-        assert_eq!(plan_text(Intent::Raw, Some(&structure), true).mode, TextMode::Raw);
-        assert_eq!(plan_text(Intent::Summary, None, true).mode, TextMode::Summary);
+        assert_eq!(
+            plan_text(Intent::Raw, Some(&structure), true).mode,
+            TextMode::Raw
+        );
+        assert_eq!(
+            plan_text(Intent::Summary, None, true).mode,
+            TextMode::Summary
+        );
         assert_eq!(
             plan_text(Intent::Structured, None, true).mode,
             TextMode::Structured
@@ -1027,7 +1101,10 @@ mod tests {
             plan_text(Intent::Auto, Some(&structure), true).mode,
             TextMode::Structured
         );
-        assert_eq!(plan_text(Intent::Auto, Some(&full), true).mode, TextMode::Raw);
+        assert_eq!(
+            plan_text(Intent::Auto, Some(&full), true).mode,
+            TextMode::Raw
+        );
         assert_eq!(plan_text(Intent::Auto, None, true).mode, TextMode::Raw);
     }
 

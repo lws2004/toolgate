@@ -315,6 +315,17 @@ summarize 槽位的输出必须满足两个条件：
   2026-07-28 无握手客户端不调 initialize 时，身份信息通过 `toolgate status` 查看
 - 不访问其他用户的 home
 
+**输出敏感度标注**
+
+- bash / task / search 的输出在非 raw、≥ 500 token 时由 classify 打 `secret` /
+  `personal` / `normal` 标签，并与机械正则（私钥块、API key、邮箱、手机号、
+  身份证号）取更高等级；机械命中是下限，不被 classify 的 `normal` 覆盖。
+  命中前两者发 `SENSITIVE` 告知（§4.4b）。只标注、不自动脱敏：脱敏仍按 §8
+  的规则与配置。
+- classify 不可用时只用机械正则；`meta.sensitivity.source` 标明最终来源，
+  不因标注失败改变返回内容。
+- 标注输入头尾各 2000 字符，不把整份输出送进槽位模型（§4.6 诚实原则）。
+
 ### 17.3 与 SLM 安全的关系
 
 §15.1 讲的是「不可信内容污染模型」，本节讲的是「工具操作本身越界」。

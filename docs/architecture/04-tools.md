@@ -123,7 +123,7 @@ read/edit 又无处落地。
 
 | 类型 | 例子 | 处理 |
 |---|---|---|
-| 告知性（改变认知） | 下表 10 个 notice code 覆盖的全部场景 | 必须进 content，一条不能漏；用固定模板压成一行 |
+| 告知性（改变认知） | 下表 11 个 notice code 覆盖的全部场景 | 必须进 content，一条不能漏；用固定模板压成一行 |
 | 事实性（下一步依据） | 路径、行号、exitCode、diff、文件级变化、候选位置 | 结构化字段为主，文本只渲染必要项（§5.7） |
 | 程序性（逻辑判断） | 耗时、字节数、错误码、置信度数值、spillPath | 默认只进 structuredContent；当它是 notice 模板的必填字段时，作为模板的一部分进 content |
 
@@ -152,7 +152,7 @@ content 由固定模板渲染，structuredContent 原样携带同一份 `notices
 两个函数都是纯函数：同输入同输出。`decide_output` 不读执行结果，`finalize_notices`
 不读配置与模型，二者都不产生副作用；对外只有一个 `notices` 数组。
 
-**枚举与模板**（10 个 code；新增 code 算契约变更）。notice code 用全大写蛇形，
+**枚举与模板**（11 个 code；新增 code 算契约变更）。notice code 用全大写蛇形，
 与 §1.4.5 的 ErrorCode（PascalCase）分属两个命名空间——同名时以命名风格区分，
 不要互相映射：
 
@@ -164,6 +164,7 @@ content 由固定模板渲染，structuredContent 原样携带同一份 `notices
 | `ISOLATION_FALLBACK` | 隔离回退命中（§8.7） | requested:enum actual:enum rule:string reason:enum | `[ISOLATION_FALLBACK] requested=raw actual=structure rule=**/.env* reason=retention_below_threshold` |
 | `SLOT_UNAVAILABLE` | 槽位不可用或未配置 | slot:string fallback:enum reason:enum(可选) | `[SLOT_UNAVAILABLE] slot=vision fallback=metadata reason=no_client` |
 | `REDACTED` | 内容被脱敏 | count:u32 retention:percent(1) | `[REDACTED] count=3 retention=99.4%` |
+| `SENSITIVE` | classify 或机械规则判定输出含密钥/个人信息（只标注，不脱敏） | level:secret\|personal | `[SENSITIVE] level=secret` |
 | `NORMALIZED` | edit 按第 2/3 级归一化命中（§5.4） | level:2\|3 kind:eol\|whitespace | `[NORMALIZED] level=2 kind=eol` |
 | `UNCALIBRATED` | 概率来自非校准适配器（§3.10） | slot:string adapter:enum | `[UNCALIBRATED] slot=decide adapter=json` |
 | `LOSSY_DECODE` | 解码出现替换字符（§5.6） | encoding:string replacements:u32 | `[LOSSY_DECODE] encoding=gbk replacements=3` |
@@ -183,10 +184,11 @@ content 由固定模板渲染，structuredContent 原样携带同一份 `notices
 - `DEGRADED.requested` / `actual`：输出形态 `raw` / `summary` / `structured` / `visual` / `none`；`actual` 另可 `metadata` / `compressed`；
 - `ISOLATION_FALLBACK.requested`：隔离档位 `none` / `understand` / `summary` / `raw`；`actual`：回退动作 `redact` / `structure` / `summarize` / `refuse`；
 - `unit`：`lines` / `bytes`；`views`：`both` / `local`；`fallback`：`metadata` / `text` / `mechanical` / `loading`；
-- `SLOT_UNAVAILABLE.reason`：`unbound`（没有能服务该槽位的模型）/ `source_slot_mismatch`（来源×槽位在能力矩阵里不可用）/ `no_client`（当前构建未含该来源的协议客户端）/ `disabled`（连续失败被禁用）。它是**可执行下一步的判据**：前两者改配置，`no_client` 重编译（`--features external-protocols`），`disabled` 等恢复或换模型；
+- `SLOT_UNAVAILABLE.reason`：`unbound`（没有能服务该槽位的模型）/ `source_slot_mismatch`（来源×槽位在能力矩阵里不可用）/ `no_client`（当前构建未含该来源的协议客户端）/ `disabled`（连续失败被禁用）/ `call_failed`（本次调用失败或超时，槽位本身仍可用）。它是**可执行下一步的判据**：前两者改配置，`no_client` 重编译（`--features external-protocols`），`disabled` 等恢复或换模型，`call_failed` 检查模型服务监听与地址后重试；
 - `SLOT_UNAVAILABLE` 的 `nextSteps` **不进 content**：渲染模板只带 `reason`，具体命令写在 structuredContent 的 `slmStatusDetail[nextSteps]`（程序字段，§4.7 高密度口径）；
 - `adapter`：`native` / `json` / `text` / `ordered`；
-- `SNIFFED.actual`：`binary` / `text` / `png` / `jpeg` / `gif` / `webp` / `pdf` / `zip` / `gzip` / `other`。
+- `SNIFFED.actual`：`binary` / `text` / `png` / `jpeg` / `gif` / `webp` / `pdf` / `zip` / `gzip` / `other`；
+- `SENSITIVE.level`：`secret`（密钥、令牌、凭据）/ `personal`（个人信息）；多个命中取最高（`secret` > `personal`）。
 
 **code 选择规则**（同一事实只发一条，组合按此裁决）：
 
@@ -201,7 +203,7 @@ content 由固定模板渲染，structuredContent 原样携带同一份 `notices
 （`slot` → `pointer` → `failed` 首项 → `level` 的字典序；二级键缺省时按 params 序列化后的字典序），不按并发节点的完成顺序：
 
 ```text
-ISOLATION_FALLBACK → REDACTED → TRUNCATED → SLOT_UNAVAILABLE
+ISOLATION_FALLBACK → REDACTED → SENSITIVE → TRUNCATED → SLOT_UNAVAILABLE
 → DEGRADED → LOW_CONFIDENCE → NORMALIZED → UNCALIBRATED → LOSSY_DECODE → SNIFFED
 ```
 
@@ -215,21 +217,21 @@ ISOLATION_FALLBACK → REDACTED → TRUNCATED → SLOT_UNAVAILABLE
 
 | 级 | 内容 | 默认 |
 |---|---|---|
-| G0 必给 | 上表 10 个 code 的全部告知 | 总是 |
+| G0 必给 | 上表 11 个 code 的全部告知 | 总是 |
 | G1 默认给 | 下一步依据：路径、行号、diff、exitCode | 总是（structuredContent 为主，文本只列关键项） |
 | G2 按需 | 解释、候选、引用线索 | intent=structured 或配置开启 |
 
 预算（设计目标，非实测）：
 
 - 每条 notice ≤ 1 行；每条 notice 的 params ≤ 4 个；
-- 常规返回 ≤ 3 条 notice；出现安全类（`ISOLATION_FALLBACK`、`REDACTED`）时 ≤ 6 条；
+- 常规返回 ≤ 3 条 notice；出现安全类（`ISOLATION_FALLBACK`、`REDACTED`、`SENSITIVE`）时 ≤ 6 条；
 - 全部 notice 合计 ≤ 400 UTF-8 字节（约 100 token，按 4 字节/token 估算）。
 
 **超预算合并算法**（确定性，实现按此顺序）：
 
 1. **同 code 合并**：count 类求和（两处 REDACTED → `count=5`）；列表类合并去重；
    阈值类取最差值。
-2. **按类优先级保留**：安全（`ISOLATION_FALLBACK`、`REDACTED`）> 完整性
+2. **按类优先级保留**：安全（`ISOLATION_FALLBACK`、`REDACTED`、`SENSITIVE`）> 完整性
    （`TRUNCATED`）> 可用性（`SLOT_UNAVAILABLE`、`DEGRADED`）> 认知
    （`LOW_CONFIDENCE`、`UNCALIBRATED`、`SNIFFED`、`NORMALIZED`、`LOSSY_DECODE`）。
 3. **超 6 条时**：从认知类最低优先级开始整条省略；省略数量记入
@@ -575,7 +577,7 @@ description:
 
 | 约束 | 内容 |
 |---|---|
-| 动作菜单固定 | 只能从下表 7 个动作里选，不生成新动作 |
+| 动作菜单固定 | 只能从下表 8 个动作里选，不生成新动作 |
 | 单次调用内 | 不跨 tools/call、不写文件、不产生持久状态 |
 | 有界预算 | 最多 5 步、并发 ≤ 4；链级 token / 步数按本节边界，不设延迟门控 |
 | 每步可验证 | 每步输出有 schema 或机械校验；不达标降级到机械路径 |
@@ -586,6 +588,7 @@ description:
 |---|---|---|
 | `recall` | 从落盘副本召回指定片段（行号 / 正则 / 头部 / 尾部） | 确定性 |
 | `decide` | 在命名问题上给概率答案 | decide 槽位 |
+| `classify` | 对文本打敏感度 / 类别标签（只产出标签事实，不改变原文） | classify 槽位 |
 | `summarize` | 有界文本 → 摘要或 schema 化 | summarize 槽位 |
 | `vision` | 图片 → 文字 / 坐标 | vision 槽位 |
 | `rerank` | 候选排序 | rerank 槽位 |
@@ -614,7 +617,7 @@ bash 失败（输出 8000 行）：
 - 链级并发上限 `chain.max_parallel`（默认 `min(4, CPU/2)`），超过排队，不无界展开；
 - **并发不改变结果**：同输入同输出的约束（§16.3）按节点级落实——节点输出确定、DAG 拓扑固定，并发只影响延迟。
 
-**下一步由谁选**：由 `decide` 槽位在菜单内做受限选择（答案空间 = 7 个动作），或由机械条件触发（如「召回窗口含错误行 → 必须 summarize」）。**不做自由生成式规划**——那会跨出 §1.2 的答案空间判据。
+**下一步由谁选**：由 `decide` 槽位在菜单内做受限选择（答案空间 = 8 个动作），或由机械条件触发（如「召回窗口含错误行 → 必须 summarize」）。**不做自由生成式规划**——那会跨出 §1.2 的答案空间判据。
 
 **与 §13.4 批量的关系**：§13.4 方案 B 是「一次 decide 槽位调用问多个问题」（模型内批量）；本节是「多个链节点并行提交」（调度层并发）。两者互补：批量减少调用次数，并发缩短关键路径。
 
@@ -647,11 +650,13 @@ bash 失败（输出 8000 行）：
 ```text
 L0 执行 → 拿 stdout/stderr
 L0 双阈值截断（2000 行 / 50KB）+ 完整输出落盘
+L0.5 语义去重（embedding；只作用于 decide/summarize 的模型输入）
 L1 decide 判定（一次前向，多个问题）：
      has_error?          概率
      error_kind?         编译 / 测试 / 权限 / 网络 / 资源 / 未知
      severity?           阻断 / 警告 / 噪音
      needs_full_context? 是/否
+L1.5 敏感度标注（classify；只发 SENSITIVE 告知，不改原文）
 L2 summarize 摘要（仅当 decide 判定 has_error 且 severity=阻断）：
      失败根因 + 涉及的文件与测试 + 建议排查方向
 L0 协商：
@@ -718,7 +723,7 @@ decide 槽位契约是**二元形状**——「每个问题一个概率」，没
 
 **判定不可用时工具照常工作**：槽位未绑定、`external-protocols` feature 未开启、
 或调用失败 → 该次判定缺失，工具按 L0 结果继续工作，按 §3.8 降级并按 §4.4b 发
-`SLOT_UNAVAILABLE` 告知，`meta.confidence` 为 `null`。**不判错、不判类型**——
+`SLOT_UNAVAILABLE` 告知（`reason=call_failed` 或槽位层原因），`meta.confidence` 为 `null`。**不判错、不判类型**——
 把「判定不了」记成「判定为无错」是错的。
 
 #### L2 摘要的落地口径
@@ -730,10 +735,30 @@ decide 槽位契约是**二元形状**——「每个问题一个概率」，没
 - 摘要成功时 `content` 只给摘要文本，判定事实在 `meta.decision`、完整输出在
   `meta.spill`，**不重复上传原文**；`meta.summary` 同时给程序可读通道；
 - 摘要不可用（槽位未绑定 / feature 未开 / 调用失败）按 §3.8 降级：给原文 +
-  `SLOT_UNAVAILABLE` 告知，工具照常工作（§7.3），**不编造摘要**。
+  `SLOT_UNAVAILABLE` 告知（调用失败时 `reason=call_failed`），工具照常工作（§7.3），**不编造摘要**。
 
 上图中「has_error 且 severity=阻断」是 §9.2 对 L2 节点**自动展开**的触发判据；
 本轮的协商层接线按 intent 进入摘要路径，理解链的自动调度（§4.8）仍待落地。
+
+#### L1.5 输出敏感度标注与模型输入去重
+
+- **敏感度标注**：`intent != raw` 且 body ≥ 500 token 时，classify 与机械正则
+  （私钥块、API key 赋值、邮箱、手机号、身份证号）同时判定，取更高等级
+  （secret > personal > normal）；classify 判 `normal` 不覆盖机械命中的
+  `secret` / `personal`——机械是下限，防模型漏判。最终等级命中前两者发
+  `SENSITIVE`，`normal` 不发。**只标注不脱敏**——脱敏仍由 §8 的规则决定，不改变
+  返回内容与隔离档位。`meta.sensitivity.source` 记最终来源（classify / mechanical）。
+  输入取头尾各 2000 字符（合计 ≤ 4000），不喂整份输出。
+- **失败降级**：classify 未绑定或调用失败时只用机械正则，
+  `meta.sensitivity.source=mechanical`；**不发
+  `SLOT_UNAVAILABLE`**——这是附加标签，不改变返回形态，不构成 §4.4b 意义上的降级
+  （显式例外，避免每次 bash 都多一条噪声）。
+- **模型输入去重**：送给 decide / summarize 的窗口（≤ 8000 字符、50–200 行）先做
+  精确行去重，再用 embedding 余弦聚类（阈值 0.92），每簇保留首次出现的行；
+  **只作用于模型输入，不回写 content 原文**。窗口 > 200 行或 embedding 不可用则
+  跳过。`meta.dedup` 给 `inputLines` / `outputLines` / `batches`（程序字段）。
+  只读、单次调用内、无索引、无持久状态（§4.8 边界）。
+- 两个动作与 L1 无数据依赖，可并发提交；同模型实例内部仍按 §18.1 有界队列串行。
 
 **结构化字段在判定不可用时的取值**：`errorKind` = `"unknown"`、`severity` =
 `"unknown"`、`failedItems` = 空数组（`exitCode` 与 `spillPath` 照常给真实值，
@@ -841,11 +866,20 @@ L0 协商：按 intent 返回全部 / top-k / 结构化列表
   以示区分（不是 rerank 的 `applied`），`meta.embedding` 给出
   `candidates` / `textsTruncated` / `batches` 统计；
 - 两个槽位都不可用、或调用失败 → 降级为命中顺序返回，按 §4.4b 发
-  `SLOT_UNAVAILABLE` 告知，**不谎报 applied**（§4.6）；
+  `SLOT_UNAVAILABLE` 告知（调用失败时 `reason=call_failed`），**不谎报 applied**（§4.6）；
 - 分数只用作顺序，不作为置信度门控输入。通用 LLM 走 `ordered` 时是自报值、
   非校准（§18.1「受限」，按 §3.10 标 `UNCALIBRATED`）；`source: rerank` 的
   `relevance_score` 是专用 ranker 的相关性分数、embedding 的余弦是向量相似度，
   三者都是非校准量，但语义与告知口径不同（§18.1）。
+
+#### 输出敏感度标注
+
+content 模式、body ≥ 500 token 时对命中内容做 classify 敏感度标签（labels
+`secret` / `personal` / `normal`）并与机械正则取更高等级（§5.1 同口径，机械为
+下限），命中前两者发 `SENSITIVE`。与重排无数据依赖，可并发提交；classify 不可用时
+只用机械正则并记 `meta.sensitivity.source=mechanical`，**不发
+`SLOT_UNAVAILABLE`**（附加标签，不改变返回形态，与 §5.1 同口径）。只标注不脱敏；
+`files` 模式只有路径，不做标注。
 
 ### 5.3 read —— 文本与图片两条路
 
@@ -853,16 +887,30 @@ L0 协商：按 intent 返回全部 / top-k / 结构化列表
 
 ```text
 L0 读文件、嗅探类型、截断
-L1 decide 判定：
-     file_kind?   代码 / 配置 / 日志 / 文档 / 数据
-     sensitivity? 含密钥 / 含个人信息 / 普通
-     best_view?   全文 / 结构 / 片段
+L1 decide 判定（样本有界：头 2000 + 尾 200 字符；问题集按 intent 分级）：
+     file_kind?   代码 / 配置 / 日志 / 文档 / 数据        （恒问）
+     sensitivity? 含密钥 / 含个人信息 / 普通              （恒问）
+     best_view?   全文 / 结构 / 片段                       （仅 auto 问）
+L1.5 摘要输入去重（embedding；只作用于 L2 输入，不回写原文）
 L2 summarize 结构化（仅当 intent=structured 或 auto 且 best_view=结构）：
      代码 → 函数签名列表、TODO、导入
      配置 → 键值树
      日志 → 错误行与时间线
 协商：raw 给原文；structured 给提取结果 + 行号范围
 ```
+
+read 的 `sensitivity` 由 L1 decide 给出，**不再用 classify 重复判定**（同一事实
+只发一条，§4.4b）；classify 在 read 的落点仅限 §5.1/§5.2/§5.5 的输出标注。
+L2 摘要前对 `bounded`（≤ 8000 字符）先做与 §5.1 同口径的语义去重，失败用原窗口；
+`meta.dedup` 统计，不改变 `content` 的原文与行号。
+
+**判定样本与问题集都按 §6.4 有界化**。decide 的成本与「状态长度 × 问题数」成正比
+（systemone 服务端逐问串行、不并发，附件 E.3 实测），因此：判定样本取「头 2000 +
+尾 200 字符」而非整份（日志的失败信息常在尾部），中段以省略标记代替；问题集按 intent
+分级——summary / structured 的输出形态已由 intent 定死，只问 file_kind + sensitivity
+七问；只有 auto 需要 best_view 决定协商形态，问满十问。best_view 未判定时
+`meta.bestView` 字段省略，不写 `full` 冒充（§4.6「不假装成功」）。摘要输入 `bounded`
+（≤ 8000 字符）与判定样本是两回事，仍按去重后的有界窗口送 summarize。
 
 **图片路径**
 
@@ -1074,9 +1122,11 @@ unified diff 的 hunk 头带行号（@@ -12,3 +12,5 @@）。如果文件已经�
 
 ```text
 L0 启动 / 读累积输出 / 终止
+L0.5 语义去重（embedding；只作用于 decide/summarize 的模型输入）
 L1 decide 判定：
      state?      运行中 / 已完成 / 卡住 / 已崩溃
      progress?   有进展 / 无变化 / 报错循环
+L1.5 敏感度标注（classify；只发 SENSITIVE 告知，不改原文）
 L2 summarize 增量摘要（仅当 action=read 且累积输出 > 2000 token）
 协商：原始增量 / 摘要 + 状态
 ```
@@ -1123,6 +1173,14 @@ decide 槽位契约是二元形状——「每个问题一个概率」，没有�
 工作，`state` / `progress` 给 `"unknown"`、`meta.confidence` 为 `null`，按 §3.8
 降级并按 §4.4b 发 `SLOT_UNAVAILABLE` 告知——**不编造状态**（§4.6）。
 
+#### L1.5 敏感度标注与模型输入去重
+
+与 §5.1 同口径：`intent != raw` 且 body ≥ 500 token 时用 classify 打
+`secret` / `personal` / `normal` 标签并与机械正则取更高等级（机械为下限），
+命中前两者发 `SENSITIVE`；classify 不可用时只用机械正则，不发 `SLOT_UNAVAILABLE`。送给 decide / summarize 的窗口先做精确行去重与 embedding
+余弦聚类（50–200 行、阈值 0.92），只作用于模型输入，不回写 content；`meta.dedup`
+与 `meta.sensitivity` 给程序字段。
+
 #### L2 增量摘要的落地口径
 
 `intent=summary` 与 `auto`（累积输出 > 2000 token）在 L1 判定之后尝试 L2 摘要：
@@ -1133,7 +1191,7 @@ decide 槽位契约是二元形状——「每个问题一个概率」，没有�
 - 摘要成功时 `content` 只给摘要 + 状态行，判定事实在 `meta.decision`、完整输出在
   `meta.spill`，**不重复上传原文**；`meta.summary` 同时给程序可读通道；
 - 摘要不可用（槽位未绑定 / feature 未开 / 调用失败）按 §3.8 降级：给原文 +
-  `SLOT_UNAVAILABLE` 告知，工具照常工作（§7.3），**不编造摘要**。
+  `SLOT_UNAVAILABLE` 告知（调用失败时 `reason=call_failed`），工具照常工作（§7.3），**不编造摘要**。
 
 显式 `intent=summary` 是调用方明确要加工，不受上图中 > 2000 token 的自动门槛限制；
 该门槛只约束 `auto` 路径里 L2 节点的自动展开。

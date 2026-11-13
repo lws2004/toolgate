@@ -102,6 +102,13 @@ pub enum SniffActual {
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
+pub enum SensitivityLevel {
+    Secret,
+    Personal,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
 pub enum ConfidenceViews {
     Both,
     Local,
@@ -188,6 +195,9 @@ pub enum Notice {
         count: u32,
         retention: f32,
     },
+    Sensitive {
+        level: SensitivityLevel,
+    },
     Normalized {
         level: NormalizeLevel,
         kind: NormalizeKind,
@@ -238,6 +248,7 @@ impl Notice {
             Notice::IsolationFallback { .. } => "ISOLATION_FALLBACK",
             Notice::SlotUnavailable { .. } => "SLOT_UNAVAILABLE",
             Notice::Redacted { .. } => "REDACTED",
+            Notice::Sensitive { .. } => "SENSITIVE",
             Notice::Normalized { .. } => "NORMALIZED",
             Notice::Uncalibrated { .. } => "UNCALIBRATED",
             Notice::LossyDecode { .. } => "LOSSY_DECODE",
@@ -250,21 +261,24 @@ impl Notice {
         match self {
             Notice::IsolationFallback { .. } => 0,
             Notice::Redacted { .. } => 1,
-            Notice::Truncated { .. } => 2,
-            Notice::SlotUnavailable { .. } => 3,
-            Notice::Degraded { .. } => 4,
-            Notice::LowConfidence { .. } => 5,
-            Notice::Normalized { .. } => 6,
-            Notice::Uncalibrated { .. } => 7,
-            Notice::LossyDecode { .. } => 8,
-            Notice::Sniffed { .. } => 9,
+            Notice::Sensitive { .. } => 2,
+            Notice::Truncated { .. } => 3,
+            Notice::SlotUnavailable { .. } => 4,
+            Notice::Degraded { .. } => 5,
+            Notice::LowConfidence { .. } => 6,
+            Notice::Normalized { .. } => 7,
+            Notice::Uncalibrated { .. } => 8,
+            Notice::LossyDecode { .. } => 9,
+            Notice::Sniffed { .. } => 10,
         }
     }
 
     /// 预算优先级（§4.4b:222-224）：安全 > 完整性 > 可用性 > 认知。
     fn class_rank(&self) -> u8 {
         match self {
-            Notice::IsolationFallback { .. } | Notice::Redacted { .. } => 0,
+            Notice::IsolationFallback { .. }
+            | Notice::Redacted { .. }
+            | Notice::Sensitive { .. } => 0,
             Notice::Truncated { .. } => 1,
             Notice::SlotUnavailable { .. } | Notice::Degraded { .. } => 2,
             Notice::LowConfidence { .. }
@@ -283,6 +297,7 @@ impl Notice {
             Notice::Uncalibrated { slot, .. } => slot.clone(),
             Notice::Truncated { pointer, .. } => pointer.clone().unwrap_or_default(),
             Notice::Normalized { level, .. } => value_str(*level),
+            Notice::Sensitive { level } => value_str(*level),
             _ => serde_json::to_string(self).unwrap(),
         }
     }
@@ -347,6 +362,9 @@ impl Notice {
                 fields.push(format!("count={count}"));
                 fields.push(format!("retention={:.1}%", *retention * 100.0_f32));
             }
+            Notice::Sensitive { level } => {
+                fields.push(format!("level={}", value_str(*level)));
+            }
             Notice::Normalized { level, kind } => {
                 fields.push(format!("level={}", value_str(*level)));
                 fields.push(format!("kind={}", value_str(*kind)));
@@ -398,7 +416,10 @@ impl Notice {
             Notice::Sniffed { ext, .. } => {
                 *ext = shorten(ext);
             }
-            Notice::LowConfidence { .. } | Notice::Redacted { .. } | Notice::Normalized { .. } => {}
+            Notice::LowConfidence { .. }
+            | Notice::Redacted { .. }
+            | Notice::Sensitive { .. }
+            | Notice::Normalized { .. } => {}
         }
     }
 
@@ -540,7 +561,7 @@ pub fn budgeted_notices(notices: Vec<Notice>) -> NoticeChannels {
 mod tests {
     use super::*;
 
-    /// 10 个 code 各一组固定 params（§4.4b 表 151-162 的渲染示例）。
+    /// 11 个 code 各一组固定 params（§4.4b 表的渲染示例）。
     fn all_notices() -> Vec<Notice> {
         vec![
             Notice::Truncated {
@@ -574,6 +595,9 @@ mod tests {
                 count: 3,
                 retention: 0.994,
             },
+            Notice::Sensitive {
+                level: SensitivityLevel::Secret,
+            },
             Notice::Normalized {
                 level: NormalizeLevel::L2,
                 kind: NormalizeKind::Eol,
@@ -604,6 +628,7 @@ mod tests {
                 Notice::IsolationFallback { .. } => {}
                 Notice::SlotUnavailable { .. } => {}
                 Notice::Redacted { .. } => {}
+                Notice::Sensitive { .. } => {}
                 Notice::Normalized { .. } => {}
                 Notice::Uncalibrated { .. } => {}
                 Notice::LossyDecode { .. } => {}
@@ -664,19 +689,20 @@ mod tests {
                 "[SLOT_UNAVAILABLE] slot=vision fallback=metadata",
             ),
             ("REDACTED", "[REDACTED] count=3 retention=99.4%"),
+            ("SENSITIVE", "[SENSITIVE] level=secret"),
             ("NORMALIZED", "[NORMALIZED] level=2 kind=eol"),
             ("UNCALIBRATED", "[UNCALIBRATED] slot=decide adapter=json"),
             ("LOSSY_DECODE", "[LOSSY_DECODE] encoding=gbk replacements=3"),
             ("SNIFFED", "[SNIFFED] ext=.txt actual=binary"),
         ];
-        assert_eq!(all_notices().len(), 10);
+        assert_eq!(all_notices().len(), 11);
         for n in all_notices() {
             let want = expected.iter().find(|(c, _)| *c == n.code()).unwrap().1;
             assert_eq!(n.render(), want, "code {} 渲染不符", n.code());
         }
     }
 
-    /// 告知完备性：10 个 code 每个至少一条路径，content 含对应 code。
+    /// 告知完备性：11 个 code 每个至少一条路径，content 含对应 code。
     #[test]
     fn notice_completeness() {
         let content = render_notices(&all_notices());
@@ -700,6 +726,7 @@ mod tests {
             vec![
                 "ISOLATION_FALLBACK",
                 "REDACTED",
+                "SENSITIVE",
                 "TRUNCATED",
                 "SLOT_UNAVAILABLE",
                 "DEGRADED",

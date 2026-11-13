@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use super::{ToolContext, ToolResponse, ToolSpec, optional_str, optional_usize, required_str};
 use crate::ToolError;
-use crate::bash_path::intent_tag;
+use crate::bash_path::{estimate_tokens, intent_tag};
 use crate::locale::{Language, tf};
 use crate::notice::{Notice, SlotFallback, budgeted_notices};
 use crate::search_path::{
@@ -226,6 +226,14 @@ async fn run_with_limits(
             "truncatedBy": walk.truncated_by(),
         },
     });
+    // §5.2：content 模式且达到 500 token 才标注输出敏感度；files 不标注。
+    if mode == "content" && estimate_tokens(&body) >= 500 {
+        let sensitivity = crate::sensitivity::assess(ctx, &body).await;
+        meta["sensitivity"] = sensitivity.to_meta();
+        if let Some(level) = sensitivity.notice_level() {
+            plan.notices.push(Notice::Sensitive { level });
+        }
+    }
     let mut content = body;
     if !plan.notices.is_empty() {
         content.push('\n');

@@ -27,7 +27,7 @@ use crate::notice::budgeted_notices;
 use crate::read_path::{
     FileKind, ImageFacts, ImageOutcome, ImagePlan, TextFacts, TextMode, TextPlan, display_path,
     image_decide_questions, merge_image_answers, merge_text_answers, metadata_facts, metadata_text,
-    plan_image, plan_text, text_decide_questions, text_summarize_schema,
+    plan_image, plan_text, text_decide_questions_for, text_summarize_schema,
 };
 use crate::slots::{DecideInput, SlotKind, SummarizeInput, VisionInput, VisionTask};
 use crate::truncate::{TruncationOptions, format_size, truncate_head, truncate_line_head};
@@ -85,10 +85,14 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     })?;
 
     if meta.is_dir() {
-        return Err(ToolError::failed(format!(
-            "{} 是目录。用 search 的 files 模式列目录内容。",
-            path.display()
-        )));
+        return Err(ToolError::BadArgument {
+            code: crate::error::ErrorCode::BadArgument,
+            message: format!("{} 是目录，不是文件", path.display()),
+            next_steps: vec![
+                "用 search 的 files 模式列出目录内容".to_owned(),
+                "确认 path 指向要读的文件后重试".to_owned(),
+            ],
+        });
     }
 
     // 图片分支：§10.1 前置判断 → 协商 → 槽位全空时给可行动的元信息。
@@ -145,14 +149,19 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         );
         // §7.3：绑定了 decide 却拿不到判定（构建未含协议客户端或调用失败）时如实告知；
         // 「判定缺失」与「判定为 unknown」是两回事，调用方需要能区分（§4.6 诚实）。
+        // plan_image 在判定缺位时已产 decide 告知，这里只补原因、不重复同一条。
+        fill_slot_unavailable_reasons(&mut plan.notices, ctx.slm.as_deref());
         if ruling.is_none()
-            && !decide_available
             && matches!(intent, Intent::Auto | Intent::Structured | Intent::Summary)
+            && !plan
+                .notices
+                .iter()
+                .any(|n| matches!(n, Notice::SlotUnavailable { slot, .. } if slot == "decide"))
         {
             plan.notices.push(Notice::SlotUnavailable {
                 slot: "decide".to_owned(),
                 fallback: crate::notice::SlotFallback::Mechanical,
-                reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(SlotKind::Decide)),
+                reason: slot_unavailable_reason(ctx.slm.as_deref(), "decide"),
             });
         }
         return image_response(&image_input, &plan, ctx, ruling.as_ref()).await;
@@ -194,11 +203,18 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     // 先认编码：UTF-16 文件天然含 NUL 字节，不能按「有 NUL 即二进制」拦下。
     let is_wide = encoding_name.starts_with("UTF-16");
     if !is_wide && media::looks_binary(&bytes) {
-        return Err(ToolError::failed(format!(
-            "{} 是二进制文件（{} 字节），不能按文本读取。若需处理请用 bash 调用专用工具。",
-            path.display(),
-            format_size(bytes.len())
-        )));
+        return Err(ToolError::BadArgument {
+            code: crate::error::ErrorCode::BadArgument,
+            message: format!(
+                "{} 是二进制文件（{} 字节），不能按文本读取",
+                path.display(),
+                format_size(bytes.len())
+            ),
+            next_steps: vec![
+                "若需处理二进制内容，用 bash 调用对应的专用工具".to_owned(),
+                "确认 path 指向文本文件后重试".to_owned(),
+            ],
+        });
     }
 
     // had_decode_errors 为真说明有字节无法在该编码下解释，
@@ -225,7 +241,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         && text_decide_available
         && crate::bash_path::estimate_tokens(&text) >= crate::bash_path::AUTO_SUMMARY_TOKENS
     {
-        text_ruling(&text, ctx).await
+        text_ruling(&text, intent, ctx).await
     } else {
         None
     };
@@ -246,7 +262,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
             notices: vec![crate::notice::Notice::SlotUnavailable {
                 slot: "summarize".to_owned(),
                 fallback: crate::notice::SlotFallback::Text,
-                reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(SlotKind::Summarize)),
+                reason: None,
             }],
         };
     }
@@ -353,7 +369,9 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     if let Some(ruling) = &text_ruling {
         out_meta["fileKind"] = json!(ruling.facts.file_kind.as_str());
         out_meta["sensitivity"] = json!(ruling.facts.sensitivity.as_str());
-        out_meta["bestView"] = json!(ruling.facts.best_view.as_str());
+        if let Some(view) = ruling.facts.best_view {
+            out_meta["bestView"] = json!(view.as_str());
+        }
         out_meta["confidence"] = json!(round2(ruling.confidence));
         if !ruling.calibrated {
             text_plan.notices.push(Notice::Uncalibrated {
@@ -362,6 +380,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
             });
         }
     }
+    fill_slot_unavailable_reasons(&mut text_plan.notices, ctx.slm.as_deref());
     if !text_plan.notices.is_empty() {
         attach_text_notices(&mut out, &mut out_meta, text_plan.notices.clone());
     }
@@ -452,18 +471,39 @@ struct TextRuling {
     calibrated: bool,
 }
 
-/// 调 decide 槽位做文本路径 L1 十问（§5.3）。任何失败返回 None，调用方走原文。
-async fn text_ruling(text: &str, ctx: &ToolContext) -> Option<TextRuling> {
+/// §5.3 / §6.4 判定样本有界：头 2000 字符 + 尾 200 字符（日志的失败信息常在尾部），
+/// 中段用省略标记。判定只看这段；摘要输入仍用各自的 8000 字符窗口。
+fn bounded_ruling_sample(text: &str) -> String {
+    const HEAD: usize = 2000;
+    const TAIL: usize = 200;
+    let total = text.chars().count();
+    if total <= HEAD + TAIL {
+        return text.to_owned();
+    }
+    let head: String = text.chars().take(HEAD).collect();
+    let tail: String = text.chars().skip(total - TAIL).collect();
+    format!(
+        "{head}
+…
+{tail}"
+    )
+}
+
+/// 调 decide 槽位做文本路径 L1 判定（§5.3）。任何失败返回 None，调用方走原文。
+/// 判定样本与问题集都按 §6.4 有界化：样本见 bounded_ruling_sample，问题集按 intent 分级。
+async fn text_ruling(text: &str, intent: Intent, ctx: &ToolContext) -> Option<TextRuling> {
     let client = ctx.slm.as_ref()?;
-    let bounded: String = text.chars().take(8000).collect();
+    let bounded = bounded_ruling_sample(text);
     let input = DecideInput {
         state: json!(bounded),
         images: None,
-        questions: text_decide_questions(),
+        questions: text_decide_questions_for(intent),
     };
     let outcome = client.decide(&input).await.ok()?;
     let facts = merge_text_answers(&outcome.output.answers)?;
-    let confidence = facts.kind_confidence.min(facts.view_confidence) as f64;
+    // §7.3：confidence = 被采纳结论所依赖问题概率的最小值；best_view 未判定时只取 kind。
+    let view_confidence = facts.view_confidence.unwrap_or(facts.kind_confidence);
+    let confidence = facts.kind_confidence.min(view_confidence) as f64;
     let _ = crate::decision_log::append(
         "read",
         Some(confidence),
@@ -489,10 +529,22 @@ async fn text_summarize_response(
 ) -> Option<ToolResponse> {
     let client = ctx.slm.as_ref()?;
     let bounded: String = text.chars().take(8000).collect();
+    let mut dedup_meta = Value::Null;
+    let input_text = match crate::semantic_dedup::dedup_all(ctx, &bounded).await {
+        Some(dedup) => {
+            dedup_meta = json!({
+                "inputLines": dedup.stats.input_lines,
+                "outputLines": dedup.stats.output_lines,
+                "batches": dedup.stats.batches,
+            });
+            dedup.text
+        }
+        None => bounded,
+    };
     let kind = ruling.map(|r| r.facts.file_kind).unwrap_or(FileKind::Unknown);
     let schema = (plan.mode == TextMode::Structured).then(|| text_summarize_schema(kind));
     let input = SummarizeInput {
-        text: bounded,
+        text: input_text,
         schema,
         max_tokens: Some(600),
     };
@@ -512,10 +564,15 @@ async fn text_summarize_response(
         "totalLines": text.lines().count(),
         "structured": plan.mode == TextMode::Structured,
     });
+    if !dedup_meta.is_null() {
+        meta["dedup"] = dedup_meta;
+    }
     if let Some(ruling) = ruling {
         meta["fileKind"] = json!(ruling.facts.file_kind.as_str());
         meta["sensitivity"] = json!(ruling.facts.sensitivity.as_str());
-        meta["bestView"] = json!(ruling.facts.best_view.as_str());
+        if let Some(view) = ruling.facts.best_view {
+            meta["bestView"] = json!(view.as_str());
+        }
         meta["confidence"] = json!(round2(ruling.confidence));
         if !ruling.calibrated {
             notices.push(Notice::Uncalibrated {
@@ -542,6 +599,42 @@ fn attach_text_notices(body: &mut String, meta: &mut Value, notices: Vec<Notice>
 }
 
 /// 图片分支的返回组装（§10.1 / §3.8 / §4.4b 两个通道）。
+/// 一个槽位告知缺失原因时的补因规则（§4.4b）：
+/// 槽位本身不可用由 `SlotBlocker` 给出；可用但本次调用失败则记 `call_failed`，
+/// 不能留空——reason 是调用方的下一步判据。
+fn slot_unavailable_reason(
+    slm: Option<&crate::slm::SlotClient>,
+    slot: &str,
+) -> Option<crate::capability::SlotBlocker> {
+    use crate::capability::SlotBlocker;
+    let kind = match slot {
+        "classify" => SlotKind::Classify,
+        "rerank" => SlotKind::Rerank,
+        "decide" => SlotKind::Decide,
+        "summarize" => SlotKind::Summarize,
+        "vision" => SlotKind::Vision,
+        "embedding" => SlotKind::Embedding,
+        _ => return None,
+    };
+    match slm {
+        Some(client) => client.slot_blocker(kind).or(Some(SlotBlocker::CallFailed)),
+        None => Some(SlotBlocker::Unbound),
+    }
+}
+
+fn fill_slot_unavailable_reasons(
+    notices: &mut [Notice],
+    slm: Option<&crate::slm::SlotClient>,
+) {
+    for notice in notices.iter_mut() {
+        if let Notice::SlotUnavailable { slot, reason, .. } = notice
+            && reason.is_none()
+        {
+            *reason = slot_unavailable_reason(slm, slot);
+        }
+    }
+}
+
 async fn image_response(
     input: &ImageInput<'_>,
     plan: &ImagePlan,
@@ -727,15 +820,20 @@ async fn text_understanding_response(
         }
         Err(_) => {
             let mut notices = plan.notices.clone();
-            notices.push(Notice::SlotUnavailable {
-                slot: "vision".to_owned(),
-                fallback: if ctx.upstream_vision {
-                    crate::notice::SlotFallback::Mechanical
-                } else {
-                    crate::notice::SlotFallback::Metadata
-                },
-                reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(SlotKind::Vision)),
-            });
+            if !notices
+                .iter()
+                .any(|n| matches!(n, Notice::SlotUnavailable { slot, .. } if slot == "vision"))
+            {
+                notices.push(Notice::SlotUnavailable {
+                    slot: "vision".to_owned(),
+                    fallback: if ctx.upstream_vision {
+                        crate::notice::SlotFallback::Mechanical
+                    } else {
+                        crate::notice::SlotFallback::Metadata
+                    },
+                    reason: slot_unavailable_reason(ctx.slm.as_deref(), "vision"),
+                });
+            }
             if ctx.upstream_vision {
                 let mut resp = prepared;
                 attach_notices(&mut resp, notices, true);

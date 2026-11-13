@@ -19,6 +19,8 @@ pub mod media;
 pub mod notice;
 pub mod read_path;
 pub mod search_path;
+pub mod semantic_dedup;
+pub mod sensitivity;
 pub mod slm;
 pub mod slot_state;
 pub mod slots;

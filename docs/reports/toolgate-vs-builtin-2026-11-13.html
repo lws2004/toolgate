@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>toolgate 实际使用效果实测与内置工具对比 · 2026-11-13</title>
+<style>
+:root{
+  --bg:#f6f7f9;--card:#ffffff;--ink:#1f2937;--sub:#5b6472;--line:#e3e7ee;
+  --blue:#0c447c;--blue-bg:#e8f1fb;--green:#085041;--green-bg:#e3f6ee;
+  --orange:#633806;--orange-bg:#fdf1dd;--red:#8a1b1b;--red-bg:#fbe6e6;
+  --chip:#eef1f6;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#0f141b;--card:#161d26;--ink:#e6eaf0;--sub:#9aa6b5;--line:#28313d;
+    --blue:#b5d4f4;--blue-bg:#122a3f;--green:#9fe1cb;--green-bg:#0e2d24;
+    --orange:#fac775;--orange-bg:#33260f;--red:#f3a6a6;--red-bg:#3a1a1a;--chip:#1e2836;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.65;font-size:15px}
+.wrap{max-width:1080px;margin:0 auto;padding:32px 22px 64px}
+header.top{border-bottom:3px solid var(--blue);padding-bottom:18px;margin-bottom:26px}
+h1{font-size:25px;margin:0 0 8px;letter-spacing:.2px}
+.sub{color:var(--sub);font-size:13.5px}
+.badges{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+.badge{background:var(--chip);border:1px solid var(--line);border-radius:999px;padding:5px 13px;font-size:12.5px;color:var(--sub)}
+.badge b{color:var(--ink)}
+h2{font-size:19px;margin:38px 0 14px;padding-left:11px;border-left:4px solid var(--blue)}
+h3{font-size:15.5px;margin:22px 0 10px}
+p{margin:9px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:15px 17px}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
+.kv:last-child{border-bottom:none}
+.kv span:first-child{color:var(--sub)}
+.kv span:last-child{text-align:right;font-weight:500}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.stat .num{font-size:26px;font-weight:700;letter-spacing:.3px}
+.stat .lbl{color:var(--sub);font-size:12.5px;margin-top:3px}
+.stat.blue .num{color:var(--blue)} .stat.green .num{color:var(--green)}
+.stat.orange .num{color:var(--orange)} .stat.red .num{color:var(--red)}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px;background:var(--card);border-radius:10px;overflow:hidden}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+th{background:var(--chip);font-weight:600;font-size:12.5px;letter-spacing:.3px;color:var(--ink)}
+tr:last-child td{border-bottom:none}
+td .t{font-weight:600}
+.tag{display:inline-block;border-radius:6px;padding:1px 8px;font-size:12px;font-weight:600}
+.tg-g{background:var(--green-bg);color:var(--green)} .tg-o{background:var(--orange-bg);color:var(--orange)}
+.tg-r{background:var(--red-bg);color:var(--red)} .tg-b{background:var(--blue-bg);color:var(--blue)}
+.callout{border-radius:10px;padding:13px 16px;margin:14px 0;font-size:13.5px;border:1px solid}
+.callout.ok{background:var(--green-bg);border-color:var(--green)} .callout.ok b{color:var(--green)}
+.callout.warn{background:var(--orange-bg);border-color:var(--orange)} .callout.warn b{color:var(--orange)}
+.callout.info{background:var(--blue-bg);border-color:var(--blue)} .callout.info b{color:var(--blue)}
+ul{margin:8px 0;padding-left:20px} li{margin:5px 0}
+code{background:var(--chip);padding:1px 6px;border-radius:5px;font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.bar{height:8px;border-radius:5px;background:var(--chip);overflow:hidden;margin-top:5px}
+.bar>i{display:block;height:100%;border-radius:5px}
+.foot{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);color:var(--sub);font-size:12.5px}
+.legend{font-size:12.5px;color:var(--sub);margin:6px 0 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <h1>toolgate 实际使用效果实测 · 与内置同名工具对比</h1>
+  <div class="sub">评估日期 2026-11-13 · 工作目录 /Users/lanws/workspace/toolgate · 按 tool-adoption-eval 五步法（层位分析 → 项目取证 → 隔离实测 → 固定开销与净增量 → 结论）</div>
+  <div class="badges">
+    <span class="badge">建议：<b>局部采纳</b></span>
+    <span class="badge">六工具：<b>read / write / edit / search / bash / task</b></span>
+    <span class="badge">槽位：<b>六槽位全部 ready（图片 decide 受上游限制）</b></span>
+    <span class="badge">常驻开销：<b>≈2.0–2.4K tok/请求</b></span>
+  </div>
+</header>
+
+<div class="grid">
+  <div class="stat blue"><div class="num">6</div><div class="lbl">工具全部实测可用</div></div>
+  <div class="stat green"><div class="num">143ms</div><div class="lbl">decide(d3-nano) 文本判定延迟</div></div>
+  <div class="stat orange"><div class="num">25.8s</div><div class="lbl">summarize 端到端(400 行日志)</div></div>
+  <div class="stat green"><div class="num">0.7s</div><div class="lbl">100 行去重摘要端到端</div></div>
+  <div class="stat red"><div class="num">8036B</div><div class="lbl">tools/list 常驻开销(≈2.0K tok)</div></div>
+</div>
+
+<h2>一、结论摘要</h2>
+<div class="callout ok">
+<b>核心结论：</b>toolgate 在 <b>edit（行锚点/整段 diff）、task（后台长任务）、大输出落盘 spill、本地摘要/看图/结构化判定</b> 上明显强于内置工具；但代价是 <b>每个请求固定 2.0–2.4K token 的工具定义开销（超 1.5K 红线）</b>、<b>无 shell 导致 bash 表达力受限</b>、以及 <b>摘要链路约 26s 的高延迟</b>。适合作为「重活 / 敏感数据不出本机」的补充工具层与内置工具并存，而非全面替换。本轮新增的敏感度标注与输入去重只加告知与 meta，不改返回形态；代价是 ≥500 token 的 auto 调用多约 3.1s。
+</div>
+<div class="callout info">
+<b>最关键的一条实测：</b>槽位配置后，<b>MCP 通道（即 DSH 内的真实调用路径）直接返回了准确摘要</b>——说明配置对运行中的 MCP server 即刻生效，无需重启。默认 <code>intent=raw</code> 不会摘要（设计如此，§5.1），必须显式 <code>intent=summary/auto</code> 且输出 ≥500 token 才触发。
+</div>
+
+<h2>二、测试环境</h2>
+<div class="card">
+  <div class="kv"><span>二进制</span><span>target/release/toolgate（external-protocols feature 版，7.0MB）</span></div>
+  <div class="kv"><span>配置</span><span>~/.toolgate/config.yaml · slm.mode=http</span></div>
+  <div class="kv"><span>decide</span><span>d3-nano · systemone 原生 · 127.0.0.1:8082</span></div>
+  <div class="kv"><span>classify</span><span>d3-nano · systemone choice · 与 decide 共用</span></div>
+  <div class="kv"><span>summarize</span><span>LFM2.5-1.2B-Instruct · openai 适配 · 127.0.0.1:10031</span></div>
+  <div class="kv"><span>vision</span><span>MiniCPM-V-4.7-1B · openai 适配 · 127.0.0.1:10014</span></div>
+  <div class="kv"><span>slmStatus</span><span>六槽位全部 ready（classify/decide 共用 d3-nano；rerank=jina；summarize=LFM2.5；vision=MiniCPM；embedding=bge-m3）</span></div>
+</div>
+
+<h2>三、六工具逐项实测对比</h2>
+<table>
+<thead><tr><th style="width:9%">工具</th><th style="width:29%">内置工具行为</th><th style="width:44%">toolgate 行为（实测）</th><th style="width:18%">结论</th></tr></thead>
+<tbody>
+<tr><td class="t">read</td><td>支持 offset/limit 全量读取；无摘要、无落盘</td><td>默认按行/字节上限截断（实测 3000 行仅给约 872 行头部）并落盘 pointer；<code>intent=summary</code> 走 decide→summarize 生成摘要（400 行错误日志 25.8s 产出 47 字宏观摘要）；摘要输入先做精确行去重 + embedding 余弦聚类（100 行交替样本→2 行、1 批，<code>meta.dedup</code>），<b>content 与行号不变</b>，100 行摘要端到端 0.65–0.78s</td><td><span class="tag tg-o">摘要+去重+spill</span> 但默认截断更激进，摘要需显式 intent</td></tr>
+<tr><td class="t">write</td><td>直接创建/覆盖</td><td>写前留快照、自动建父目录、沿用原文件编码；实测写入 3 行 16 字节成功</td><td><span class="tag tg-g">增强</span> 无额外成本</td></tr>
+<tr><td class="t">edit</td><td>仅 old_string→new_string 字面替换</td><td>三寻址：edits 文本匹配 / anchor 行锚点(<code>12#f8a2</code>) / patch 扁平 unified diff；改动前快照、失败归因。实测 hello→HELLO 正确、保留其余内容</td><td><span class="tag tg-g">显著更强</span> 整段重排/缩进无需转义</td></tr>
+<tr><td class="t">search</td><td>rg/grep 检索</td><td>content/files 两模式；命中 &gt;20 且有 query 时 rerank 优先（已绑定 jina，实测 25 条 <code>meta.rerank="applied"</code>），rerank 不可用则 embedding 余弦重排；content 模式且 ≥500 token 时对输出做敏感度标注；超 2000 行/50KB 保留头部落盘</td><td><span class="tag tg-b">rerank/embedding+落盘</span> 基础检索等价</td></tr>
+<tr><td class="t">bash</td><td><code>bash -c</code> 完整 shell 语法（管道/重定向/变量展开）</td><td>无 shell：<code>binary</code>+<code>args</code>，<b>明确拒绝 <code>sh -c</code></b>（无注入面）；默认尾部 2000 行截断+spill；<code>intent=summary</code> 摘要，<code>intent=auto</code> 且 ≥500 token 时用 classify+机械正则标注敏感度（只告知不脱敏）</td><td><span class="tag tg-o">更安全但表达力受限</span> 摘要需显式 intent</td></tr>
+<tr><td class="t">task</td><td>无独立工具（依赖 bash run_in_background）</td><td>start/read/kill/list 后台长任务管理；read 尾部截断落盘、卡住/崩溃由 decide 判定。实测 start→list→kill 全通；输出与 bash 同口径走敏感度标注与摘要输入去重</td><td><span class="tag tg-g">独有能力</span></td></tr>
+</tbody>
+</table>
+<div class="legend">标签：<span class="tag tg-g">绿</span> 优于内置 · <span class="tag tg-b">蓝</span> 等价或略强 · <span class="tag tg-o">橙</span> 有得有失</div>
+
+<h2>四、槽位智能层实测（六槽位中四类）</h2>
+<table>
+<thead><tr><th style="width:11%">槽位</th><th style="width:20%">模型 / 来源</th><th style="width:40%">实测结果</th><th style="width:13%">延迟</th><th style="width:16%">判定</th></tr></thead>
+<tbody>
+<tr><td class="t">classify</td><td>d3-nano / systemone choice</td><td>用在输出敏感度标注：API key / 邮箱样本 classify 单独判 <code>normal</code>（0.95–0.98），机械正则改判 <code>secret</code>/<code>personal</code> 并接管，<code>source=mechanical</code>；正常长文本仍由 classify 给 <code>normal 0.99</code></td><td>标注链路 3.1s（600 行 bash 端到端，含 decide）</td><td><span class="tag tg-o">可用但会漏判，须机械保底</span></td></tr>
+<tr><td class="t">decide</td><td>d3-nano / systemone native</td><td>文本判定正确且快（sky=1.0 adopt）；<b>带图判定不可用</b>：:8082 未加载 mmproj，带 images 请求返回 HTTP 501，toolgate 如实通知 <code>slot=decide fallback=text reason=call_failed</code></td><td>123–143ms（文本）</td><td><span class="tag tg-o">文本可用，图片受上游限制</span></td></tr>
+<tr><td class="t">summarize</td><td>LFM2.5-1.2B-Instruct / openai text</td><td>400 行错误日志→宏观摘要：连接重试与超时频繁、延迟超 1000ms；输出 47 字，未保留 max_connections/attempt 等具体数字</td><td>25.6–26.0s（端到端）</td><td><span class="tag tg-o">比 LFM3 快约 8s，但细节减少</span></td></tr>
+<tr><td class="t">vision</td><td>MiniCPM-V-4.7-1B / openai text</td><td>64x64 红白棋盘→完整中文描述（棋盘格、色块布局、无文本）</td><td>5.8–6.0s（端到端）</td><td><span class="tag tg-g">可用</span></td></tr>
+</tbody>
+</table>
+<div class="callout warn"><b>延迟实测明细：</b>400 行摘要端到端 25.6–26.0s（LFM2.5 生成本身约 0.3s，主要耗时在 read 的判定/规划链路）；图片读取 5.8–6.0s（decide 图片探测失败后转 vision）。摘要链路不适合交互高频场景，宜用于「一次性重活」。</div>
+
+<h3>四·补　排序 rerank 与向量 embedding 实测</h3>
+<table>
+<thead><tr><th style="width:13%">能力</th><th style="width:22%">模型 / 服务</th><th>实测结果</th><th style="width:14%">判定</th></tr></thead>
+<tbody>
+<tr><td class="t">rerank</td><td>jina-reranker-v3.5-mlx-merged<br>:10020 <code>/v1/rerank</code>（listwise）</td><td>已绑定 <code>source:rerank</code> 槽位（config check 通过）。search <code>intent=auto</code> 命中 25 条（&gt;阈值 20）走 TopK，<code>meta.rerank="applied"</code>、<code>slmStatus.rerank=ready</code>；直连 25 条自然语言查询 193ms，高相关全在 top5（0.70–0.74）、无关全在底部（0.47–0.49），排序正确</td><td><span class="tag tg-g">生效、快、准</span></td></tr>
+<tr><td class="t">embedding</td><td>bge-m3-mlx-8bit<br>:10020 <code>/v1/embeddings</code></td><td>已绑定 <code>source:embedding</code> 槽位，两处消费：① search 在 rerank 不可用且命中 &gt;20 时按余弦重排（实测 25 命中 1 批，<code>meta.rerank="embedding"</code>）；② decide/summarize 的模型输入去重（read 100 行→2 行、1 批；原文与行号不变，失败回退原窗口）</td><td><span class="tag tg-g">已消费：rerank 退路</span></td></tr>
+</tbody>
+</table>
+<div class="callout warn"><b>rerank 的关键限制（诚实）：</b>toolgate search 把同一个 <code>query</code> 既当正则匹配模式、又当 rerank 语义查询，两者天然冲突。实测 <code>query="database"</code>（关键词）时 jina 把无关句排最前(0.608)、最相关句排最后(0.522)，<b>完全反向</b>；换成自然语言 <code>"database connection pool exhausted max_connections"</code> 才正确(0.807&gt;0.475&gt;0.462)。<b>结论：rerank 机制生效，但只有自然语言查询才有正收益；正则关键词场景反而可能被排乱，需注意 query 写法。</b></div>
+
+<h3>四·补二　输出敏感度标注与模型输入去重（2026-11-13 新增）</h3>
+<div class="callout ok">
+<b>两项新增都不改变返回形态：</b>敏感度只追加 <code>[SENSITIVE] level=...</code> 告知与 <code>meta.sensitivity</code>，原文不脱敏；去重只作用于送给 decide/summarize 的模型输入，content 与行号保持原样。
+</div>
+<ul>
+<li><b>敏感度标注（classify + 机械正则取高）：</b>600 行 API key 样本 → <code>level=secret</code>、<code>source=mechanical</code>，content 第二行为 <code>[SENSITIVE] level=secret</code>，structured notices 含 <code>{"code":"SENSITIVE","params":{"level":"secret"}}</code>；600 行邮箱 → <code>personal</code>/<code>mechanical</code>；正常 <code>Cargo.lock</code> → <code>normal</code>、<code>score=0.99</code>、<code>source=classify</code>。DSH MCP 通道同样返回告知。</li>
+<li><b>为什么需要机械保底：</b>d3-nano classify 对上述两个高危样本都判 <code>normal</code>（0.98 / 0.95）。实现改为「classify 与机械正则并行取更高等级、机械正则作下限」，架构正文已同步（04 §5.1/§5.2/§5.5、03 消费点、15 §17.2）。</li>
+<li><b>成本：</b>600 行 bash <code>intent=auto</code> 端到端 3.11–3.15s（<code>intent=raw</code> 0.00s，不判定）；100 行 read 去重摘要 0.65–0.78s（raw 0.00s）。标注只在非 raw 且 ≥500 token 时触发，轻量读取零成本。</li>
+</ul>
+<div class="callout warn"><b>边界：</b>search 只在 content 模式标注；read 的 sensitivity 仍由 decide 十问判定，不重复调 classify；去重窗口 50–200 行、embedding 不可用即回退原窗口，且不因此发 <code>SLOT_UNAVAILABLE</code>（附加标签不改变返回形态的显式例外）。</div>
+
+<h2>五、固定开销与净增量</h2>
+<div class="grid">
+  <div class="stat orange"><div class="num">8036B</div><div class="lbl">tools/list 六工具完整定义</div></div>
+  <div class="stat orange"><div class="num">≈2.0K</div><div class="lbl">token（按 4.0 字符/token 折算）</div></div>
+  <div class="stat red"><div class="num">&gt;1.5K</div><div class="lbl">超出单请求固定开销红线</div></div>
+</div>
+<p style="margin-top:14px">净增量前提：这 2.0–2.4K token 是<b>每请求常驻</b>成本，换取的是本地摘要 / 看图 / 结构化判定 / 后台任务 / 落盘不丢。是否值得取决于对话中「重活」占比——轻量高频对话会被固定开销摊薄。</p>
+
+<h2>六、关键风险与限制</h2>
+<div class="callout warn">
+<b>① 无 shell（安全设计，也降低通用性）：</b>toolgate bash 拒绝 <code>sh -c</code>，不支持管道/重定向/变量展开；复杂 shell 组合必须改用内置 bash。<br>
+<b>② 高延迟：</b>摘要端到端约 26s（400 行），图片读取约 6s，交互式高频调用不可取。<br>
+<b>③ 默认不摘要：</b><code>intent=raw</code> 为默认，须显式 <code>summary/auto</code> 且输出 ≥500 token 才触发。<br>
+<b>④ 判定置信偶低：</b>decide 对模糊输入给 LOW_CONFIDENCE（实测 p=0.38, errorKind=unknown），需调用方容忍降级。<br>
+<b>⑤ 常驻开销：</b>每次请求 ≈2.0–2.4K token，超红线。<br>
+<b>⑥ 部署依赖：</b>summarize 依赖 LFM2.5:10031、vision 依赖 MiniCPM-V:10014、decide 依赖 d3-nano:8082（该实例未加载 mmproj，带图判定不可用）；须三者常驻，否则槽位降级机械路径。<br>
+<b>⑦ 路径细节：</b>MCP server 工作目录为 /Users/lanws/workspace（非会话 cwd），相对路径易解析到非预期目录；search files 模式路径前缀偶有显示不一致（非数据损坏）。<br>
+<b>⑧ rerank query 复用：</b>search 用同一 query 作正则匹配与 rerank 语义查询，关键词/正则作 rerank 查询语义弱，实测可把最相关命中排到最后（<code>query="database"</code> 时 hi 句 0.522 排末、无关句 0.608 排首）；只有自然语言 query 才有正收益。<br>
+<b>⑨ classify 会漏判：</b>d3-nano 对 600 行邮箱 / API key 样本判 <code>normal</code>（0.98 / 0.95），故输出标注取「classify 与机械正则更高等级、机械保底」；正常文本不受影响。<br>
+<b>⑩ 标注有延迟成本：</b>600 行 bash <code>intent=auto</code> 端到端约 3.1s（decide + classify），<code>intent=raw</code> 为 0.00s；只在 ≥500 token 非 raw 输出触发。
+</div>
+
+<h2>七、采纳建议（分场景）</h2>
+<table>
+<thead><tr><th style="width:26%">场景</th><th style="width:20%">建议</th><th>理由</th></tr></thead>
+<tbody>
+<tr><td>敏感数据不出本机 / 需要本地摘要&amp;看图</td><td><span class="tag tg-g">推荐</span></td><td>本地小模型压缩在数据上传前完成，正是 toolgate 的核心命题</td></tr>
+<tr><td>需要 edit 行锚点 / 整段重排 / 失败归因</td><td><span class="tag tg-g">推荐</span></td><td>三寻址模式明显强于内置的字面替换</td></tr>
+<tr><td>后台长任务管理 / 大输出不丢</td><td><span class="tag tg-g">推荐</span></td><td>task 工具与 spill 落盘是内置工具没有的能力</td></tr>
+<tr><td>依赖复杂 shell 管道 / 重定向</td><td><span class="tag tg-r">不适用</span></td><td>无 shell，表达力受限，改用内置 bash</td></tr>
+<tr><td>交互式高频、token 预算紧</td><td><span class="tag tg-o">谨慎</span></td><td>2K tok/请求常驻 + 26s 摘要延迟，性价比低</td></tr>
+</tbody>
+</table>
+<div class="callout info"><b>综合：</b>按「重活下沉、轻活走内置」分层使用。toolgate 作为本地理解与执行层补齐内置工具缺失的「摘要 / 看图 / 结构化判定 / 后台任务 / 落盘」，但不宜作为默认高频通道全面替换内置工具。</div>
+
+<div class="foot">
+数据口径：全部为 2026-11-13 本机实测（命令与条件见上文），非估算；槽位与新增能力数据于 21:58 按 LFM2.5、d3-nano 与 bge-m3 现状重跑。固定开销按 tools/list 原始字节数与 4.0 字符/token 折算，给出 3.3 字符/token 的保守上限作为区间参考。<br>
+生成：toolgate 实测评估 · 自包含离线 HTML，无外部依赖。
+</div>
+</div>
+</body>
+</html>

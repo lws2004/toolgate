@@ -140,7 +140,8 @@ fn embedding(slot: SlotKind) -> Capability {
 ///
 /// 值域与 `SLOT_UNAVAILABLE.reason` 完全一致——一份枚举，notice 的 `reason=`、
 /// 返回里的 `slmStatusDetail.reason` 与启动告警读的都是它，不在三处各算一遍。
-/// 原因决定下一步：前两种改配置，`no_client` 重编译，`disabled` 等恢复或换模型。
+/// 原因决定下一步：前两种改配置，`no_client` 重编译，`disabled` 等恢复或换模型，
+/// `call_failed` 检查服务监听与地址后重试。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotBlocker {
@@ -152,6 +153,8 @@ pub enum SlotBlocker {
     NoClient,
     /// 连续失败被禁用（§3.11），属运行期状态。
     Disabled,
+    /// 本次调用失败或超时，槽位本身仍可用（找到了模型但没有拿到结果）。
+    CallFailed,
 }
 
 impl SlotBlocker {
@@ -161,6 +164,7 @@ impl SlotBlocker {
             Self::SourceSlotMismatch => "source_slot_mismatch",
             Self::NoClient => "no_client",
             Self::Disabled => "disabled",
+            Self::CallFailed => "call_failed",
         }
     }
 
@@ -180,6 +184,7 @@ impl SlotBlocker {
                 "或改用不需要协议客户端的本地来源",
             ],
             Self::Disabled => &["检查该模型后端是否恢复", "恢复后按 §3.11 重新声明或更换模型"],
+            Self::CallFailed => &["检查该模型服务是否在监听、地址是否可连", "确认服务可用后重试"],
         }
     }
 }

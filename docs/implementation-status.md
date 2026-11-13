@@ -7,7 +7,7 @@
 > **更新纪律**：每次改动落地后更新对应行（状态 + 证据）。判断下一步只读本文件，
 > 不要重新扫描代码与架构正文——那既慢又容易与事实源漂移。
 >
-> 最后更新：2026-11-13（槽位不可用原因显式化：notice reason + slmStatusDetail + list/serve 告警；验证基线 475）
+> 最后更新：2026-11-13（read 文本判定样本有界 + 问题集按 intent 分级；默认 491 / feature 484）
 
 ## 怎么用
 
@@ -37,8 +37,8 @@
 | slmStatus 状态真实性（构建可用性） | 完成 | §7.3 / §19.6 | `capability::client_available` / `source_slot_usable`：默认构建下外部协议来源标 `unavailable`，不再谎报 `ready`；测试按 feature 分支 |
 | 槽位不可用原因与下一步（slmStatusDetail） | 完成 | §4.4b / §6.1 / §18.9 | `capability.rs` 的 `SlotBlocker`（unbound / source_slot_mismatch / no_client / disabled）+ `SlotClient::slot_blocker` 单一判定；notice `reason` 与 `structuredContent.slmStatusDetail{reason,nextSteps}` 同源；`toolgate list` 槽位行标原因、serve 启动按原因聚合告警；默认 / feature 双构建测试 |
 | source: rerank 专属协议（ADR 0007） | 完成 | §18.1 / §3.5 / ADR 0007 | `config.rs` 的 `ModelSource::Rerank`、`capability.rs` 能力矩阵新列、`slm/rerank_protocol.rs`（原生 `/v1/rerank` 请求/响应）、client 按 source 分流的 HTTP 路径；7 个新单测；`toolgate config check --config` 实测 rerank 绑定 `native`；feature 构建真机 `call search`（25 命中）实测 `meta.rerank=applied`、`slmStatus.rerank=ready`（附件 E.11） |
-| embedding 槽位（OpenAI 兼容 `/v1/embeddings`） | 完成 | §3.9 / §18.1 | `slm/embedding_protocol.rs`（请求 `{model,input:texts}`、响应按 `data[].index` 升序还原向量、5 个协议单测）+ `client.embedding` HTTP 路径；`capability.rs` 六格矩阵该格 Available；`search_path.rs` 余弦重排退路与 `tools/search.rs` 分批（≤32 条）接线；`config check` 实测 bge-m3 绑定 `native` |
-| classify × systemone 原生路径（choice → 逐标签分数） | 完成 | §3.10 / §18.1 | `slm/systemone.rs` 的 `build_classify_request` / `parse_classify_output`（criteria 选项 map、probabilities → scores、none_probability ≥ 0.2 降级，5 个协议单测）；`capability.rs` 该格由 Limited 改 Available；`slm/client.rs` 按 source 分流到 `/v1/systemone`（`calibrated: true`）；`config.rs` 多模型同槽位优先绑 systemone 源（1 个新单测）；默认 / feature 双构建测试通过；d3-nano（:8082）真机端到端实测见附件 E.12 |
+| embedding 槽位（OpenAI 兼容 `/v1/embeddings`） | 完成 | §3.9 / §18.1 | `slm/embedding_protocol.rs`（请求 `{model,input:texts}`、响应按 `data[].index` 升序还原向量、5 个协议单测）+ `client.embedding` HTTP 路径；`capability.rs` 六格矩阵该格 Available；`search_path.rs` 余弦重排退路与 `tools/search.rs` 分批（≤32 条）接线；`semantic_dedup.rs` 对 decide/summarize 输入做精确行 + 余弦聚类去重（§5.1 / §5.3 / §5.5），不可用时回退原窗口；`config check` 实测 bge-m3 绑定 `native` |
+| classify × systemone 原生路径（choice → 逐标签分数） | 完成 | §3.10 / §18.1 | `slm/systemone.rs` 的 `build_classify_request` / `parse_classify_output`（criteria 选项 map、probabilities → scores、none_probability ≥ 0.2 降级，5 个协议单测）；`capability.rs` 该格由 Limited 改 Available；`slm/client.rs` 按 source 分流到 `/v1/systemone`（`calibrated: true`）；`config.rs` 多模型同槽位优先绑 systemone 源（1 个新单测）；默认 / feature 双构建测试通过；d3-nano（:8082）真机端到端实测见附件 E.12；`sensitivity.rs` 用 classify 给 bash/search/task 输出打敏感度标签（与机械正则取高、机械保底，只标注不脱敏） |
 
 ## 阶段 1.5：兼容性
 
@@ -55,12 +55,12 @@
 |---|---|---|---|
 | bash：decide 九问 + summarize | 完成 | §5.1 / §7.2 | `bash_path.rs`；`gate_notices` |
 | read 图片：vision 理解 + decide 七问 + need_pixels 三档 | 完成 | §5.3 / §10.1 | `read.rs` plan_image；真实 UI 截图复核通过（imageKind=ui_screenshot、hasText=true、need_pixels 概率 0.90），vision 端到端待本机视觉模型 |
-| read 文本：decide 十问 + summarize 结构化 | 完成 | §5.3 | `read_path.rs`（file_kind / sensitivity / best_view） |
+| read 文本：decide 分级判定 + summarize 结构化 | 完成 | §5.3 / §6.4 | `read_path.rs`：`text_decide_questions_for(intent)`（auto 十问；summary/structured 七问，不问 best_view）+ `bounded_ruling_sample`（判定样本头 2000 + 尾 200 字符）；`merge_text_answers` 未判定 best_view 时置 None、`meta.bestView` 省略；测试 `text_decide_questions_summary_and_structured_skip_best_view`、`text_answers_merge_without_best_view_keeps_none` |
 | search：语义重排接线 | 完成 | §5.2 | `search_path.rs`；query 必填主体由 pattern 承担、可选自然语言 query 决定排序：命中 > 20 且 query 非空时 rerank 优先，rerank 槽位不可用而 embedding 可用则按余弦重排；两者都不可用保持命中顺序并告知 |
 | edit：四级匹配 + decide 归因 | 完成 | §5.4 | `edit_path.rs`；p ≥ 0.85 才自动写回 |
 | task：decide 七问 + summarize | 完成 | §5.5 | `task_path.rs` |
 | write：§5.7 改动后事实返回 | 完成 | §5.7 | `write.rs`；与 edit 共用 `unified_diff` |
-| **阶段 2 整体验收** | 完成 | §14 阶段 2 | 四工具 raw / 协商双路径；read 图片真实截图复核通过；classify 无真实分类模型不影响本阶段 |
+| **阶段 2 整体验收** | 完成 | §14 阶段 2 | 四工具 raw / 协商双路径；read 图片真实截图复核通过；classify 已接入输出敏感度标注（机械正则保底） |
 
 ## 阶段 3：协商层与 intent
 
@@ -115,10 +115,10 @@
 
 ## 验证基线
 
-| 命令 | 结果（2026-11-10 复测） |
+| 命令 | 结果（2026-11-13 复测） |
 |---|---|
-| `cargo test --workspace` | 471 passed（默认构建；含 4 个阶段 5 集成用例、1 个 MCP 握手序列用例、3 个判定日志单测、7 个 rerank 协议单测、6 个 classify × systemone 单测与 embedding 协议 7 / search 语义重排与 files 门 7 / 自动绑定 1 等新增单测） |
-| `cargo test --workspace --features external-protocols` | 448 passed（feature 构建；6 个默认构建专属的降级测试被 cfg 隔离，另含 3 个判定日志单测、7 个 rerank 协议单测与 6 个 classify × systemone 新增单测） |
+| `cargo test --workspace` | 489 passed（默认构建；含 4 个阶段 5 集成用例、1 个 MCP 握手序列用例、3 个判定日志单测、7 个 rerank 协议单测、6 个 classify × systemone 单测、embedding 协议 7、search 语义重排与 files 门 7、自动绑定 1，以及敏感度 7 / 语义去重 3 个新增单测） |
+| `cargo test --workspace --features external-protocols` | 482 passed（feature 构建；6 个默认构建专属的降级测试被 cfg 隔离，另含 3 个判定日志单测、7 个 rerank 协议单测、6 个 classify × systemone 单测与敏感度 / 语义去重新增单测） |
 | `cargo clippy --workspace --all-targets` | No issues |
 | `cargo clippy --workspace --all-targets --features external-protocols` | No issues |
 | `cargo build --release` | 零警告 |

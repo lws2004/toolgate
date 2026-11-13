@@ -128,7 +128,9 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
     super::bash::apply_env_allowlist(&mut command, &cwd);
     let mut child = command
         .spawn()
-        .map_err(|e| ToolError::failed(format!("无法启动 {binary}：{e}")))?;
+        .map_err(|e| {
+            ToolError::failed_with(crate::error::ErrorCode::IoError, format!("无法启动 {binary}：{e}"))
+        })?;
 
     let pid = child.id().unwrap_or(0);
     let output = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -222,7 +224,14 @@ async fn read_output(
             .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?;
         let job = reg
             .get(task_id)
-            .ok_or_else(|| ToolError::failed(format!("没有这个任务：{task_id}")))?;
+            .ok_or_else(|| ToolError::BadArgument {
+            code: crate::error::ErrorCode::BadArgument,
+            message: format!("没有这个任务：{task_id}"),
+            next_steps: vec![
+                "用 task action=list 查看运行中与已结束的任务 id".to_owned(),
+                "确认 task_id 拼写后重试".to_owned(),
+            ],
+        })?;
         let raw = job
             .output
             .lock()
@@ -275,9 +284,35 @@ async fn read_output(
 
     // §5.5：L1 判定只在协商层判定要判时跑；判定不可用只降级并告知，工具照常工作（§7.3）。
     let mut notices = plan.notices.clone();
+
+    // §5.5 L0.5：去重只作用于送给 decide/summarize 的模型输入，content 原文不变。
+    let mut model_body = body.clone();
+    let dedup = if plan.should_decide || plan.should_summarize {
+        crate::semantic_dedup::dedup_tail(ctx, &body).await
+    } else {
+        None
+    };
+    if let Some(dedup) = dedup {
+        meta["dedup"] = json!({
+            "inputLines": dedup.stats.input_lines,
+            "outputLines": dedup.stats.output_lines,
+            "batches": dedup.stats.batches,
+        });
+        model_body = dedup.text;
+    }
+
+    // §5.5 L1.5：非 raw 且达到 500 token 门槛才标注；classify 不可用回退机械。
+    if plan.mode != TaskMode::Raw && estimate_tokens(&body) >= 500 {
+        let sensitivity = crate::sensitivity::assess(ctx, &body).await;
+        meta["sensitivity"] = sensitivity.to_meta();
+        if let Some(level) = sensitivity.notice_level() {
+            notices.push(Notice::Sensitive { level });
+        }
+    }
+
     let mut decision_facts = TaskDecisionFacts::default();
     if plan.should_decide {
-        match run_state_decide(ctx, &body, exit, elapsed).await {
+        match run_state_decide(ctx, &model_body, exit, elapsed).await {
             Some(run) => {
                 notices.extend(gate_notices(run.gate, run.decision.confidence));
                 decision_facts = TaskDecisionFacts {
@@ -302,7 +337,7 @@ async fn read_output(
     // §5.5：L2 增量摘要只在协商层判定要摘要时跑；不可用只降级并告知（§7.3）。
     let mut summary_text: Option<String> = None;
     if plan.should_summarize {
-        match run_summary(ctx, &body, exit, elapsed, &decision_facts).await {
+        match run_summary(ctx, &model_body, exit, elapsed, &decision_facts).await {
             Some(text) => summary_text = Some(text),
             None => notices.push(Notice::SlotUnavailable {
                 slot: "summarize".to_owned(),
@@ -480,7 +515,14 @@ async fn kill(args: &Value, lang: Language) -> Result<ToolResponse, ToolError> {
             .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?;
         let job = reg
             .get(task_id)
-            .ok_or_else(|| ToolError::failed(format!("没有这个任务：{task_id}")))?;
+            .ok_or_else(|| ToolError::BadArgument {
+            code: crate::error::ErrorCode::BadArgument,
+            message: format!("没有这个任务：{task_id}"),
+            next_steps: vec![
+                "用 task action=list 查看运行中与已结束的任务 id".to_owned(),
+                "确认 task_id 拼写后重试".to_owned(),
+            ],
+        })?;
         (job.child.clone(), job.pid)
     };
     super::kill_process_group(pid).await;
