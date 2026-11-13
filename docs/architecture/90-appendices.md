@@ -69,6 +69,7 @@
 | intent | 调用方表达的输出偏好：raw / summary / structured / visual / auto | §4.2 |
 | spill | 超限输出的落盘副本 + 指针 | §9.1 |
 | notice | 成功返回中的结构化告知单元：code + params，content 按固定模板渲染、structuredContent 原样携带 | §4.4b |
+| slmStatusDetail | `slmStatus` 的原因视图：键同 `slmStatus`，值含 `reason` 与 `nextSteps`，只在 `unavailable` / `degraded` 时出现 | §4.4b、§6.1 |
 | 告知协议 | 10 个 notice code 的枚举、模板、预算与测试约定 | §4.4b |
 | G0 / G1 / G2 | 返回信息等级：必给 / 默认给 / 按需；与成本阶梯 L0–L4 无关 | §4.4b |
 | snapshot | 写前保存的旧内容副本 | §20 |

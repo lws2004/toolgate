@@ -293,6 +293,7 @@ mod tests {
             Notice::SlotUnavailable {
                 slot: "vision".to_owned(),
                 fallback: SlotFallback::Metadata,
+                reason: None,
             },
             Notice::IsolationFallback {
                 requested: IsolationLevel::Raw,
@@ -414,6 +415,8 @@ pub struct DecisionInput {
     pub content_rules: Vec<ContentRule>,
     pub upstream_capability: UpstreamCapability,
     pub slot_available: bool,
+    /// §4.4b：不可用的具体原因；与 `slot_available` 由同一份判定产出。
+    pub slot_blocker: Option<crate::capability::SlotBlocker>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -550,6 +553,7 @@ pub fn decide_output(input: &DecisionInput) -> DecisionOutput {
         notices.push(Notice::SlotUnavailable {
             slot: dependent_slot(shape).to_owned(),
             fallback: SlotFallback::Mechanical,
+            reason: input.slot_blocker,
         });
     }
 
@@ -582,6 +586,7 @@ mod decide_tests {
             content_rules: vec![],
             upstream_capability: UpstreamCapability { vision: true },
             slot_available: true,
+            slot_blocker: None,
         }
     }
 

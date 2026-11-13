@@ -290,6 +290,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
                 notices.push(Notice::SlotUnavailable {
                     slot: "decide".to_owned(),
                     fallback: SlotFallback::Mechanical,
+                    reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(crate::slots::SlotKind::Decide)),
                 });
             }
         }
@@ -303,6 +304,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
             None => notices.push(Notice::SlotUnavailable {
                 slot: "summarize".to_owned(),
                 fallback: SlotFallback::Mechanical,
+                reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(crate::slots::SlotKind::Summarize)),
             }),
         }
     }

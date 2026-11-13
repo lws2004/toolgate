@@ -172,6 +172,7 @@ async fn run_with_limits(
             plan.notices.push(Notice::SlotUnavailable {
                 slot: failed_slot.to_owned(),
                 fallback: SlotFallback::Mechanical,
+                reason: None,
             });
         }
     }

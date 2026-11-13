@@ -13,7 +13,6 @@ use crate::decision::Intent;
 use crate::locale::Language;
 use crate::notice::{ConfidenceViews, Notice};
 use crate::slm::SlotClient;
-use crate::slot_state::SlotState;
 use crate::slots::{ConfidenceGate, SlotKind, SlotSet};
 use crate::spill::SpillStore;
 use crate::truncate::TruncationOptions;
@@ -312,23 +311,17 @@ pub(crate) fn gate_notices(gate: ConfidenceGate, confidence: f64) -> Vec<Notice>
 /// 一个函数产出、六个工具共用，避免各工具自行拼装形成双源。
 pub fn negotiation_meta(intent: Intent, slots: &SlotSet, client: Option<&SlotClient>) -> Value {
     let mut status = serde_json::Map::new();
+    let mut detail = serde_json::Map::new();
     for kind in SlotKind::ALL {
         let state = match client {
             Some(client) => {
-                // §3.10 准入：能力矩阵判「不可用」的来源，即使绑定了也不能标 ready
-                // （信息不充分 / 输出形状不可转换；§3.11「serves 是声明不是承诺」）。
-                // §19.6：能力矩阵可用但构建未含协议客户端时同样不可用。
-                let usable = client
-                    .source_for_slot(kind)
-                    .map(|source| crate::capability::source_slot_usable(source, kind))
-                    .unwrap_or(true);
-                if !usable {
-                    "unavailable"
-                } else {
-                    slot_state(
-                        client.is_bound(kind),
-                        client.slot_health(kind).state == SlotState::Disabled,
-                    )
+                // §3.10 / §19.6 准入与原因来自同一份判定（`slot_blocker`）：
+                // 能力矩阵判「不可用」或构建缺协议客户端 → unavailable；
+                // 连续失败禁用 → degraded；其余 ready。不因绑定而谎报 ready（§7.3）。
+                match client.slot_blocker(kind) {
+                    Some(crate::capability::SlotBlocker::Disabled) => "degraded",
+                    Some(_) => "unavailable",
+                    None => "ready",
                 }
             }
             None => {
@@ -339,24 +332,31 @@ pub fn negotiation_meta(intent: Intent, slots: &SlotSet, client: Option<&SlotCli
                 }
             }
         };
+        if let Some(client) = client
+            && let Some(blocker) = client.slot_blocker(kind)
+        {
+            detail.insert(
+                kind.as_str().to_owned(),
+                json!({
+                    "reason": blocker.as_str(),
+                    "nextSteps": blocker.next_steps(),
+                }),
+            );
+        }
         status.insert(kind.as_str().to_owned(), json!(state));
     }
-    json!({
+    let mut meta = json!({
         "intent": intent_tag(intent),
         "slmStatus": Value::Object(status),
         "confidence": Value::Null,
-    })
-}
-
-/// §7.3 的槽位状态三档（纯函数）：未绑定 → unavailable；已禁用 → degraded；其余 → ready。
-fn slot_state(bound: bool, disabled: bool) -> &'static str {
-    if !bound {
-        "unavailable"
-    } else if disabled {
-        "degraded"
-    } else {
-        "ready"
+    });
+    // ready / loading 时整个键不出现，不输出空对象（§6.1 契约）。
+    if !detail.is_empty() {
+        meta.as_object_mut()
+            .expect("协商 meta 是对象")
+            .insert("slmStatusDetail".to_owned(), Value::Object(detail));
     }
+    meta
 }
 
 /// 概率类数值只保留两位小数：超过两位的精度对调用方没有信息量（§4.7 数值精度）。
@@ -598,14 +598,6 @@ mod tests {
         inject_negotiation_meta(&mut plain, Intent::Auto, None);
         assert_eq!(plain.meta["intent"], json!("auto"));
         assert!(plain.meta["confidence"].is_null());
-    }
-
-    /// §7.3：槽位状态三档（纯函数）：未绑定 unavailable、健康 ready、禁用 degraded。
-    #[test]
-    fn slot_state_covers_three_states() {
-        assert_eq!(slot_state(false, false), json!("unavailable"));
-        assert_eq!(slot_state(true, false), json!("ready"));
-        assert_eq!(slot_state(true, true), json!("degraded"));
     }
 
     /// §19.6：外部协议来源在默认构建里没有客户端，绑定也不等于可用。

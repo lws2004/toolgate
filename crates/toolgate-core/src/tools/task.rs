@@ -294,6 +294,7 @@ async fn read_output(
             None => notices.push(Notice::SlotUnavailable {
                 slot: "decide".to_owned(),
                 fallback: SlotFallback::Mechanical,
+                reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(crate::slots::SlotKind::Decide)),
             }),
         }
     }
@@ -306,6 +307,7 @@ async fn read_output(
             None => notices.push(Notice::SlotUnavailable {
                 slot: "summarize".to_owned(),
                 fallback: SlotFallback::Mechanical,
+                reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(crate::slots::SlotKind::Summarize)),
             }),
         }
     }

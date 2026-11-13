@@ -19,6 +19,7 @@ use serde_json::json;
 use toolgate_core::config::{
     ConfigError, ConfigErrors, ResolvedConfig, default_config_path, load_config,
 };
+use toolgate_core::capability::SlotBlocker;
 use toolgate_core::locale::{Language, localize_value, tf};
 use toolgate_core::slm::{DecideOutcome, SlotCallError, SlotClient, SummarizeOutcome};
 use toolgate_core::slots::{
@@ -189,6 +190,12 @@ async fn main() -> ExitCode {
                     &[("state", decide_state(lang, &rows))]
                 )
             );
+            // §18.9 第四层：降级不能只出现在某一次工具返回里——启动时按原因聚合告警。
+            if let Some(client) = ctx.slm.as_ref()
+                && let Some(summary) = slot_blocker_summary(lang, client)
+            {
+                tracing::warn!("{summary}");
+            }
             match run_serve(ctx).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
@@ -212,7 +219,7 @@ async fn main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            let (_ctx, rows) = match build_context(lang, config_path.as_deref()) {
+            let (ctx, rows) = match build_context(lang, config_path.as_deref()) {
                 Ok(v) => v,
                 Err(code) => return code,
             };
@@ -234,7 +241,7 @@ async fn main() -> ExitCode {
                 );
                 println!();
             }
-            print_slot_rows(lang, &rows);
+            print_slot_rows(lang, &rows, ctx.slm.as_deref());
             ExitCode::SUCCESS
         }
         "call" => {
@@ -945,7 +952,7 @@ fn run_config_check(lang: Language, config_path: Option<&Path>, json_out: bool) 
                 println!("{}", pretty_json(lang, &slots_json(&rows)));
             } else {
                 println!("{}", tf(lang, "配置检查通过", &[]));
-                print_slot_rows(lang, &rows);
+                print_slot_rows(lang, &rows, None);
             }
             ExitCode::SUCCESS
         }
@@ -958,7 +965,7 @@ fn run_config_check(lang: Language, config_path: Option<&Path>, json_out: bool) 
                     "{}",
                     tf(lang, "未找到配置文件，使用内置默认（六个槽位全空）", &[])
                 );
-                print_slot_rows(lang, &rows);
+                print_slot_rows(lang, &rows, None);
             }
             ExitCode::SUCCESS
         }
@@ -1059,7 +1066,7 @@ fn report_errors(lang: Language, errors: &ConfigErrors, json_out: bool) {
 }
 
 /// 打印六个槽位的最终绑定（§3.10 可审计）。
-fn print_slot_rows(lang: Language, rows: &[SlotRow]) {
+fn print_slot_rows(lang: Language, rows: &[SlotRow], client: Option<&SlotClient>) {
     println!("{}", tf(lang, "槽位绑定（§3.10）：", &[]));
     for row in rows {
         let model = row
@@ -1074,8 +1081,19 @@ fn print_slot_rows(lang: Language, rows: &[SlotRow]) {
         } else {
             tf(lang, "自动", &[])
         };
+        // §4.4b：不可用的具体原因与工具返回的 slmStatusDetail 同源，不各自再算。
+        let reason = client
+            .and_then(|c| {
+                SlotKind::ALL
+                    .iter()
+                    .copied()
+                    .find(|k| k.as_str() == row.slot)
+                    .and_then(|k| c.slot_blocker(k))
+            })
+            .map(|blocker| tf(lang, "  原因={v}", &[("v", blocker.as_str().to_owned())]))
+            .unwrap_or_default();
         println!(
-            "  {:<9} {}  {}  {}  {}  {}",
+            "  {:<9} {}  {}  {}  {}  {}{reason}",
             row.slot,
             tf(lang, "模型={v}", &[("v", model)]),
             tf(lang, "来源={v}", &[("v", source)]),
@@ -1111,6 +1129,40 @@ fn slot_summary(lang: Language, rows: &[SlotRow]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// §18.9 / §4.4b：把不可用槽位按原因聚合成一条启动告警（不逐槽刷屏）。
+///
+/// 原因与下一步都来自 `SlotBlocker`，与工具返回的 `slmStatusDetail.reason` 同源。
+fn slot_blocker_summary(lang: Language, client: &SlotClient) -> Option<String> {
+    let pairs: Vec<(SlotKind, SlotBlocker)> = SlotKind::ALL
+        .iter()
+        .copied()
+        .filter_map(|kind| client.slot_blocker(kind).map(|blocker| (kind, blocker)))
+        .collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    let slots = pairs
+        .iter()
+        .map(|(kind, blocker)| format!("{}={}", kind.as_str(), blocker.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let steps = pairs
+        .iter()
+        .filter_map(|(kind, blocker)| {
+            blocker
+                .next_steps()
+                .first()
+                .map(|step| format!("{}:{}", kind.as_str(), step))
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    Some(tf(
+        lang,
+        "槽位降级（§18.9）：{slots}；下一步：{steps}",
+        &[("slots", slots), ("steps", steps)],
+    ))
 }
 
 /// 判定能力状态：decide 槽位是否绑定了模型（§18.1）。

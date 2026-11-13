@@ -179,8 +179,10 @@ pub fn resolve_intent(arguments: &Value, config: &CompatConfig) -> Result<Intent
     }
 }
 
-/// 默认决策输入（§8.5 的默认配置）。阶段 1.5 槽位尚未接入，
-/// slot_available=false 让 decide_output 按 §3.8 诚实标注降级（§7.3）。
+/// 默认决策输入（§8.5 的默认配置）。保守缺省：按「槽位未绑定」处理，
+/// 让 decide_output 按 §3.8 诚实标注降级（§7.3）；
+/// 能拿到 SlotClient 的调用方必须用 `SlotClient::slot_blocker` 覆盖
+/// `slot_available` / `slot_blocker`（§4.4b 一份事实源）。
 pub fn default_decision_input(intent: Intent, meta: &RequestMeta) -> DecisionInput {
     DecisionInput {
         intent,
@@ -197,6 +199,7 @@ pub fn default_decision_input(intent: Intent, meta: &RequestMeta) -> DecisionInp
         content_rules: vec![],
         upstream_capability: meta.upstream_capability(),
         slot_available: false,
+        slot_blocker: None,
     }
 }
 

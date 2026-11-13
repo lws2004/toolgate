@@ -88,6 +88,7 @@ pub fn plan_edit(level: MatchLevel, decide_slot_available: bool) -> EditPlan {
         notices.push(Notice::SlotUnavailable {
             slot: "decide".to_owned(),
             fallback: SlotFallback::Mechanical,
+            reason: None,
         });
     }
     EditPlan { notices }

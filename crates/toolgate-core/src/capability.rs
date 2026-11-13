@@ -14,6 +14,7 @@
 
 use crate::config::ModelSource;
 use crate::slots::SlotKind;
+use serde::{Deserialize, Serialize};
 
 /// 能力分档（§18.1 能力表：可用 / 受限 / 不可用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +136,65 @@ fn embedding(slot: SlotKind) -> Capability {
     }
 }
 
+/// §4.4b / §18.9：槽位不可用的**具体原因**。
+///
+/// 值域与 `SLOT_UNAVAILABLE.reason` 完全一致——一份枚举，notice 的 `reason=`、
+/// 返回里的 `slmStatusDetail.reason` 与启动告警读的都是它，不在三处各算一遍。
+/// 原因决定下一步：前两种改配置，`no_client` 重编译，`disabled` 等恢复或换模型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotBlocker {
+    /// 没有能服务该槽位的模型（`serves` 未声明或解析后为空）。
+    Unbound,
+    /// 来源×槽位在 §18.1 能力矩阵里判 `Unavailable`（信息不充分或形状不可转换）。
+    SourceSlotMismatch,
+    /// 当前构建未含该来源的协议客户端（默认构建关闭 `external-protocols`，§19.6）。
+    NoClient,
+    /// 连续失败被禁用（§3.11），属运行期状态。
+    Disabled,
+}
+
+impl SlotBlocker {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unbound => "unbound",
+            Self::SourceSlotMismatch => "source_slot_mismatch",
+            Self::NoClient => "no_client",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    /// 最少可执行的下一步（§1.4.5 第三层）：每条一句，按顺序尝试；不写寒暄。
+    pub fn next_steps(self) -> &'static [&'static str] {
+        match self {
+            Self::Unbound => &[
+                "在 models 的 serves 里声明能服务该槽位的模型",
+                "或让它按 §3.8 走机械路径",
+            ],
+            Self::SourceSlotMismatch => &[
+                "从 serves 移除该槽位",
+                "或改用覆盖该槽位的来源（§18.1 能力矩阵）",
+            ],
+            Self::NoClient => &[
+                "用 cargo build --release -p toolgate-cli --features external-protocols 重建",
+                "或改用不需要协议客户端的本地来源",
+            ],
+            Self::Disabled => &["检查该模型后端是否恢复", "恢复后按 §3.11 重新声明或更换模型"],
+        }
+    }
+}
+
+/// 来源层原因（不含未绑定与禁用）：能服务却因为构建或能力矩阵不可用。
+pub fn source_blocker(source: ModelSource, slot: SlotKind) -> Option<SlotBlocker> {
+    if !client_available(source) {
+        return Some(SlotBlocker::NoClient);
+    }
+    if source_slot_capability(source, slot).grade == CapabilityGrade::Unavailable {
+        return Some(SlotBlocker::SourceSlotMismatch);
+    }
+    None
+}
+
 /// §19.6 / §3.11：当前构建是否包含该来源所需的协议客户端。
 ///
 /// 外部协议来源（openai / anthropic / responses / systemone / rerank / embedding）走 HTTP 客户端，
@@ -157,8 +217,7 @@ pub fn client_available(source: ModelSource) -> bool {
 /// 两个条件缺一不可：能力矩阵不是 `Unavailable`，且构建含该来源的协议客户端。
 /// 各工具的可用性判定统一走这里，避免各自拼装出不一致的结论（§7.3 一份事实源）。
 pub fn source_slot_usable(source: ModelSource, slot: SlotKind) -> bool {
-    source_slot_capability(source, slot).grade != CapabilityGrade::Unavailable
-        && client_available(source)
+    source_blocker(source, slot).is_none()
 }
 
 /// 能力矩阵达到指定档位**且**构建可用（如图片判定要求 decide 恰好 `Available`）。
@@ -244,6 +303,34 @@ mod tests {
         );
         // 能力矩阵判不可用的组合，构建可用也仍然不可用。
         assert!(!source_slot_usable(ModelSource::SystemOne, SlotKind::Summarize));
+    }
+
+    /// §4.4b / §18.9：不可用的原因四值域——前两种改配置、`no_client` 重编译、`disabled` 等恢复。
+    #[test]
+    fn source_blocker_reports_why_not_usable() {
+        let built = cfg!(feature = "external-protocols");
+        // 构建缺客户端优先于能力矩阵：默认构建里外部来源一律 no_client。
+        let external = if built {
+            Some(SlotBlocker::SourceSlotMismatch)
+        } else {
+            Some(SlotBlocker::NoClient)
+        };
+        assert_eq!(
+            source_blocker(ModelSource::Openai, SlotKind::Embedding),
+            external
+        );
+        // 本地来源不受构建影响：能力矩阵不预判 → 没有原因（可用）。
+        assert_eq!(source_blocker(ModelSource::Local, SlotKind::Decide), None);
+        // 原生来源覆盖不了的槽位 → 能力矩阵原因。
+        assert_eq!(
+            source_blocker(ModelSource::SystemOne, SlotKind::Summarize),
+            external
+        );
+        assert_eq!(SlotBlocker::Unbound.as_str(), "unbound");
+        assert_eq!(
+            SlotBlocker::NoClient.next_steps()[0],
+            "用 cargo build --release -p toolgate-cli --features external-protocols 重建"
+        );
     }
 
     /// §18.1 表 8 来源 × 6 槽位全覆盖，且每条都带理由。

@@ -370,6 +370,7 @@ fn slot_unavailable(slot: &str, fallback: SlotFallback) -> Notice {
     Notice::SlotUnavailable {
         slot: slot.to_owned(),
         fallback,
+        reason: None,
     }
 }
 

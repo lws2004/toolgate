@@ -194,6 +194,39 @@ impl SlotClient {
             .and_then(|binding| binding.source)
     }
 
+    /// §3.10 / §19.6 单一判定：绑定了模型，且来源对槽位的能力不是 unavailable、构建含其客户端。
+    /// 工具返回出口与 MCP 协商告知共用这一份判定，避免两处各拼一遍（§7.3 一份事实源）。
+    /// 健康状态（§3.11 disabled）不在此判：调用方按语义另判。
+    pub fn slot_usable(&self, slot: SlotKind) -> bool {
+        self.is_bound(slot)
+            && self
+                .source_for_slot(slot)
+                .map(|source| crate::capability::source_slot_usable(source, slot))
+                .unwrap_or(true)
+    }
+
+    /// §4.4b / §18.9：某槽位不可用的具体原因；可用时返回 None。
+    ///
+    /// 判定顺序：未绑定 → 禁用 → 来源层（构建缺客户端 / 能力矩阵不可用）。
+    /// 这是 `slot_usable` 的「为什么」视图，两处读同一份判定，不各算一遍。
+    pub fn slot_blocker(&self, slot: SlotKind) -> Option<crate::capability::SlotBlocker> {
+        use crate::capability::SlotBlocker;
+        if !self.is_bound(slot) {
+            return Some(SlotBlocker::Unbound);
+        }
+        // 来源层优先：构建缺客户端 / 能力矩阵不可用时，禁用只是次要现象。
+        if let Some(blocker) = self
+            .source_for_slot(slot)
+            .and_then(|source| crate::capability::source_blocker(source, slot))
+        {
+            return Some(blocker);
+        }
+        if self.slot_health(slot).state == crate::slot_state::SlotState::Disabled {
+            return Some(SlotBlocker::Disabled);
+        }
+        None
+    }
+
     /// 某槽位的健康状态（§3.11）；未绑定的槽位是 declared。
     pub fn slot_health(&self, slot: SlotKind) -> SlotHealth {
         self.health

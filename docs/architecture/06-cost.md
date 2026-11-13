@@ -300,10 +300,31 @@ decide / summarize / vision / embedding），取值是封闭四态：`ready`（�
 
 | 状态 | 判定依据 |
 |---|---|
-| `unavailable` | 该槽位**未绑定**（`models` / `slots` 里没有它能服务的模型，§3.10）；或已绑定但**当前构建不含该来源所需的协议客户端**（外部协议属可选层，默认构建关闭 `external-protocols`，§19.6）——已绑定不等于能用，不能标 `ready` |
+| `unavailable` | 该槽位**未绑定**（`models` / `slots` 里没有它能服务的模型，§3.10）；或已绑定但**当前构建不含该来源所需的协议客户端**（外部协议属可选层，默认构建关闭 `external-protocols`，§19.6）——已绑定不等于能用，不能标 `ready`；具体是哪一种见 `slmStatusDetail` |
 | `ready` | 已绑定且健康（首次使用校验通过，§3.11） |
 | `degraded` | 已绑定但**连续失败被禁用**，或形状校验不符（§3.11 的失效状态机） |
 | `loading` | embedded 后端懒加载未就绪（§18.1 第 3 条）——**当前实现不产出这个值**，因为 embedded 后端尚未实现（§19.6 可选层） |
+
+**`slmStatusDetail` 的来源**：`slmStatus` 只给四态，不解释「为什么不可用」；`slmStatusDetail` 是同一份判定的第二视图，键与 `slmStatus` 相同，值只在 `unavailable` / `degraded` 时出现：
+
+```json
+"slmStatusDetail": {
+  "summarize": {
+    "reason": "no_client",
+    "nextSteps": ["当前构建未含该来源的协议客户端", "用 cargo build --release -p toolgate-cli --features external-protocols 重建"]
+  }
+}
+```
+
+它**不是新的状态值**：读 `slmStatus` 的调用方不受影响。两个通道（content 的 `reason=` 与这里的 `reason`）由同一份判定产出，不在两处各算一遍。
+
+契约要求：
+
+- `reason` 的枚举与 `SLOT_UNAVAILABLE.reason` 完全一致（`unbound` / `source_slot_mismatch` / `no_client` / `disabled`，§4.4b）；
+- `nextSteps` 是最少可执行的下一步，不是文案：每条一句，按顺序尝试；
+- 槽位在 `ready` / `loading` 时该键不出现，不输出空对象。
+
+这是 §1.4.5 第三层「可执行下一步」在告知通道上的延伸：告知不是错误，但同样要能让调用方知道该改配置还是重编译。
 
 **`meta.confidence` 的来源**：本次 L1 判定输出的概率。
 

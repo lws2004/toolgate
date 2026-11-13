@@ -179,6 +179,10 @@ pub enum Notice {
     SlotUnavailable {
         slot: String,
         fallback: SlotFallback,
+        /// §4.4b：为什么不可用（`unbound` / `source_slot_mismatch` / `no_client` / `disabled`）。
+        /// 可选：构造点拿不到客户端判定时留空，不编造（§4.6）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::capability::SlotBlocker>,
     },
     Redacted {
         count: u32,
@@ -328,9 +332,16 @@ impl Notice {
                 fields.push(format!("rule={}", sanitize_rule(rule)));
                 fields.push(format!("reason={}", value_str(*reason)));
             }
-            Notice::SlotUnavailable { slot, fallback } => {
+            Notice::SlotUnavailable {
+                slot,
+                fallback,
+                reason,
+            } => {
                 fields.push(format!("slot={slot}"));
                 fields.push(format!("fallback={}", value_str(*fallback)));
+                if let Some(reason) = reason {
+                    fields.push(format!("reason={}", reason.as_str()));
+                }
             }
             Notice::Redacted { count, retention } => {
                 fields.push(format!("count={count}"));
@@ -557,6 +568,7 @@ mod tests {
             Notice::SlotUnavailable {
                 slot: "vision".to_owned(),
                 fallback: SlotFallback::Metadata,
+                reason: None,
             },
             Notice::Redacted {
                 count: 3,
@@ -599,6 +611,35 @@ mod tests {
             }
             assert_eq!(serde_json::to_value(&n).unwrap()["code"], json!(n.code()));
         }
+    }
+
+    /// §4.4b：`reason` 是可选字段——有值时进 content 与 structured，没有时不渲染 `reason=`。
+    #[test]
+    fn slot_unavailable_reason_rides_both_channels() {
+        use crate::capability::SlotBlocker;
+        let with = Notice::SlotUnavailable {
+            slot: "summarize".to_owned(),
+            fallback: SlotFallback::Mechanical,
+            reason: Some(SlotBlocker::NoClient),
+        };
+        assert_eq!(
+            with.render(),
+            "[SLOT_UNAVAILABLE] slot=summarize fallback=mechanical reason=no_client"
+        );
+        assert_eq!(with.to_structured()["params"]["reason"], json!("no_client"));
+        let without = Notice::SlotUnavailable {
+            slot: "vision".to_owned(),
+            fallback: SlotFallback::Metadata,
+            reason: None,
+        };
+        assert_eq!(
+            without.render(),
+            "[SLOT_UNAVAILABLE] slot=vision fallback=metadata"
+        );
+        assert!(
+            without.to_structured()["params"].get("reason").is_none(),
+            "缺省字段不进 structured"
+        );
     }
 
     /// 告知渲染快照：每个 code 断言完整字节。

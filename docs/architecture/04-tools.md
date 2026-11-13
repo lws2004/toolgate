@@ -162,7 +162,7 @@ content 由固定模板渲染，structuredContent 原样携带同一份 `notices
 | `DEGRADED` | 非隔离原因的输出形态或质量降级（槽位可用但输出被迫变化，含有损压缩） | requested:enum actual:enum reason:enum slot:option<string> | `[DEGRADED] requested=summary actual=none reason=capability_missing slot=summarize` |
 | `LOW_CONFIDENCE` | decide 概率低于门控（§7.2） | p:f32(2) views:both\|local | `[LOW_CONFIDENCE] p=0.62 views=local` |
 | `ISOLATION_FALLBACK` | 隔离回退命中（§8.7） | requested:enum actual:enum rule:string reason:enum | `[ISOLATION_FALLBACK] requested=raw actual=structure rule=**/.env* reason=retention_below_threshold` |
-| `SLOT_UNAVAILABLE` | 槽位不可用或未配置 | slot:string fallback:enum | `[SLOT_UNAVAILABLE] slot=vision fallback=metadata` |
+| `SLOT_UNAVAILABLE` | 槽位不可用或未配置 | slot:string fallback:enum reason:enum(可选) | `[SLOT_UNAVAILABLE] slot=vision fallback=metadata reason=no_client` |
 | `REDACTED` | 内容被脱敏 | count:u32 retention:percent(1) | `[REDACTED] count=3 retention=99.4%` |
 | `NORMALIZED` | edit 按第 2/3 级归一化命中（§5.4） | level:2\|3 kind:eol\|whitespace | `[NORMALIZED] level=2 kind=eol` |
 | `UNCALIBRATED` | 概率来自非校准适配器（§3.10） | slot:string adapter:enum | `[UNCALIBRATED] slot=decide adapter=json` |
@@ -183,6 +183,8 @@ content 由固定模板渲染，structuredContent 原样携带同一份 `notices
 - `DEGRADED.requested` / `actual`：输出形态 `raw` / `summary` / `structured` / `visual` / `none`；`actual` 另可 `metadata` / `compressed`；
 - `ISOLATION_FALLBACK.requested`：隔离档位 `none` / `understand` / `summary` / `raw`；`actual`：回退动作 `redact` / `structure` / `summarize` / `refuse`；
 - `unit`：`lines` / `bytes`；`views`：`both` / `local`；`fallback`：`metadata` / `text` / `mechanical` / `loading`；
+- `SLOT_UNAVAILABLE.reason`：`unbound`（没有能服务该槽位的模型）/ `source_slot_mismatch`（来源×槽位在能力矩阵里不可用）/ `no_client`（当前构建未含该来源的协议客户端）/ `disabled`（连续失败被禁用）。它是**可执行下一步的判据**：前两者改配置，`no_client` 重编译（`--features external-protocols`），`disabled` 等恢复或换模型；
+- `SLOT_UNAVAILABLE` 的 `nextSteps` **不进 content**：渲染模板只带 `reason`，具体命令写在 structuredContent 的 `slmStatusDetail[nextSteps]`（程序字段，§4.7 高密度口径）；
 - `adapter`：`native` / `json` / `text` / `ordered`；
 - `SNIFFED.actual`：`binary` / `text` / `png` / `jpeg` / `gif` / `webp` / `pdf` / `zip` / `gzip` / `other`。
 

@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 description = "MCP server transport for toolgate"
 
+[features]
+# 外部协议客户端属可选层（§19.6）：透传给 core，便于测试按构建分支断言。
+external-protocols = ["toolgate-core/external-protocols"]
+
 [dependencies]
 toolgate-core = { path = "../toolgate-core" }
 serde.workspace = true

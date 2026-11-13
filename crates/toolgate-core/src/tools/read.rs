@@ -152,6 +152,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
             plan.notices.push(Notice::SlotUnavailable {
                 slot: "decide".to_owned(),
                 fallback: crate::notice::SlotFallback::Mechanical,
+                reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(SlotKind::Decide)),
             });
         }
         return image_response(&image_input, &plan, ctx, ruling.as_ref()).await;
@@ -245,6 +246,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
             notices: vec![crate::notice::Notice::SlotUnavailable {
                 slot: "summarize".to_owned(),
                 fallback: crate::notice::SlotFallback::Text,
+                reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(SlotKind::Summarize)),
             }],
         };
     }
@@ -732,6 +734,7 @@ async fn text_understanding_response(
                 } else {
                     crate::notice::SlotFallback::Metadata
                 },
+                reason: ctx.slm.as_ref().and_then(|c| c.slot_blocker(SlotKind::Vision)),
             });
             if ctx.upstream_vision {
                 let mut resp = prepared;

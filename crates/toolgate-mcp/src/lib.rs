@@ -8,6 +8,7 @@ use std::io::Write as _;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use toolgate_core::capability::SlotBlocker;
 use toolgate_core::compat::{
     CompatConfig, LATEST_VERSION, SUPPORTED_VERSIONS, check_protocol_version,
     default_decision_input, parse_request_meta, resolve_intent,
@@ -16,6 +17,7 @@ use toolgate_core::decision::{Intent, decide_output};
 use toolgate_core::error::{error_response_with_lang, govern_error};
 use toolgate_core::locale::{Language, localize_value, t};
 use toolgate_core::notice::budgeted_notices;
+use toolgate_core::slots::SlotKind;
 use toolgate_core::tools::{ToolContext, all_specs, dispatch};
 
 /// 一个运行中的 MCP server 实例。
@@ -172,7 +174,21 @@ impl McpServer {
                 // 新客户端 intent=auto：协商告知必须同时进 content 与
                 // structuredContent（§4.4 / §4.4b 一个事实源、两个通道）。
                 if intent == Intent::Auto {
-                    let decision = decide_output(&default_decision_input(intent, &meta));
+                    // §4.4b：判定输入必须反映真实槽位可用性，不能沿用阶段 1.5 的静态占位
+                    // （否则 slmStatus 报 ready、notices 报 SLOT_UNAVAILABLE，双事实源自相矛盾）。
+                    // auto 的默认隔离级是 Summary，该输出形态依赖 summarize（§4.5 第三段）。
+                    // 可用性与原因来自同一份判定：`slot_blocker` 为 None 才算可用，
+                    // 且它本身就是 notice 的 `reason`（§4.4b 一份事实源）。
+                    // 没有槽位客户端时槽位也没绑定：原因记 unbound（修配置即可），
+                    // 不能因为「拿不到客户端」就当成可用（旧实现正是这样漏了告知）。
+                    let blocker = match self.ctx.slm.as_ref() {
+                        Some(client) => client.slot_blocker(SlotKind::Summarize),
+                        None => Some(SlotBlocker::Unbound),
+                    };
+                    let mut input = default_decision_input(intent, &meta);
+                    input.slot_available = blocker.is_none();
+                    input.slot_blocker = blocker;
+                    let decision = decide_output(&input);
                     if !decision.decision_notices.is_empty() {
                         let ch = budgeted_notices(decision.decision_notices);
                         result["result"]["content"]
@@ -440,6 +456,121 @@ mod tests {
             resp["result"]["structuredContent"]["noticeOverflow"],
             json!(0)
         );
+    }
+
+    /// §4.4b：auto 的判定输入用真实槽位可用性——绑定且可用的 summarize 不再报
+    /// SLOT_UNAVAILABLE，且与 slmStatus 同源（都读 SlotClient，不再是静态占位）。
+    #[tokio::test]
+    async fn auto_slot_notice_follows_bound_slot() {
+        use std::sync::Arc;
+
+        use toolgate_core::config::load_config;
+        use toolgate_core::slm::SlotClient;
+
+        let dir = std::env::temp_dir().join(format!("tg-mcp-slot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let cfg_path = dir.join("config.yaml");
+        let weights = dir.join("weights.bin");
+        std::fs::write(&weights, b"fake").expect("写权重占位");
+        std::fs::write(
+            &cfg_path,
+            format!(
+                "models:\n  any-sum:\n    source: local\n    path: {}\n    serves: [summarize]\n",
+                weights.display()
+            ),
+        )
+        .expect("写配置");
+        let cfg = load_config(&cfg_path).expect("配置合法").expect("配置存在");
+        let mut ctx = ToolContext::new(&dir).expect("ctx");
+        ctx.slm = Some(Arc::new(SlotClient::new(cfg)));
+        let mut s = McpServer::new(ctx);
+
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+                "params": {
+                    "name": "write",
+                    "arguments": { "path": "slot.txt", "content": "hi", "intent": "auto" }
+                }
+            }),
+        )
+        .await;
+        let joined: String = resp["result"]["content"]
+            .as_array()
+            .expect("content")
+            .iter()
+            .map(|c| c["text"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            !joined.contains("SLOT_UNAVAILABLE"),
+            "summarize 已绑定且可用，不应再报槽位不可用：{joined}"
+        );
+        assert_eq!(
+            resp["result"]["structuredContent"]["slmStatus"]["summarize"],
+            json!("ready"),
+            "slmStatus 与 notices 必须同源"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §4.4b / §18.9：默认构建没有外部协议客户端时，外部来源虽然绑定也报
+    /// `reason=no_client`，并在 structuredContent 的 slmStatusDetail 给出下一步。
+    #[cfg(not(feature = "external-protocols"))]
+    #[tokio::test]
+    async fn auto_slot_notice_carries_no_client_reason() {
+        use std::sync::Arc;
+
+        use toolgate_core::config::load_config;
+        use toolgate_core::slm::SlotClient;
+
+        let dir = std::env::temp_dir().join(format!("tg-mcp-no-client-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let cfg_path = dir.join("config.yaml");
+        std::fs::write(
+            &cfg_path,
+            "models:\n  any-sum:\n    source: openai\n    base_url: http://127.0.0.1:1/v1\n    model: x\n    serves: [summarize]\n",
+        )
+        .expect("写配置");
+        let cfg = load_config(&cfg_path).expect("配置合法").expect("配置存在");
+        let mut ctx = ToolContext::new(&dir).expect("ctx");
+        ctx.slm = Some(Arc::new(SlotClient::new(cfg)));
+        let mut s = McpServer::new(ctx);
+
+        let resp = call(
+            &mut s,
+            json!({
+                "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+                "params": {
+                    "name": "write",
+                    "arguments": { "path": "slot.txt", "content": "hi", "intent": "auto" }
+                }
+            }),
+        )
+        .await;
+        let joined: String = resp["result"]["content"]
+            .as_array()
+            .expect("content")
+            .iter()
+            .map(|c| c["text"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            joined.contains("reason=no_client"),
+            "默认构建应把「缺客户端」写进告知：{joined}"
+        );
+        assert_eq!(
+            resp["result"]["structuredContent"]["slmStatus"]["summarize"],
+            json!("unavailable")
+        );
+        let detail = &resp["result"]["structuredContent"]["slmStatusDetail"]["summarize"];
+        assert_eq!(detail["reason"], json!("no_client"), "reason 与告知枚举一致");
+        assert!(
+            detail["nextSteps"].as_array().is_some_and(|v| !v.is_empty()),
+            "每个原因都要带可执行的下一步：{detail}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

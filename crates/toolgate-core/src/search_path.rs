@@ -68,6 +68,7 @@ fn slot_unavailable(slot: &str) -> Notice {
     Notice::SlotUnavailable {
         slot: slot.to_owned(),
         fallback: SlotFallback::Mechanical,
+        reason: None,
     }
 }
 
