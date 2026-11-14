@@ -115,7 +115,10 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
 | `systemone` | TypeSafe SystemOne（`/v1/systemone`） | 同上 | 同上 | StartLux-Decision 等类型化判定服务 |
 | `rerank` | 原生重排序端点（`/v1/rerank`） | 同上 | 同上 | jina-reranker 等专用 listwise reranker |
 | `embedding` | 原生向量端点（`/v1/embeddings`） | 同上 | 同上 | bge-m3 等 embedding 服务 |
+| `agent` | 反向委派给宿主会话模型 | 无（随 `govern`/`pre` 请求携带） | 不常驻；daemon 把单条内容回投宿主、由 agent 模型执行后回填 | 一期：本地无 SLM 时借用会话模型做 summarize / classify |
 | `auto` | 按 URL 推断 | `path` 或 `base_url` + `model` | 推断为上面某一种，规则见下 | 地址已含协议信息时 |
+
+**`agent`（反向委派）不占常驻模型、toolgate 自身不出网**：`govern` / `pre` 需要槽位增强而部署未配本地 SLM 时，daemon 把单条待处理内容回投宿主，由 agent 会话模型完成该次增强后回填（详见 §18.7「反向委派」）。它不触发下面的 loopback 限制——出网的是宿主既有模型通道，不是 toolgate 新开的连接；`openai` / `anthropic` / `responses` 等**由 toolgate 主动发起**的外部调用仍限 loopback（第一期）。
 
 **`base_url` 口径**：`openai` / `anthropic` / `responses` 的 `base_url` 是含 `/v1` 的 API 根（如 `http://127.0.0.1:8080/v1`）；`systemone` / `rerank` / `embedding` 是不含 `/v1` 的**服务根地址**，客户端自行拼 `/v1/systemone` / `/v1/rerank` / `/v1/embeddings`。三者不可与含 `/v1` 的 API 根混用，否则会拼出 `/v1/v1/...`。
 
@@ -547,13 +550,18 @@ _meta 即可。pi 侧对应 model.inputLimits.images。
 
 ### 18.2 通信网关的三种形态
 
-原文列了 MCP Server / CLI / rpi-plugin-sdk。v2 的定位：
+重新定位后，对外接入收口为「一个常驻 daemon + 各宿主薄适配器」：
 
 | 形态 | 状态 | 用途 |
 |---|---|---|
-| MCP Server（stdio） | 已实现 | 主路径，供任意 agent 接入 |
-| CLI | 已实现 | 调试与脚本调用 |
-| 插件 SDK | **不做** | 见下 |
+| 常驻 daemon（HTTP / Unix socket，提供 `govern` + `pre`） | 目标形态 | 主路径，多 agent 共享一个实例 |
+| 宿主薄适配器（独立仓，一期 pi / dsh） | 目标形态 | 挂宿主接缝 → 转 `govern`/`pre` → 写回；零执行逻辑 |
+| MCP Server（stdio，六个工具） | **下线**（可保留 `serve` 仅作调试通道，见 §8） | 不再作为对外集成主路径 |
+| 插件 SDK（在宿主进程内跑工具） | **不做** | 见下 |
+
+**为什么不做「插件 SDK」（原判断仍成立）**：插件形态意味着工具跑在宿主进程内、共享宿主
+生命周期与故障面；本架构要的是**进程外、可独立升级、多宿主共享**的增强服务，故一律走
+「daemon + 薄适配器」，适配器只搬运、不含工具实现（决策 2：核心仓零框架依赖）。
 
 **一个 server 实例 = 一个信任域。** 隔离配置（§8.5）是进程级、改配置要重启（§8.8），所以同一个实例不能同时服务「需要 none 档」与「需要 raw 档」的两个 agent。多信任域的正确做法是**多实例**，各自持有自己的配置；多个实例可以共享同一个进程外 SLM 服务（§18.1），避免重复加载模型。这条同时解释了为什么 §18.2 的「跨 agent 复用」指的是同一信任域内的复用。
 
@@ -662,48 +670,64 @@ needs_escalation 说明需要人做决定。
 
 spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到半截文件，§21.2 的「并发安全」只是空话。
 
-### 18.6 接入 DSH / pi：MCP sidecar，不替换内置工具
+### 18.6 接入 DSH / pi：拦截内置工具结果，不暴露同名工具（一期仅 pi / dsh）
 
-**决策：toolgate 以 MCP sidecar 接入，不替换客户端内置工具。**
+**决策：toolgate 不提供同名工具、不替换执行；它在宿主接缝处拦截内置工具的结果与写前动作，
+就地增强。** 这消除了旧 sidecar 方案的两个病根：同名工具制造选择歧义（§18.6 旧文自陈）、
+工具声明常驻请求前缀导致缓存失效。
 
-| 客户端 | 已有能力 | toolgate 的增量 |
+| 客户端 | 内置工具 | toolgate 的增量（接缝侧） |
 |---|---|---|
-| DSH | 6+ 内置工具、PTC、spill/pruner、output schema | 本地 SLM 理解、四档隔离、统一治理策略、结构化 meta |
-| pi | 8 个平铺工具、截断与输出落盘、MCP 客户端 | 本地 SLM 理解、task、图片理解、统一错误码与写前快照 |
+| DSH | 十几个内置工具（read/bash/edit/write/glob/grep/job_*/web_*/read_image…）+ PTC + output schema | 返回侧成形（截断/摘要/结构化/错误可行动）、写前指纹复核 + 快照、槽位理解 |
+| pi | 8 个平铺工具（read/bash/powershell/edit/write/grep/find/ls） | 返回侧成形、写前复核；无 search 聚合与 task，按形状路由照样接住命中清单 |
 
-内置工具已经覆盖执行；toolgate 的增量在「结果出本地之前」的理解与治理。做成同名工具会制造选择歧义，因此：
+**两个接缝（已取证，非设想）**：
 
-1. **命名空间**：DSH 的 MCP 客户端把工具挂成 `mcp__<serverName>__<rawName>`；pi 同样在 MCP 命名空间下暴露。toolgate 原始工具名保持 `read` / `bash` / `edit` / `write` / `search` / `task`，客户端侧命名空间使它们与内置 `read` / `bash` 不重名。
-2. **DSH 配置**：profile 的 `@deepseek-ai/dsh-mcp-client` 条目用 StdioConfig（`serverName: toolgate`、`command` = toolgate 二进制、`args: ["serve"]`、`cwd` 与工作根一致）。PTC 的 run_code 直接按 `tools.mcp__toolgate__read(...)` 调用。
-3. **pi 配置**：`pi mcp add toolgate -- <toolgate> serve`，或写入 `~/.pi/agent/mcp.json` 的 `mcpServers.toolgate`；按 `codemode` / `deferred` / `direct` 选曝光。
-4. **渐进启用**：先开 `bash`（大输出）与 `read`（大文件/图片），验证后再开 `edit` / `write` / `search` / `task`。客户端提示层同时声明路由规则：大结果、敏感内容、图片优先 toolgate 的 `read` / `bash`，小文件日常操作留内置工具。
-5. **多客户端共享**：DSH、pi 同时接时用 `slm.mode: http` 共享本地模型服务（§18.1），不要每个客户端各加载一份模型；单客户端单实例可用 embedded。
+| 宿主 | 读侧（可改返回） | 写侧（可 block） |
+|---|---|---|
+| DSH | `tools/post-execute`（accept / replace / enrich / block） | `tools/pre-execute`（block / ask） |
+| pi | `afterToolCall`（整段替换 content / structuredContent / details / isError） | `beforeToolCall`（block） |
 
-**价值定位**：DSH PTC 已经高效，toolgate 在 PTC 下不卖「省 token」，卖**隔离与确定性**——在结果交给 run_code 程序前完成脱敏/判定/结构化；pi 没有 PTC 的上下文隔离，toolgate 同时卖「长结果治理 + 本地理解」。
+**免白名单**：钩子是全局的（每次工具 dispatch 必过），处理器按**返回形状**路由而非工具名，
+新工具自动覆盖——详情见 §4.0a 与提案 §5。
 
-**缓存边界**：toolgate 不改写已发送历史，但它通过两处进入客户端请求前缀——MCP 工具声明与工具返回结果。接入/升级/工具 schema 变化会导致一次前缀 miss；运行期不得增删工具或改 description。工具结果必须字节稳定（§16.3 的输出确定性、摘要缓存、图片复用、已发送不可回写），并控制在客户端 MCP 截断阈值内（pi 20KB），避免客户端随机落盘路径进入历史。满足这些，运行期不产生额外缓存损失；否则从该结果起持续 miss。
+**逐宿主接入要点**：
 
-**DSH / pi 与三种形态（§6.2）的关系**：它们本身是 agent 运行时，不是 toolgate 的一部分，也不是「本地 agent」的同义词。同一个客户端接云端模型时是 F1/F2 形态；换成 30B 本地模型、由本地模型驱动循环时，它承载的就是 F3 本地 agent（§21.7）。toolgate 在三种形态下是同一套 MCP 工具，行为不变；形态差异只体现在客户端怎么用工具（intent 默认值、是否使用 PTC）。
+1. **适配器独立仓**（决策 2）：薄适配器挂上述接缝，把「工具返回 / 写前请求」转成
+   `govern` / `pre` 调用，再把结果写回宿主；**核心仓零框架依赖、零宿主 SDK 代码**。
+2. **DSH 配置**：装 `tools/post-execute` 与 `tools/pre-execute` 钩子（注册在宿主侧），
+   钩子回调指向常驻 daemon 的本地回环地址；不注册 MCP server、无工具声明。
+3. **pi 配置**：装 `afterToolCall` / `beforeToolCall` 扩展，回调同上。
+4. **多宿主共享**：pi、dsh 共用同一个常驻 daemon（§18.1 的外部模型来源或反向委派），
+   不各自加载模型。
+5. **一期范围**：只做 pi 与 dsh；其他宿主按同一接缝模型扩展，不在本期。pi 内置工具无 `task` / `search` 聚合，一期**不覆盖**这两类，只增强 read / bash / edit / write / grep / find / ls 的返回。
 
-**写侧能力边界：sidecar 不覆盖客户端自己的写**
+**价值定位**：读侧卖「进上下文前的成形」（高信噪比 / 结构化 / 错误可行动 / 持续处理能力，
+§1.6）；写侧卖「内置写也不破坏文件、可回退」。省 token 是读侧成形的**结果之一**（§1.1、
+§6.2），不是唯一卖点。
+
+**写侧能力边界：拦截即覆盖内置写（重新定位后的变化）**
 
 | 决策 | 内容 |
 |---|---|
-| 保护范围 | 只有经 toolgate `write` / `edit` 的改动受写前复核（§18.5）、写前快照（§20）与原子写（§18.5）保护 |
-| 不覆盖 | 客户端内置 `write` / `edit` / `bash`、格式化器与脚本、外部编辑、其他 toolgate 实例、共享工作目录下的多 agent 并发写 |
-| 原因 | §18.6 决策是不替换内置工具，因此工具层的锁与快照只作用于自己经手的路径；§20.4 已列出 bash 副作用与目录级改动的能力边界 |
-| 调用方责任 | 发起写之前自行取得当前真值（先读 / 拿版本指纹），并用 §18.4 的 checkpoint + `operationId` 保证「已执行的调用不再执行」 |
-| 失败模式 | 把 sidecar 的快照当成全局回滚点，误以为客户端内置工具的写也能回退 |
+| 保护范围 | 经 `pre` 钩子拦截的宿主内置 `write` / `edit`：写前取真值做 (mtime,size,sha256) 复核 + 写前快照，可 block |
+| 不覆盖 | 经 `bash` / 脚本 / 格式化器 / 外部进程的写（命令执行前不可知它会写什么，与 §20.4 同口径）；未装适配器的宿主 |
+| 原因 | 写前钩子能在**执行前**拿到参数与当前文件真值；命令级副作用无法在执行前枚举 |
+| 调用方责任 | 备份/回滚点仅覆盖经 `pre` 的写；命令执行的副作用仍由调用方负责 |
+| 失败模式 | 把写前快照当成「一切写都可回退」，误以为 `bash` 副作用也在保护内 |
 
-**与 DSH「先读再改」的关系**：那是会话层的兜底，覆盖所有写通道（含绕过文件
-工具的 `bash` 与脚本）；本节的机制只覆盖 toolgate 经手的写。两者互补，不是
-替代，**不因接入 toolgate 而放宽客户端侧的先读约束**。对照与证据等级见附件 E.9。
+**与 DSH「先读再改」的关系**：那是会话层兜底（覆盖所有写通道含 `bash`）；本节的写前复核
+覆盖文件写工具。两者互补，不因接入 toolgate 而放宽客户端侧约束。证据等级见附件 E.9。
 
-### 18.7 统一治理入口：客户端自己 fetch，结果经 toolgate 治理
+**缓存边界（重新定位后更有利）**：因不再暴露 MCP 工具、不改写工具声明，`govern` 只影响
+**工具返回的字节**；只要返回稳定（§16.3 确定性、摘要缓存、图片复用），就不额外制造前缀 miss。
+旧 sidecar 的「工具声明进前缀、增删工具即失效」问题随之消失。
 
-**决策：默认不要求 toolgate 取数。DSH / pi 的 agent 自行选择原生 `web_fetch`、浏览器、`curl`、`lark-cli`、`opencli` 或任何 MCP 工具；结果在进入模型上下文之前，统一送到 toolgate 的 `govern` 接口。**
+### 18.7 统一治理入口：`govern`（读侧）/ `pre`（写侧）/ 反向委派
 
-这比按来源做 provider 更简单：只有一条治理路径、一个内容契约、一套脱敏/截断/摘要规则；fetch 方式仍由客户端决定，toolgate 不绑定 web 技术栈。
+**读侧主路径（`govern`）：默认不要求 toolgate 取数。** DSH / pi 的 agent 自行选择原生 `web_fetch`、浏览器、`curl`、`lark-cli`、`opencli` 或任何 MCP 工具；结果在进入模型上下文之前，统一送到 toolgate 的 `govern` 接口。这比按来源做 provider 更简单：只有一条治理路径、一个内容契约、一套脱敏/截断/摘要规则；fetch 方式仍由客户端决定，toolgate 不绑定 web 技术栈。
+
+**三块协议合起来就是「统一治理入口」**：读侧 `govern`（结果进上下文前成形）、写侧 `pre`（内置写执行前复核 / 快照 / 可 block）、反向委派（`govern` 需要模型增强、本地又无合适 SLM 时，把单条内容回投宿主会话模型执行）。三者都走本地回环、**都不是 MCP 工具**，因此不产生工具声明、不带工具选择歧义。
 
 #### `govern` 接口
 
@@ -713,29 +737,71 @@ spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到�
 ```json
 {
   "source": { "kind": "web|file|tool", "tool": "web_fetch", "url": "...", "path": "..." },
-  "content": [{ "type": "text", "text": "..." }],
+  "content": [
+    { "type": "text", "text": "..." },
+    { "type": "image", "mimeType": "image/png", "bytes": 184320,
+      "width": 1280, "height": 720, "sha256": "...", "attachmentId": "opaque-host-handle" }
+  ],
   "intent": "raw|summary|structured|visual|auto",
-  "policy": { "isolation": "summary" }
+  "policy": {
+    "isolation": "summary",
+    "delegate": { "endpoint": "unix:/abs/path/delegate.sock", "token": "opaque" }
+  }
 }
 ```
+
+- **图片只传引用与元信息，不传字节**：`attachmentId` 是宿主的**不透明句柄**（DSH 为附件 sha256），
+  daemon 不解释、不取字节；`bytes/width/height/sha256` 供预算与去重。`dataBase64` 字段仅作
+  **无附件服务宿主的有界降级**（≤256 KiB，显式配置开启），dsh / pi 不用——base64 会体积膨胀约
+  1/3、重复编码、绕开宿主图片预算与版本缓存（§10.1、§4.0a ⑥）。
+- 视觉分支响应：`structuredContent` 带 `{shape:"vision", needPixels, images:[{attachmentId,...}]}`；
+  `needPixels=true` 时原图块原样保留，`false` 时以委派得到的文本替换图块。
 
 - 响应：`{content, structuredContent:{..., notices}, meta:{intent, slmStatus, confidence, redacted, truncated, spillPointer, noticeOverflow}, isError}`；`notices` 与 MCP 工具返回同源（§4.4b）；`meta` 的 redacted/truncated 是派生视图，不单独承载告知；
 - 处理链与 `read` 相同：类型/大小检查 → 截断/落盘 → 脱敏（含路径用户名）→ 本地 SLM → 协商；web 内容按不可信来源处理（§15.1）；
 - 失败返回结构化 error + next；`govern.fail_open` 默认 `false`，不静默放行敏感内容。
 
+#### `pre` 接口（写侧）
+
+- 触发：宿主内置 `write` / `edit` **执行前**（dsh `tools/pre-execute`、pi `beforeToolCall`）经薄适配器调用；
+- 请求：`{source:{tool,path}, ops:[{op:"write|edit", path, before:{mtime,size,sha256}, payload}], policy:{snapshot:true, verify:true}}`；
+- 处理：取当前文件真值做 (mtime,size,sha256) 复核 → 不一致返回 `PRE_STALE` 并 block（next 指示重读）→ 写前快照（§20）→ 一致则返回 `{decision:"allow", snapshotPointer}`；
+- 边界：只覆盖经 `pre` 的文件写；`bash` / 脚本副作用不可在执行前枚举，不在保护内（§18.6「写侧能力边界」）。
+
+#### 反向委派（槽位借 agent 会话模型）
+
+`govern` / `pre` 的处理链需要 summarize / classify 等槽位，而部署未配本地 SLM 时，daemon **不自行出网**：它把**单条待处理内容**回投给宿主，由 agent 的会话模型完成该次增强后回填。约束三条：① 只投单条、不带会话历史（隔离微调用，§6.2）；② 出网走宿主既有模型通道，不经 toolgate 新开连接（§18.1 `agent` 来源）；③ 宿主不提供回调时按 §3.8 降级到 L0 机械治理。
+
+协议（wire）：
+
+```text
+POST <endpoint>/delegate
+请求 { "task": "vision|summarize|rerank|classify", "token": "...", "input": {...},
+       "bounds": { "maxOutputTokens": 512, "timeoutMs": 8000 } }
+响应 { "ok": true, "text": "...", "model": "..." }
+     | { "ok": false, "code": "...", "message": "..." }
+```
+
+- `endpoint` 取 `policy.delegate.endpoint`（`unix:/abs.sock` 或 `http://127.0.0.1:port`）；
+- `input` 对 vision 只携带 `attachmentId` 与元信息；宿主用**原 image block + 会话模型**作答，
+  **不回传字节**；其余 task 的 `input` 是待处理的单条文本/列表；
+- `task` 限定为槽位枚举里的增强动作，不接受任意 prompt；`bounds` 由 daemon 给定，宿主不得无上限；
+- 失败 / 超时 / 无回调 → L0 降级，`meta.slmStatus` 明确标记（如
+  `SLOT_UNAVAILABLE vision fallback=mechanical`）；`token` 仅单次调用内存持有，不落盘不记录。
+
 #### 客户端钩子
 
-| 客户端 | 钩子 |
-|---|---|
-| DSH | `tool/result` / `agent/pre-step` 插件，在 tool result 进模型前调用 `govern`；`dsh-ledger-compact` 的 ingress 改写是同一种机制 |
-| pi | extension 的 tool result hook / MCP result adapter |
-| 无钩子的客户端 | 使用 `read({url})` + `fetch.provider` 作为兜底 |
+| 客户端 | 读侧钩子 | 写侧钩子 |
+|---|---|---|
+| DSH | `tools/post-execute`（`accept` 替换 content、或 `block`；无 replace/enrich 变体） | `tools/pre-execute`（可 block / ask） |
+| pi | `afterToolCall`（可整段替换 content / structuredContent / details / isError） | `beforeToolCall`（可 block） |
+| 无钩子的客户端 | 使用 `read({url})` + `fetch.provider` 作为兜底（仅 serve 调试通道） | 无 |
 
 #### `read({url})` 的位置
 
-`read({url})` 保留为**无钩子客户端**的兜底：它内部调用 `fetch.provider`，拿到内容后仍走同一治理管线。它不是主路径；有客户端钩子时，agent 自己 fetch 后交给 `govern` 即可，不需要 toolgate 再取一次。
+`read({url})` 保留为**无钩子 / 仅 serve 调试通道**的兜底：它内部调用 `fetch.provider`，拿到内容后仍走同一治理管线。它不是主路径；有客户端钩子时，agent 自己 fetch 后交给 `govern` 即可，不需要 toolgate 再取一次。
 
-### 18.8 fetch.provider 协议（仅 read({url}) 兜底）
+### 18.8 fetch.provider 协议（仅 serve 调试通道 / 无钩子客户端兜底，可选）
 
 `fetch.provider` 只在客户端没有 `govern` 钩子、由 `read({url})` 取数时使用。协议版本 1；未知主版本直接 fail loud。
 
@@ -1020,6 +1086,7 @@ cargo build --release    # 产出一个可执行文件，无运行时依赖
 | 外部模型协议客户端（openai / anthropic / responses / systemone / rerank / embedding） | HTTP 客户端库 `reqwest`（Cargo feature `external-protocols`） | 默认关闭；配置外部 `source`（openai / anthropic / responses / systemone / rerank / embedding / auto）时启用 | 默认层不引入 HTTP 客户端；纯本地路径不需要（§18.1） |
 | WebP 编码 | ffmpeg / cwebp 子进程 | 运行时检测命令是否存在（§10.2b） | 为约 3.5% 的体积收益引入 C 依赖不值得（§10.2b 的三条判据） |
 | fetch provider | 外部子进程（dsh-web-fetch / pi / opencli / moli / command） | `fetch.provider` 配置，默认 `none` | 取数能力由客户端生态提供，不内建网络栈 |
+| 视觉 / OCR 原生推理 | candle（纯 Rust 推理框架）/ ort（ONNX Runtime 绑定） | Cargo feature `vision-native`（待实现，默认关闭） | 模型后端默认不进默认构建（§19.3 单二进制）；ort 带 C/C++ 动态库且 2.0 仍 RC，稳定性未定（§4.0a 视觉约束⑥） |
 
 **禁止层**：agent 框架（ADR 0001）、数据库 / ORM、Web 框架、模板引擎、
 GC 运行时、日志聚合客户端。它们会把「本地常驻小工具」变成「需要运维的服务」，
@@ -1030,6 +1097,13 @@ GC 运行时、日志聚合客户端。它们会把「本地常驻小工具」�
 匹配：模型服务调用是低并发、长等待的 HTTP 请求，`reqwest` 的异步接口能直接接进
 §18.5 的 tokio 运行时，且不引入 OpenSSL 之类的系统级 C 依赖——纯 L0 版仍是
 单二进制（§19.3）。默认关闭该 feature 时，`reqwest` 完全不进默认构建。
+
+**可选层原生推理选型（视觉 / OCR）**：两个候选，默认关闭、不影响纯 L0 版（§19.3）。
+
+- `candle-core` **0.11.1**（2026-11-14 查询 crates.io）：纯 Rust、默认 CPU 后端不引 C/C++ 绑定，能保住单二进制（§19.3），首选；但对 ONNX 格式支持有限，更适合 Transformer / safetensors 类模型。
+- `ort` **2.0.0-rc.15**（2026-11-14 查询 crates.io）：ONNX Runtime 的 Rust 绑定，能直接跑 RapidOCR 这类 ONNX 模型；但 `ort-sys` 会引入 C/C++ 动态库（破坏单二进制），且当前最新仍是 2.0 RC、稳定性未定，只能进可选层并标注风险。
+
+二者均按 §19.6 的版本纪律取注册表最新版、`cargo update` 单独提交；这是「参考本机 `~/.ocr-tool`」（§4.0a 视觉约束⑥）的 Rust 原生落点。
 
 **默认构建不含 HTTP 客户端时的行为**：配置了外部 `source`（`openai` /
 `anthropic` / `responses` / `systemone` / `rerank` / `embedding`）的槽位**按 §3.8 降级并告警**，归类为

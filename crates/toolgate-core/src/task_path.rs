@@ -245,17 +245,16 @@ pub fn plan_task(intent: Intent, tokens: usize) -> Result<TaskPlan, String> {
 /// 进程事实（§4.6 诚实）。
 pub fn structured_facts(
     exit_code: Option<i32>,
+    finished: bool,
     elapsed_secs: u64,
     output_bytes: usize,
     truncated: bool,
     spill_path: Option<&str>,
     decision: &TaskDecisionFacts,
 ) -> Value {
-    let process_state = if exit_code.is_some() {
-        "exited"
-    } else {
-        "running"
-    };
+    // finished 区分「正常退出」与「被信号终止」：后者 exit_code 为 None，
+    // 但进程确已结束，不能据此判成 running（§5.5）。
+    let process_state = if finished { "exited" } else { "running" };
     json!({
         "processState": process_state,
         "exitCode": exit_code,
@@ -489,7 +488,7 @@ line2"
     #[test]
     fn structured_facts_never_fabricate_a_judgement() {
         let empty = TaskDecisionFacts::default();
-        let facts = structured_facts(None, 3, 9000, true, Some("spill://ab12cd34"), &empty);
+        let facts = structured_facts(None, false, 3, 9000, true, Some("spill://ab12cd34"), &empty);
         assert_eq!(facts["processState"], json!("running"));
         assert_eq!(facts["state"], json!("unknown"));
         assert_eq!(facts["progress"], json!("unknown"));
@@ -497,7 +496,7 @@ line2"
         assert!(facts["summary"].is_null());
         assert!(facts["exitCode"].is_null());
         assert_eq!(facts["spillPath"], json!("spill://ab12cd34"));
-        let exited = structured_facts(Some(2), 9, 10, false, None, &empty);
+        let exited = structured_facts(Some(2), true, 9, 10, false, None, &empty);
         assert_eq!(exited["processState"], json!("exited"));
         assert_eq!(exited["exitCode"], json!(2));
         assert!(exited["spillPath"].is_null());
@@ -511,7 +510,7 @@ line2"
             progress: Some("error_loop".to_owned()),
             confidence: Some(0.77),
         };
-        let facts = structured_facts(None, 12, 9000, false, None, &decided);
+        let facts = structured_facts(None, false, 12, 9000, false, None, &decided);
         assert_eq!(facts["state"], json!("stuck"));
         assert_eq!(facts["progress"], json!("error_loop"));
         assert_eq!(facts["confidence"], json!(0.77));

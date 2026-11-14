@@ -1,0 +1,14 @@
+[package]
+name = "toolgate-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "常驻感知治理 daemon：在本地回环 HTTP / Unix socket 上暴露 govern 与 pre 两个接缝"
+
+[dependencies]
+toolgate-core = { path = "../toolgate-core" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net"] }
+anyhow.workspace = true

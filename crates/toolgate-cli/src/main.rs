@@ -33,6 +33,7 @@ const USAGE: &str = "\
 用法: toolgate <子命令> [参数]
 
 子命令:
+  daemon                常驻运行感知治理 daemon（Unix socket，暴露 govern / pre 接缝）
   serve                 以 MCP stdio server 方式运行，供 agent 客户端接入
   status                打印进程身份 uid/gid，供无握手客户端核对权限（§17.2）
   list                  列出全部工具与入参 schema
@@ -64,6 +65,7 @@ const USAGE_EN: &str = "\
 Usage: toolgate <subcommand> [args]
 
 Subcommands:
+  daemon                Run the long-lived governance daemon (Unix socket; govern / pre seams)
   serve                 Run as an MCP stdio server for agent clients
   status                Print the process identity uid/gid for handshake-less clients (§17.2)
   list                  List all tools and their input schemas
@@ -165,6 +167,30 @@ async fn main() -> ExitCode {
     };
 
     match cmd.as_str() {
+        "daemon" => {
+            let socket_path = match parse_socket_arg(lang, &args[1..]) {
+                Ok(p) => p,
+                Err(code) => return code,
+            };
+            tracing::warn!(
+                "{}",
+                tf(
+                    lang,
+                    "toolgate daemon 启动：Unix socket {p}（govern / pre 接缝）",
+                    &[("p", socket_path.display().to_string())]
+                )
+            );
+            match toolgate_daemon::serve(&socket_path).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        tf(lang, "daemon 异常退出：{e}", &[("e", e.to_string())])
+                    );
+                    ExitCode::FAILURE
+                }
+            }
+        }
         "serve" => {
             let config_path = match parse_config_arg(lang, &args[1..]) {
                 Ok(p) => p,
@@ -315,6 +341,32 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// 解析 daemon 的 --socket 参数（缺省 .toolgate/daemon.sock，相对工作目录）。
+fn parse_socket_arg(lang: Language, args: &[String]) -> Result<PathBuf, ExitCode> {
+    let mut path: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--socket" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("{}", tf(lang, "--socket 需要一个路径参数。", &[]));
+                    return Err(ExitCode::FAILURE);
+                };
+                path = Some(PathBuf::from(value));
+                i += 2;
+            }
+            other => {
+                eprintln!(
+                    "{}",
+                    tf(lang, "未知参数：{other}", &[("other", other.to_owned())])
+                );
+                return Err(ExitCode::FAILURE);
+            }
+        }
+    }
+    Ok(path.unwrap_or_else(|| PathBuf::from(".toolgate/daemon.sock")))
 }
 
 /// 解析 serve / list 的 --config 参数。

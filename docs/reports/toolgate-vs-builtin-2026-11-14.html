@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>toolgate 实际使用效果实测与内置工具对比 · 2026-11-14</title>
+<style>
+:root{
+  --bg:#f6f7f9;--card:#ffffff;--ink:#1f2937;--sub:#5b6472;--line:#e3e7ee;
+  --blue:#0c447c;--blue-bg:#e8f1fb;--green:#085041;--green-bg:#e3f6ee;
+  --orange:#633806;--orange-bg:#fdf1dd;--red:#8a1b1b;--red-bg:#fbe6e6;
+  --chip:#eef1f6;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#0f141b;--card:#161d26;--ink:#e6eaf0;--sub:#9aa6b5;--line:#28313d;
+    --blue:#b5d4f4;--blue-bg:#122a3f;--green:#9fe1cb;--green-bg:#0e2d24;
+    --orange:#fac775;--orange-bg:#33260f;--red:#f3a6a6;--red-bg:#3a1a1a;--chip:#1e2836;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.65;font-size:15px}
+.wrap{max-width:1080px;margin:0 auto;padding:32px 22px 64px}
+header.top{border-bottom:3px solid var(--blue);padding-bottom:18px;margin-bottom:26px}
+h1{font-size:25px;margin:0 0 8px;letter-spacing:.2px}
+.sub{color:var(--sub);font-size:13.5px}
+.badges{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+.badge{background:var(--chip);border:1px solid var(--line);border-radius:999px;padding:5px 13px;font-size:12.5px;color:var(--sub)}
+.badge b{color:var(--ink)}
+h2{font-size:19px;margin:38px 0 14px;padding-left:11px;border-left:4px solid var(--blue)}
+h3{font-size:15.5px;margin:22px 0 10px}
+p{margin:9px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:15px 17px}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
+.kv:last-child{border-bottom:none}
+.kv span:first-child{color:var(--sub)}
+.kv span:last-child{text-align:right;font-weight:500}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.stat .num{font-size:26px;font-weight:700;letter-spacing:.3px}
+.stat .lbl{color:var(--sub);font-size:12.5px;margin-top:3px}
+.stat.blue .num{color:var(--blue)} .stat.green .num{color:var(--green)}
+.stat.orange .num{color:var(--orange)} .stat.red .num{color:var(--red)}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px;background:var(--card);border-radius:10px;overflow:hidden}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+th{background:var(--chip);font-weight:600;font-size:12.5px;letter-spacing:.3px;color:var(--ink)}
+tr:last-child td{border-bottom:none}
+td .t{font-weight:600}
+.tag{display:inline-block;border-radius:6px;padding:1px 8px;font-size:12px;font-weight:600}
+.tg-g{background:var(--green-bg);color:var(--green)} .tg-o{background:var(--orange-bg);color:var(--orange)}
+.tg-r{background:var(--red-bg);color:var(--red)} .tg-b{background:var(--blue-bg);color:var(--blue)}
+.callout{border-radius:10px;padding:13px 16px;margin:14px 0;font-size:13.5px;border:1px solid}
+.callout.ok{background:var(--green-bg);border-color:var(--green)} .callout.ok b{color:var(--green)}
+.callout.warn{background:var(--orange-bg);border-color:var(--orange)} .callout.warn b{color:var(--orange)}
+.callout.info{background:var(--blue-bg);border-color:var(--blue)} .callout.info b{color:var(--blue)}
+ul{margin:8px 0;padding-left:20px} li{margin:5px 0}
+code{background:var(--chip);padding:1px 6px;border-radius:5px;font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.foot{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);color:var(--sub);font-size:12.5px}
+.legend{font-size:12.5px;color:var(--sub);margin:6px 0 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <h1>toolgate 实际使用效果实测 · 与内置同名工具对比</h1>
+  <div class="sub">评估日期 2026-11-14（本轮重做）· 工作目录 /Users/lanws/workspace/toolgate · 按 tool-adoption-eval 五步法（层位分析 → 项目取证 → 隔离实测 → 固定开销与净增量 → 结论），数据全部为本轮本机实测</div>
+  <div class="badges">
+    <span class="badge">建议：<b>局部采纳</b></span>
+    <span class="badge">六工具：<b>read / write / edit / search / bash / task</b></span>
+    <span class="badge">槽位：<b>feature 版六槽位全 ready（图片 decide 受上游限制）</b></span>
+    <span class="badge">固定开销：<b>≈1.5K tok（5999B，已入红线内）</b></span>
+  </div>
+</header>
+
+<div class="grid">
+  <div class="stat blue"><div class="num">6/6</div><div class="lbl">工具全部实测可用</div></div>
+  <div class="stat green"><div class="num">86ms</div><div class="lbl">decide(d3-nano) 文本判定延迟</div></div>
+  <div class="stat green"><div class="num">3.7s</div><div class="lbl">summarize 端到端(400 行日志)</div></div>
+  <div class="stat green"><div class="num">1499.75 tok</div><div class="lbl">tools/list 固定开销(5999B，达标≤6000B)</div></div>
+  <div class="stat orange"><div class="num">19.7s</div><div class="lbl">大文件(Cargo.lock) auto 判定+摘要</div></div>
+</div>
+
+<h2>一、结论摘要</h2>
+<div class="callout ok">
+<b>核心结论：</b>toolgate 在 <b>edit（行锚点/整段 diff）、task（后台长任务）、大输出落盘 spill、本地摘要/看图/结构化判定</b> 上明显强于内置工具。相较上次评估，两个关键短板已改善：<b>六工具固定定义从 8036B 瘦身到 5999B（1499.75 tok，按 4B/token 折算），首次落入 6000B / 1.5K token 红线内</b>；<b>400 行日志摘要端到端从约 25.8s 降到 3.7s</b>。仍存的短板是：<b>无 shell（bash 表达力受限）</b>、<b>大文件 auto 判定链路过慢（Cargo.lock 19.7s）</b>、<b>task kill 后状态展示不同步（进程已死仍显示运行中）</b>、以及 <b>默认构建（无 external-protocols）六槽位全部不可用，需 feature 重建</b>。适合作为「重活 / 敏感数据不出本机」的补充工具层与内置工具并存，而非全面替换。
+</div>
+<div class="callout info">
+<b>最关键的三条实测：</b>① 固定开销达标——<code>scripts/measure_tools.py --json</code> 实测中文 <code>full_result=5999B / est_tokens_4b=1499.75 / ok=true</code>；② 摘要提速——<code>read</code> 400 行 <code>intent=summary</code> 端到端 3.715s（上次约 26s）；③ 默认 <code>intent=raw</code> 不摘要、不标注（设计如此，§5.1），须显式 <code>intent=summary/auto</code> 且输出 ≥500 token 才触发。
+</div>
+
+<h2>二、测试环境</h2>
+<div class="card">
+  <div class="kv"><span>二进制</span><span>target/release/toolgate（external-protocols feature 版，7.0MB）；默认（无 feature）版 5.5MB，存于 target/tmp/probe/toolgate-default</span></div>
+  <div class="kv"><span>构建</span><span><code>cargo build --release -p toolgate-cli --features external-protocols</code>（本轮 17.67s 成功）</span></div>
+  <div class="kv"><span>配置</span><span>~/.toolgate/config.yaml · slm.mode=http</span></div>
+  <div class="kv"><span>decide / classify</span><span>d3-nano · systemone 原生 · 127.0.0.1:8082（共用）</span></div>
+  <div class="kv"><span>summarize</span><span>LFM2.5-1.2B-Instruct · openai 适配 · 127.0.0.1:10031/v1</span></div>
+  <div class="kv"><span>vision</span><span>MiniCPM-V-4.7-1B · openai 适配 · 127.0.0.1:10014/v1</span></div>
+  <div class="kv"><span>rerank / embedding</span><span>jina-rerank / bge-m3 · 127.0.0.1:10020</span></div>
+  <div class="kv"><span>slmStatus</span><span>feature 版六槽位全部 ready；默认版六槽位全部 unavailable（reason=no_client）</span></div>
+  <div class="kv"><span>通道</span><span>MCP stdio（即 DSH 内真实调用路径）；CLI 独立进程（无跨进程 task 状态）</span></div>
+</div>
+
+<h2>三、六工具逐项实测对比</h2>
+<table>
+<thead><tr><th style="width:9%">工具</th><th style="width:28%">内置工具行为</th><th style="width:45%">toolgate 行为（本轮实测）</th><th style="width:18%">结论</th></tr></thead>
+<tbody>
+<tr><td class="t">read</td><td>支持 offset/limit 全量读取；无摘要、无落盘</td><td>默认按行/字节上限截断（实测 3000 行只给 1312 行，50KB 上限，<code>totalLines=3000</code>，给续读 offset=1313）并落盘 pointer；<code>intent=summary</code> 走 decide→summarize（400 行错误日志 3.715s 产出 147 字节宏观摘要，confidence 0.99）；<code>anchor=true</code> 输出 <code>行号#4位hex|内容</code></td><td><span class="tag tg-o">摘要+spill</span> 默认截断更激进，摘要需显式 intent</td></tr>
+<tr><td class="t">write</td><td>直接创建/覆盖</td><td>写前留快照、自动建父目录、沿用原文件编码；实测新建 3 行成功（created=true）</td><td><span class="tag tg-g">增强</span> 无额外成本</td></tr>
+<tr><td class="t">edit</td><td>仅 old_string→new_string 字面替换</td><td>三寻址：edits 文本匹配 / anchor 行锚点（<code>1#a128</code>，错误格式"2#"报"哈希应为 4 位十六进制字符"）/ patch 扁平 unified diff；改动前快照、失败归因。实测三种模式均成功</td><td><span class="tag tg-g">显著更强</span> 整段重排/缩进无需转义</td></tr>
+<tr><td class="t">search</td><td>rg/grep 检索</td><td>content/files 两模式；content 模式命中 >20 且有 query 时 rerank 优先（实测 30 命中 <code>rerank=applied</code>、0.58s，5 条高相关全进 top5），rerank 不可用退 embedding 余弦；<b>files 模式遵守 .gitignore</b>（实测 <code>*.log</code> 文件全部不返回）；超 2000 行/50KB 保留头部落盘</td><td><span class="tag tg-b">rerank/embedding+落盘</span> 基础检索等价；files 受 .gitignore 限制</td></tr>
+<tr><td class="t">bash</td><td><code>bash -c</code> 完整 shell 语法（管道/重定向/变量展开）</td><td>无 shell：<code>binary</code>+<code>args</code>，<b>明确拒绝 <code>sh -c</code></b>（isErr，参数错误，无注入面）；默认尾部保留 2000 行截断+spill 落盘；<code>intent=summary</code> 摘要、<code>intent=auto</code> 且 ≥500 token 时用 classify+机械正则标注敏感度</td><td><span class="tag tg-o">更安全但表达力受限</span></td></tr>
+<tr><td class="t">task</td><td>无独立工具（依赖 bash run_in_background）</td><td>start/read/kill/list 后台长任务；read 尾部截断落盘。实测 start→read@0.9s→list→kill 全通；<b>kill 后进程确实被杀（0.5s 内 pid 消失），但 list 仍显示"运行中"，等 3/5/8s 不变"已退出"</b>（状态展示缺陷）</td><td><span class="tag tg-o">独有能力</span> 但 kill 状态不同步</td></tr>
+</tbody>
+</table>
+<div class="legend">标签：<span class="tag tg-g">绿</span> 优于内置 · <span class="tag tg-b">蓝</span> 等价或略强 · <span class="tag tg-o">橙</span> 有得有失 · <span class="tag tg-r">红</span> 不适用</div>
+
+<h2>四、槽位智能层实测</h2>
+<table>
+<thead><tr><th style="width:11%">槽位</th><th style="width:20%">模型 / 来源</th><th style="width:40%">实测结果</th><th style="width:14%">延迟</th><th style="width:15%">判定</th></tr></thead>
+<tbody>
+<tr><td class="t">classify</td><td>d3-nano / systemone choice</td><td>用在输出敏感度标注：实测 600 行 API key 样本 classify 单独判 <code>normal</code>（confidence 0.02 极低），机械正则改判 <code>secret</code>（<code>source=mechanical</code>）；邮箱样本判 <code>personal</code>；正常 Cargo.lock 判 <code>normal</code>。模型对高危样本识别弱，靠机械正则保底</td><td>标注链路 2.5–6.1s</td><td><span class="tag tg-o">可用但会漏判，须机械保底</span></td></tr>
+<tr><td class="t">decide</td><td>d3-nano / systemone native</td><td>文本判定正确且快（"The sky is blue."→gate=adopt p=1.0；模糊"maybe it works sometimes"→gate=both_views p=0.32）；<b>带图判定不可用</b>：:8082 未加载 mmproj，read 图片时如实通知 <code>slot=decide fallback=text reason=call_failed</code></td><td>56–86ms（文本）、86ms</td><td><span class="tag tg-o">文本可用，图片受上游限制</span></td></tr>
+<tr><td class="t">summarize</td><td>LFM2.5-1.2B-Instruct / openai text</td><td>400 行错误日志→147 字节宏观摘要（连接超时、延迟超 1000ms、连接被拒绝），confidence 0.99；CLI 直接摘要"数据库连接池耗尽…"→317ms 输出保留关键数字</td><td>3.715s（400 行端到端）/ 317ms（CLI 短文本）</td><td><span class="tag tg-g">大幅提速（25.8s→3.7s）</span></td></tr>
+<tr><td class="t">vision</td><td>MiniCPM-V-4.7-1B / openai text</td><td>96x96 红白棋盘→2809 字节完整中文描述（棋盘格、色块布局、无文本）；仍带 <code>[SLOT_UNAVAILABLE] slot=decide fallback=text</code>（decide 图片探测失败后转 vision）</td><td>3.462s（端到端）</td><td><span class="tag tg-g">可用且提速</span></td></tr>
+</tbody>
+</table>
+<div class="callout warn"><b>延迟实测明细：</b>400 行摘要端到端 3.715s（上次约 25.8s，大幅下降，本轮多次重跑稳定在 3.7s 量级）；图片读取 3.462s（上次约 6s）；text decide 56–86ms（上次 123–143ms）。推测性能改善来自判定/规划链路优化与模型服务状态差异；以上均为本轮实测值。</div>
+
+<h3>四·补　排序 rerank 与向量 embedding 实测</h3>
+<table>
+<thead><tr><th style="width:13%">能力</th><th style="width:22%">模型 / 服务</th><th>实测结果</th><th style="width:14%">判定</th></tr></thead>
+<tbody>
+<tr><td class="t">rerank</td><td>jina-rerank · :10020 <code>/v1/rerank</code></td><td>search <code>intent=auto</code> + 自然语言 query "database connection pool exhausted error retry"、命中 30 条 → <code>meta.rerank="applied"</code>、0.582s，5 条高相关 db 句全部排到 top5；<code>intent=raw</code> 时 <code>rerank=skipped</code>（0.304s，按文件原乱序）。直连三文档评分 0.674>0.527>0.392 排序正确</td><td><span class="tag tg-g">自然语言 query 下生效、准</span></td></tr>
+<tr><td class="t">embedding</td><td>bge-m3 · :10020 <code>/v1/embeddings</code></td><td>rerank 槽不可用时的余弦退路；decide/summarize 的模型输入去重。本轮 rerank 均 ready，未触发 embedding 退路（代码路径保留）</td><td><span class="tag tg-b">退路已就绪</span></td></tr>
+</tbody>
+</table>
+<div class="callout warn"><b>rerank 的关键限制（诚实）：</b>toolgate search 把同一个 <code>query</code> 既当正则匹配模式、又当 rerank 语义查询，两者天然冲突。本轮用自然语言 query 得到正收益；但 <b>上一轮实测 <code>query="database"</code>（关键词）时 jina 会把无关句排最前、最相关句排最后（完全反向）</b>——该反向场景本轮未复测，机制仍在，<b>建议 query 一律用自然语言整句，避免用正则关键词当 rerank 查询</b>。</div>
+
+<h3>四·补二　输出敏感度标注（实测）</h3>
+<div class="callout ok"><b>敏感度标注只追加告知与 meta，不改变返回形态：</b>输出末尾追加 <code>[SENSITIVE] level=...</code> 与 structured notices，原文不脱敏；<code>intent=raw</code> 不判定，轻量输出零成本。</div>
+<ul>
+<li><b>600 行 API key 样本</b>（bash <code>intent=auto</code>）→ <code>level=secret</code>、<code>source=mechanical</code>、2.463s；decide 置信仅 0.02，模型未识别，靠机械正则保底。</li>
+<li><b>600 行邮箱样本</b>（bash auto）→ <code>level=personal</code>、6.064s。</li>
+<li><b>正常 Cargo.lock</b>（bash auto）→ <code>normal</code>、19.707s（大文件 decide+summarize 很慢，<code>[LOW_CONFIDENCE] p=0.01</code>）。</li>
+<li><b>read secret.log auto</b> → 返回全文 35892 字节（<code>shownLines=600</code>），read 不摘敏感、content 原样，confidence 0.45。</li>
+<li><b>短输出 "short line" auto</b> → 0.007s，不摘要不标注（&lt;500 token 门槛生效）。</li>
+<li><b>成本：</b>≥500 token 的非 raw 输出才触发，触发后 2.5–6.1s（取决于文件大小与 decide 判定）。</li>
+</ul>
+
+<h2>五、固定开销与净增量</h2>
+<div class="grid">
+  <div class="stat green"><div class="num">5999B</div><div class="lbl">tools/list 六工具完整定义（中文）</div></div>
+  <div class="stat green"><div class="num">1499.75 tok</div><div class="lbl">token（按 4.0 字符/token 折算）</div></div>
+  <div class="stat green"><div class="num">达标</div><div class="lbl">≤6000B / 1.5K token 红线内（对比上次 8036B）</div></div>
+</div>
+<table style="margin-top:14px">
+<thead><tr><th style="width:26%">度量</th><th style="width:24%">本轮（2026-11-14）</th><th style="width:24%">上次（2026-11-13）</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td class="t">tools/list 中文</td><td><b>5999B / 1499.75 tok</b></td><td>8036B / ≈2.0K tok</td><td>已瘦身、达标红线</td></tr>
+<tr><td class="t">tools/list 英文</td><td>5724B / 1431 tok</td><td>—</td><td><code>--lang en</code></td></tr>
+<tr><td class="t">六工具 sum_fields</td><td>5652B（read 1180 / write≈1180 / edit 1180 / search 1123 / bash 903 / task 970）</td><td>—</td><td>逐工具字节</td></tr>
+<tr><td class="t">feature 版二进制</td><td>7.0MB（六槽位全 ready）</td><td>7.0MB</td><td>需 external-protocols</td></tr>
+<tr><td class="t">默认版二进制</td><td>5.5MB（<b>六槽位全 unavailable</b>，reason=no_client）</td><td>—</td><td>§19.6 默认构建不含 HTTP 客户端</td></tr>
+</tbody>
+</table>
+<p style="margin-top:14px">净增量前提：这 ≈1.5K token 是<b>每请求常驻</b>成本，换取本地摘要 / 看图 / 结构化判定 / 后台任务 / 落盘不丢。相比上次已压到红线内，固定开销不再是主要否决项。</p>
+
+<h2>六、关键风险与限制</h2>
+<div class="callout warn">
+<b>① 无 shell（安全设计，也降低通用性）：</b>toolgate bash 拒绝 <code>sh -c</code>，不支持管道/重定向/变量展开；复杂 shell 组合必须改用内置 bash。<br>
+<b>② 大文件 auto 判定过慢：</b>Cargo.lock 类大文件 <code>intent=auto</code> 端到端 <b>19.7s</b>（decide+summarize 双链路）；高频大文件读取不宜用 auto，改 <code>raw</code> 或分片。<br>
+<b>③ task kill 状态不同步：</b>kill 请求后进程<b>确实被杀</b>（实测 0.5s 内 pid 消失），但 <code>task list</code> 持续显示"运行中"，3/5/8s 均不更新为"已退出"——基于 list 状态做编排会误判，需自行核对进程存活。<br>
+<b>④ 默认构建槽位全不可用：</b>无 <code>external-protocols</code> feature 的默认二进制六槽位全部 unavailable（no_client），必须 feature 重建才能用本地模型层。<br>
+<b>⑤ 默认不摘要：</b><code>intent=raw</code> 为默认，须显式 <code>summary/auto</code> 且输出 ≥500 token 才触发。<br>
+<b>⑥ 判定置信偶低：</b>decide/classify 对模糊或高危输入给 LOW_CONFIDENCE（实测 0.01–0.07），需调用方容忍降级与机械保底。<br>
+<b>⑦ 部署依赖：</b>summarize 依赖 LFM2.5:10031、vision 依赖 MiniCPM-V:10014、decide 依赖 d3-nano:8082（该实例未加载 mmproj，带图判定不可用）；须三者常驻，否则槽位降级。<br>
+<b>⑧ search files 受 .gitignore 约束：</b>files 模式遵守 .gitignore，仓库若忽略 <code>*.log</code> 等类型，这些文件不会出现在结果里（实测漏掉全部 .log），需注意检索遗漏。<br>
+<b>⑨ rerank query 复用：</b>同一 query 既作正则又作 rerank 语义查询；关键词/正则作 rerank 语义弱，可能把最相关命中排到末位，务必用自然语言整句。<br>
+<b>⑩ classify 会漏判：</b>d3-nano 对邮箱 / API key 样本判 <code>normal</code>，输出标注取「classify 与机械正则更高等级、机械保底」；正常文本不受影响。
+</div>
+
+<h2>七、与上次报告的变化对照</h2>
+<table>
+<thead><tr><th style="width:22%">维度</th><th style="width:26%">2026-11-13</th><th style="width:26%">2026-11-14（本轮）</th><th>趋势</th></tr></thead>
+<tbody>
+<tr><td class="t">固定开销</td><td>8036B / ≈2.0K tok（超红线）</td><td>5999B / 1499.75 tok</td><td><span class="tag tg-g">↓ 改善，达标</span></td></tr>
+<tr><td class="t">400 行摘要延迟</td><td>≈25.8s</td><td>3.715s</td><td><span class="tag tg-g">↓ 大幅提速</span></td></tr>
+<tr><td class="t">图片读取延迟</td><td>≈5.8–6.0s</td><td>3.462s</td><td><span class="tag tg-g">↓ 提速</span></td></tr>
+<tr><td class="t">text decide 延迟</td><td>123–143ms</td><td>56–86ms</td><td><span class="tag tg-g">↓ 提速</span></td></tr>
+<tr><td class="t">大文件 auto</td><td>未单独记录</td><td>Cargo.lock 19.7s</td><td><span class="tag tg-o">新增风险点</span></td></tr>
+<tr><td class="t">task kill 状态</td><td>未记录</td><td>进程已死但 list 显示运行中</td><td><span class="tag tg-o">新发现缺陷</span></td></tr>
+<tr><td class="t">默认 vs feature 构建</td><td>未强调</td><td>默认版六槽位全不可用</td><td><span class="tag tg-o">新增部署约束</span></td></tr>
+<tr><td class="t">search files</td><td>路径前缀偶不一致</td><td>遵守 .gitignore，漏 .log</td><td><span class="tag tg-o">行为限制</span></td></tr>
+</tbody>
+</table>
+
+<h2>八、采纳建议（分场景）</h2>
+<table>
+<thead><tr><th style="width:26%">场景</th><th style="width:20%">建议</th><th>理由</th></tr></thead>
+<tbody>
+<tr><td>敏感数据不出本机 / 需要本地摘要&amp;看图</td><td><span class="tag tg-g">推荐</span></td><td>本地小模型压缩在数据上传前完成，正是 toolgate 核心命题</td></tr>
+<tr><td>需要 edit 行锚点 / 整段重排 / 失败归因</td><td><span class="tag tg-g">推荐</span></td><td>三寻址模式明显强于内置的字面替换</td></tr>
+<tr><td>后台长任务管理 / 大输出不丢</td><td><span class="tag tg-g">推荐</span></td><td>task 工具与 spill 落盘是内置工具没有的能力（注意 kill 状态需自查进程）</td></tr>
+<tr><td>依赖复杂 shell 管道 / 重定向</td><td><span class="tag tg-r">不适用</span></td><td>无 shell，表达力受限，改用内置 bash</td></tr>
+<tr><td>大文件高频 auto 读取</td><td><span class="tag tg-o">谨慎</span></td><td>decide+summarize 链路慢（19.7s 级），改 raw 或分片</td></tr>
+<tr><td>交互式高频、token 预算紧</td><td><span class="tag tg-o">谨慎</span></td><td>虽已降至 1.5K tok/请求，仍为每请求常驻成本</td></tr>
+</tbody>
+</table>
+<div class="callout info"><b>综合：</b>按「重活下沉、轻活走内置」分层使用。固定开销达标 + 摘要大幅提速后，toolgate 的门槛已下降，可作为本地理解与执行层补齐内置工具缺失的「摘要 / 看图 / 结构化判定 / 后台任务 / 落盘」，但大文件 auto 与 task 状态两处仍需调用方规避。</div>
+
+<div class="foot">
+数据口径：全部为 2026-11-14 本机实测（feature 版二进制、六槽位 ready），非估算。<br>
+复现：<code>cargo build --release -p toolgate-cli --features external-protocols</code> · <code>python3 scripts/measure_tools.py --json [--lang en]</code> · MCP 测试脚本 <code>target/tmp/probe/{mcp_probe,phase_a,phase_b1,phase_b2,phase_c,phase_e}.py</code> · <code>./target/release/toolgate decide/summarize ... --json</code>。固定开销按 tools/list 原始字节与 4.0 字符/token 折算。<br>
+生成：toolgate 实测评估（本轮重做）· 自包含离线 HTML，无外部依赖。
+</div>
+</div>
+</body>
+</html>

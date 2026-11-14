@@ -11,12 +11,12 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use super::{
@@ -104,36 +104,82 @@ fn read_id(flag: &str) -> Option<u32> {
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "bash",
-        description: "能做什么：执行系统命令，只接受程序名+参数数组（无 shell），输出超 2000 行或 50KB 保留尾部落盘。不能做什么：不接受 shell 字符串、管道、重定向；不做长任务托管。什么时候用别的工具：长任务 task、查找 search、改文件 edit / write、看图 read。",
-        description_en: "Can: run commands via program name + args array (no shell), tail-truncates past 2000 lines or 50KB. Cannot: shell strings, pipes, redirects, host long jobs. Use instead: task for long jobs, search to find, edit/write to modify, read for images.",
+        description: "能做什么：执行命令——单命令 binary+args（无 shell），或 pipeline 线性管道；stdout_to/stderr_to 写文件返回路径；超 2000 行/50KB 落盘。不能做什么：不支持 shell 字符串、&&/||/; 等；不做长任务托管。什么时候用别的工具：task、search、edit/write、read。",
+        description_en: "Can: run commands via binary+args (no shell), or a linear pipeline array (== a | b | c, no shell parsing); stdout_to/stderr_to redirect to file. Tail-truncates past 2000 lines/50KB. Cannot: shell strings, &&/||/;, globbing, var expansion, host long jobs. Use instead: task, search, edit/write, read.",
         input_schema: json!({
             "type": "object",
             "properties": {
-                "binary": { "type": "string", "description": "程序名或绝对路径" },
-                "args": { "type": "array", "items": { "type": "string" }, "description": "参数数组" },
-                "cwd": { "type": "string", "description": "工作目录，默认上下文目录" },
-                "timeout_secs": { "type": "integer", "description": "超时秒数，默认 300", "minimum": 1 },
-                "intent": { "type": "string", "enum": ["raw", "summary", "structured", "visual", "auto"], "description": "输出形态 §4.2" }
-            },
-            "required": ["binary"]
+                "binary": { "type": "string" },
+                "args": { "type": "array", "items": { "type": "string" } },
+                "pipeline": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "binary": { "type": "string" },
+                            "args": { "type": "array", "items": { "type": "string" } }
+                        },
+                        "required": ["binary"]
+                    }
+                },
+                "stdout_to": { "type": "string" },
+                "stderr_to": { "type": "string" },
+                "cwd": { "type": "string" },
+                "timeout_secs": { "type": "integer", "minimum": 1 },
+                "intent": { "type": "string", "enum": ["raw", "summary", "structured", "visual", "auto"] }
+            }
         }),
     }
 }
 
 pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolError> {
     let lang = ctx.language;
-    let binary = required_str(args, "binary")?;
-    reject_shell(binary)?;
 
-    let argv: Vec<String> = args
-        .get("args")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .map(|v| v.as_str().unwrap_or_default().to_owned())
-                .collect()
-        })
-        .unwrap_or_default();
+    // §5.1：结构化线性 pipeline（可选）或单命令 binary+args。每段仍是 execve，
+    // 段间用 OS 管道连接——没有 shell 解析层，也就没有 shell 注入面。
+    let segments: Vec<(String, Vec<String>)> = match args.get("pipeline").and_then(Value::as_array)
+    {
+        Some(p) => {
+            if p.is_empty() {
+                return Err(ToolError::bad_argument("pipeline 不能为空数组".to_owned()));
+            }
+            let mut segs = Vec::with_capacity(p.len());
+            for (i, seg) in p.iter().enumerate() {
+                let bin = seg.get("binary").and_then(Value::as_str).ok_or_else(|| {
+                    ToolError::bad_argument(format!("pipeline 第 {} 段缺少 binary", i + 1))
+                })?;
+                reject_shell(bin)?;
+                let av: Vec<String> = seg
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .map(|v| v.as_str().unwrap_or_default().to_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                segs.push((bin.to_owned(), av));
+            }
+            segs
+        }
+        None => {
+            let binary = required_str(args, "binary")?;
+            reject_shell(binary)?;
+            let argv: Vec<String> = args
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_str().unwrap_or_default().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            vec![(binary.to_owned(), argv)]
+        }
+    };
+    // meta 与错误消息仍用第一段标识，单命令形态与旧行为一致。
+    let binary = segments[0].0.clone();
+    let argv = segments[0].1.clone();
 
     let cwd = optional_str(args, "cwd")
         .map(|p| ctx.resolve(p))
@@ -141,68 +187,37 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     let timeout = Duration::from_secs(
         optional_usize(args, "timeout_secs").unwrap_or(DEFAULT_TIMEOUT_SECS as usize) as u64,
     );
+    let stdout_to = optional_str(args, "stdout_to").map(|p| ctx.resolve(p));
+    let stderr_to = optional_str(args, "stderr_to").map(|p| ctx.resolve(p));
 
-    let mut command = Command::new(binary);
-    command
-        .args(&argv)
-        .current_dir(&cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // §14 阶段 4：独立进程组，超时可整组终止（避免子进程残留）。
-        .process_group(0);
-    // §17.2：子进程不继承父进程环境，只拿白名单。
-    apply_env_allowlist(&mut command, &cwd);
-    let mut child = command.spawn().map_err(|e| {
-        ToolError::failed_with(
-            crate::error::ErrorCode::IoError,
-            format!("无法启动 {binary}：{e}"),
-        )
-    })?;
-    let pid = child.id().unwrap_or(0);
+    let (mut stdout, mut stderr, status) = exec_segments(&segments, &cwd, timeout).await?;
 
-    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
-    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
-
-    let collect = async {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut out).await;
-        let _ = stderr_pipe.read_to_end(&mut err).await;
-        (out, err)
-    };
-
-    let status = match tokio::time::timeout(timeout, async {
-        let (out, err) = collect.await;
-        let status = child.wait().await;
-        (out, err, status)
-    })
-    .await
-    {
-        Ok((out, err, status)) => {
-            let status = status.map_err(|e| {
-                ToolError::failed_with(
-                    crate::error::ErrorCode::IoError,
-                    format!("等待进程失败：{e}"),
-                )
-            })?;
-            (out, err, status)
-        }
-        Err(_) => {
-            super::kill_process_group(pid).await;
-            let _ = child.kill().await;
-            return Err(ToolError::failed_with(
-                crate::error::ErrorCode::Timeout,
-                format!(
-                    "命令超时（{} 秒）已被终止：{binary} {}",
-                    timeout.as_secs(),
-                    argv.join(" ")
-                ),
-            ));
-        }
-    };
-
-    let (stdout, stderr, status) = status;
+    // §5.1：stdout_to / stderr_to 把最终输出重定向到文件，返回路径而非内容。
+    let mut redirected: Vec<Value> = Vec::new();
+    if let Some(path) = &stdout_to {
+        tokio::fs::write(path, &stdout).await.map_err(|e| {
+            ToolError::failed_with(
+                crate::error::ErrorCode::IoError,
+                format!("写 stdout_to 失败：{e}"),
+            )
+        })?;
+        redirected.push(
+            json!({"stream": "stdout", "path": path.display().to_string(), "bytes": stdout.len()}),
+        );
+        stdout.clear();
+    }
+    if let Some(path) = &stderr_to {
+        tokio::fs::write(path, &stderr).await.map_err(|e| {
+            ToolError::failed_with(
+                crate::error::ErrorCode::IoError,
+                format!("写 stderr_to 失败：{e}"),
+            )
+        })?;
+        redirected.push(
+            json!({"stream": "stderr", "path": path.display().to_string(), "bytes": stderr.len()}),
+        );
+        stderr.clear();
+    }
     let combined = merge_output(&stdout, &stderr);
     let truncation = truncate_tail(&combined, ctx.limits);
 
@@ -255,6 +270,17 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         "spill": spill_meta,
         "intent": intent_tag(intent),
     });
+    if segments.len() > 1 {
+        meta["pipeline"] = json!(
+            segments
+                .iter()
+                .map(|(b, a)| json!({"binary": b, "args": a}))
+                .collect::<Vec<_>>()
+        );
+    }
+    if !redirected.is_empty() {
+        meta["redirected"] = json!(redirected);
+    }
     // §5.1/§9.2：L1 判定只在协商层判定要判时跑（raw 不介入；输出 < 500 token
     // 由 exitCode 机械判断）。判定不可用（未绑定 / feature 未开 / 调用失败）
     // 只降级并告知，工具照常工作（§7.3）。
@@ -362,6 +388,153 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         meta["facts"] = facts;
     }
     Ok(ToolResponse::text(content).with_meta(meta))
+}
+
+/// 执行（可多段）线性管道并返回最后一段的 stdout/stderr 与退出状态（§5.1）。
+///
+/// 段间用 OS 管道连接：第一段 `process_group(0)` 建立独立进程组，后续段继承该组，
+/// 超时按组终止即可整链回收（§14 阶段 4）。每段仍是 execve，没有 shell 解析层。
+/// 管道用 std::process 构建（其 ChildStdout 可直接转 Stdio），整体放在阻塞线程里跑。
+async fn exec_segments(
+    segments: &[(String, Vec<String>)],
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<(Vec<u8>, Vec<u8>, std::process::ExitStatus), ToolError> {
+    let segs = segments.to_vec();
+    let cwd = cwd.to_path_buf();
+    let label = segments
+        .iter()
+        .map(|(b, a)| {
+            if a.is_empty() {
+                b.clone()
+            } else {
+                format!("{b} {}", a.join(" "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let pid_shared = Arc::new(AtomicU32::new(0));
+    let pid_for_thread = pid_shared.clone();
+    let join =
+        tokio::task::spawn_blocking(move || run_pipeline_blocking(&segs, &cwd, &pid_for_thread));
+    match tokio::time::timeout(timeout, join).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => Err(ToolError::failed_with(
+            crate::error::ErrorCode::IoError,
+            format!("执行线程失败：{e}"),
+        )),
+        Err(_) => {
+            let pid = pid_shared.load(Ordering::SeqCst);
+            super::kill_process_group(pid).await;
+            Err(ToolError::failed_with(
+                crate::error::ErrorCode::Timeout,
+                format!("命令超时（{} 秒）已被终止：{label}", timeout.as_secs()),
+            ))
+        }
+    }
+}
+
+/// 阻塞版：构建并运行线性管道，返回最后一段 stdout/stderr 与退出状态。
+fn run_pipeline_blocking(
+    segments: &[(String, Vec<String>)],
+    cwd: &Path,
+    pid_shared: &AtomicU32,
+) -> Result<(Vec<u8>, Vec<u8>, std::process::ExitStatus), ToolError> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command as StdCommand, Stdio as Std};
+
+    let mut children = Vec::with_capacity(segments.len());
+    let mut prev_stdout: Option<Std> = None;
+    let mut last_stdout: Option<std::process::ChildStdout> = None;
+    let mut stderr_threads = Vec::with_capacity(segments.len());
+
+    for (i, (bin, av)) in segments.iter().enumerate() {
+        let mut cmd = StdCommand::new(bin);
+        cmd.args(av).current_dir(cwd).stderr(Std::piped());
+        if i == 0 {
+            cmd.stdin(Std::null()).stdout(Std::piped()).process_group(0);
+        } else {
+            cmd.stdin(prev_stdout.take().expect("上一段 stdout"))
+                .stdout(Std::piped());
+        }
+        apply_env_allowlist_std(&mut cmd, cwd);
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let pid = pid_shared.load(Ordering::SeqCst);
+                if pid != 0 {
+                    let _ = StdCommand::new("kill")
+                        .arg("-KILL")
+                        .arg(format!("-{pid}"))
+                        .stdin(Std::null())
+                        .stdout(Std::null())
+                        .stderr(Std::null())
+                        .status();
+                }
+                return Err(ToolError::failed_with(
+                    crate::error::ErrorCode::IoError,
+                    format!("无法启动 {bin}：{e}"),
+                ));
+            }
+        };
+        if i == 0 {
+            pid_shared.store(child.id(), Ordering::SeqCst);
+        }
+        let out = child.stdout.take().expect("stdout piped");
+        if i + 1 == segments.len() {
+            last_stdout = Some(out);
+        } else {
+            prev_stdout = Some(Std::from(out));
+        }
+        let err = child.stderr.take().expect("stderr piped");
+        stderr_threads.push(std::thread::spawn(move || {
+            use std::io::Read;
+            let mut r = err;
+            let mut b = Vec::new();
+            let _ = r.read_to_end(&mut b);
+            b
+        }));
+        children.push(child);
+    }
+
+    let mut out = Vec::new();
+    if let Some(mut h) = last_stdout {
+        use std::io::Read;
+        let _ = h.read_to_end(&mut out);
+    }
+    let mut err = Vec::new();
+    for t in stderr_threads {
+        if let Ok(b) = t.join() {
+            err.extend_from_slice(&b);
+        }
+    }
+    let mut status: Option<std::process::ExitStatus> = None;
+    for ch in &mut children {
+        match ch.wait() {
+            Ok(st) => status = Some(st),
+            Err(e) => {
+                return Err(ToolError::failed_with(
+                    crate::error::ErrorCode::IoError,
+                    format!("等待进程失败：{e}"),
+                ));
+            }
+        }
+    }
+    Ok((out, err, status.expect("至少一个进程")))
+}
+
+/// std::process::Command 版环境白名单（§17.2），与 tokio 版同一份名单。
+fn apply_env_allowlist_std(cmd: &mut std::process::Command, cwd: &Path) {
+    cmd.env_clear();
+    for key in ENV_ALLOWLIST {
+        if *key == "PWD" {
+            continue;
+        }
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    cmd.env("PWD", cwd);
 }
 
 /// 判定状态窗口：命令输出尾部 8000 字符（§6.4 prefill 预算，§5.1 有界候选）。
@@ -574,6 +747,81 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         let ctx = ToolContext::new(&dir).expect("ctx");
         (ctx, dir)
+    }
+
+    /// §5.1：pipeline 段间用 OS 管道连接，等价 a | b | c。
+    #[tokio::test]
+    async fn pipeline_joins_segments_by_os_pipe() {
+        let (ctx, dir) = bash_ctx("pipeline-pipe");
+        let resp = run(
+            &json!({
+                "pipeline": [
+                    { "binary": "printf", "args": ["a\nb\nc\n"] },
+                    { "binary": "head", "args": ["-n", "2"] }
+                ],
+                "intent": "raw"
+            }),
+            &ctx,
+        )
+        .await
+        .expect("pipeline ok");
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(body.contains("a"), "缺 a：{body}");
+        assert!(body.contains("b"), "缺 b：{body}");
+        assert!(!body.contains("c"), "head -n 2 不应含 c：{body}");
+        assert_eq!(resp.meta["pipeline"].as_array().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.1 / §17.2：pipeline 每段仍拒绝 shell 解释器。
+    #[tokio::test]
+    async fn pipeline_rejects_shell_segment() {
+        let (ctx, dir) = bash_ctx("pipeline-shell");
+        let err = run(
+            &json!({ "pipeline": [ { "binary": "bash", "args": ["-c", "echo hi"] } ] }),
+            &ctx,
+        )
+        .await
+        .expect_err("应拒绝 shell 段");
+        assert!(
+            format!("{err:?}").contains("不接受"),
+            "应拒绝 shell 入口：{err:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.1：pipeline 为空数组是参数错误。
+    #[tokio::test]
+    async fn pipeline_empty_is_rejected() {
+        let (ctx, dir) = bash_ctx("pipeline-empty");
+        assert!(run(&json!({ "pipeline": [] }), &ctx).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.1：stdout_to 把输出写文件并返回路径，不占上下文。
+    #[tokio::test]
+    async fn stdout_to_redirects_to_file() {
+        let (ctx, dir) = bash_ctx("stdout-to");
+        let target = dir.join("out.txt");
+        let resp = run(
+            &json!({ "binary": "echo", "args": ["hi"], "stdout_to": target.display().to_string(), "intent": "raw" }),
+            &ctx,
+        )
+        .await
+        .expect("run ok");
+        let content = std::fs::read_to_string(&target).expect("文件应存在");
+        assert!(content.contains("hi"), "文件内容：{content}");
+        assert_eq!(resp.meta["redirected"][0]["stream"], json!("stdout"));
+        let crate::tools::Content::Text(body) = &resp.content[0] else {
+            panic!("应为文本")
+        };
+        assert!(
+            body.contains("无输出"),
+            "stdout 已被重定向，content 应为空提示：{body}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

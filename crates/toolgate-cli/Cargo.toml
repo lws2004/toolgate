@@ -19,6 +19,7 @@ external-protocols = [
 
 [dependencies]
 toolgate-core = { path = "../toolgate-core" }
+toolgate-daemon = { path = "../toolgate-daemon" }
 toolgate-mcp = { path = "../toolgate-mcp" }
 serde_json.workspace = true
 tokio.workspace = true

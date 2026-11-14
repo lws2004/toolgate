@@ -1,12 +1,12 @@
 # toolgate
 
-围绕本地小模型构建的工具层。云端做规划，本地做理解与执行。
+本地常驻的感知增强层：拦截 agent（pi / dsh）内置工具的输出，在结果进入 agent 上下文之前理解、治理，压成可决策的形状。增强模型可为本地 SLM，也可反向委派给 agent 会话模型。
 
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Status](https://img.shields.io/badge/architectural--review-v2-yellow)
 
-> **状态**：架构已迭代到 v2（围绕本地小模型）并已审阅；实现按 §14 路线图推进，
+> **状态**：架构 v2（拦截内置工具、进上下文前增强）已定稿；实现按 §14 路线图推进，
 > 阶段 0–5 与 §17.2 安全底线已落地，验证基线见
 > [实现进度表](docs/implementation-status.md)。
 > 本地模型接入层已落地（decide / classify / summarize / rerank / embedding / vision 六槽位适配）；
@@ -18,15 +18,15 @@
 
 不是「怎么执行工具」，而是：
 
-> **哪些东西根本不需要上传到云端？**
+> **进上下文之前，这条结果该被压成什么形状？**
 
 一份 5000 行的失败日志、一张 800KB 的 UI 截图、一次命中 300 条的检索——
-这些内容的绝大部分对下一步决策没有用。toolgate 在数据离开本地之前，
-用本地小模型把它们压成「够用的形状」。
+这些内容的绝大部分对下一步决策没有用。toolgate 在结果进入 agent 上下文之前，
+用增强模型把它们压成「可决策的形状」（本地 SLM 或委派给会话模型皆可）。
 
 ## 三层结构
 
-每个工具都是这三层：
+每条返回的增强都是这三层：
 
 ```text
 执行层   → 读文件、跑命令、检索
@@ -36,7 +36,7 @@
 
 协商层由新增的 intent 参数控制：raw / summary / structured / visual / auto。
 
-## 本地模型层：六个能力槽位
+## 增强模型层：六个能力槽位
 
 **架构不绑定任何具体模型**。它定义六个槽位，每个槽位有确定的输入输出
 契约与延迟预算；具体模型是可替换的实现。
@@ -53,16 +53,15 @@
 当前参考实现见 [附件 E.2](docs/architecture/95-references.md#e2-槽位参考实现)（正文 §3.4 只讲选型原则）。换模型的条件是
 同时满足：输出形态匹配、延迟在预算内（本机实测）、许可证允许、中文达标。
 
-## 六个工具
+## 六类处理器（按返回形状路由）
 
-| 工具 | 本地模型挡住什么 |
+| 返回形状 | 增强 |
 |---|---|
-| bash | 几千行日志 → 错误摘要 + 落盘指针 |
-| search | 几百条命中 → rerank 后的 top-k |
-| read（文本） | 整文件 → 结构化提取或相关片段 |
-| read（图片） | 几 MB 截图 → 元素坐标 / OCR 文本 |
-| task | 累积输出 → 状态判断 + 增量摘要 |
-| write / edit | 挡不住什么，但前四个要有输出对象 |
+| 大段命令输出（bash） | 几千行 → 错误摘要 + 落盘指针 |
+| 海量检索命中 | 几百条 → rerank 后的 top-k |
+| 整文件读 | 结构化提取或相关片段 |
+| 图片 | 几 MB 截图 → 元素坐标 / OCR 文本 |
+| 写前请求（pre） | 写前复核 + 快照，可 block |
 
 ## 快速开始（默认构建，不含外部协议客户端）
 
@@ -72,7 +71,7 @@
 cargo build --release
 ./target/release/toolgate list
 ./target/release/toolgate call read '{"path":"Cargo.toml","limit":5}'
-./target/release/toolgate serve   # MCP stdio server
+./target/release/toolgate serve   # MCP stdio server（仅调试；主路径为接缝适配器）
 ```
 
 接入 MCP 客户端：
@@ -111,7 +110,7 @@ cargo build --release
 - 写前事务快照（项目内 .toolgate/snapshots）
 - 图片压缩流水线（缩放 → 质量阶梯 → 尺寸兜底 → 熔断）
 - 行锚点（可选模式）
-- MCP stdio 传输（三版本协商）
+- MCP stdio 传输（三版本协商；仅 serve 调试通道）
 
 **剩余项与边界**：可选层（`embedded` 推理后端）与条件触发项（有损 WebP、流式输出）
 按 §19.6 / §14 的触发条件处理；逐项状态见 [实现进度表](docs/implementation-status.md)。

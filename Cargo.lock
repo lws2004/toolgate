@@ -1132,6 +1132,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "toolgate-core",
+ "toolgate-daemon",
  "toolgate-mcp",
  "tracing",
  "tracing-subscriber",
@@ -1156,6 +1157,17 @@ dependencies = [
  "similar",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "toolgate-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toolgate-core",
 ]
 
 [[package]]

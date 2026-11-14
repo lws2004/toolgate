@@ -35,12 +35,43 @@ use crate::truncate::{format_size, truncate_tail};
 /// 单任务累积输出上限，超出后丢弃最早的内容。
 const MAX_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
+/// 进程结束的两种方式：正常退出码，或被信号终止（如 kill 发出的 SIGKILL）。
+/// 信号终止时 `ExitStatus::code()` 返回 None，若不单独记录，会与「仍在运行」的
+/// None 混淆，导致 kill 后 list/read 仍显示运行中（§5.5 state）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitOutcome {
+    Code(i32),
+    Signal(i32),
+}
+
+impl ExitOutcome {
+    /// 对外暴露的退出码：信号终止没有退出码，返回 None（与既有 meta.exitCode 语义一致）。
+    fn code(self) -> Option<i32> {
+        match self {
+            ExitOutcome::Code(code) => Some(code),
+            ExitOutcome::Signal(_) => None,
+        }
+    }
+}
+
+/// 取终止进程的信号号（Unix）；非 Unix 平台返回 0。
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal().unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_status: &std::process::ExitStatus) -> i32 {
+    0
+}
+
 struct Job {
     pid: u32,
     label: String,
     started: Instant,
     output: std::sync::Arc<Mutex<Vec<u8>>>,
-    exit: std::sync::Arc<Mutex<Option<i32>>>,
+    exit: std::sync::Arc<Mutex<Option<ExitOutcome>>>,
     child: std::sync::Arc<tokio::sync::Mutex<Child>>,
 }
 
@@ -121,7 +152,7 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
 
     let pid = child.id().unwrap_or(0);
     let output = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
-    let exit = std::sync::Arc::new(Mutex::new(None::<i32>));
+    let exit = std::sync::Arc::new(Mutex::new(None::<ExitOutcome>));
 
     if let Some(mut stdout) = child.stdout.take() {
         let buf = output.clone();
@@ -161,10 +192,16 @@ async fn start(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolErro
     let exit_for_wait = exit.clone();
     tokio::spawn(async move {
         let mut guard = child_for_wait.lock().await;
-        if let Ok(status) = guard.wait().await
-            && let Ok(mut e) = exit_for_wait.lock()
-        {
-            *e = status.code();
+        if let Ok(status) = guard.wait().await {
+            // §5.5：区分正常退出与信号终止；后者 code() 为 None，必须显式记录，
+            // 否则「被 kill」会被误判成「仍在运行」。
+            let outcome = match status.code() {
+                Some(code) => ExitOutcome::Code(code),
+                None => ExitOutcome::Signal(exit_signal(&status)),
+            };
+            if let Ok(mut e) = exit_for_wait.lock() {
+                *e = Some(outcome);
+            }
         }
     });
 
@@ -205,7 +242,7 @@ async fn read_output(
 ) -> Result<ToolResponse, ToolError> {
     let task_id = required_str(args, "task_id")?;
     // 先在同步块里收集机械事实并释放 registry 锁，再 await 判定（不跨 await 持锁）。
-    let (raw, exit, elapsed, label, pid) = {
+    let (raw, exit, finished, elapsed, label, pid) = {
         let reg = registry()
             .lock()
             .map_err(|_| ToolError::failed("任务表锁失效".to_owned()))?;
@@ -222,10 +259,11 @@ async fn read_output(
             .lock()
             .map(|g| String::from_utf8_lossy(&g).into_owned())
             .unwrap_or_default();
-        let exit = job.exit.lock().ok().and_then(|g| *g);
+        let outcome = job.exit.lock().ok().and_then(|g| *g);
         (
             raw,
-            exit,
+            outcome.and_then(ExitOutcome::code),
+            outcome.is_some(),
             job.started.elapsed().as_secs(),
             job.label.clone(),
             job.pid,
@@ -258,7 +296,7 @@ async fn read_output(
         "taskId": task_id,
         "label": label,
         "pid": pid,
-        "running": exit.is_none(),
+        "running": !finished,
         "exitCode": exit,
         "elapsedSecs": elapsed,
         "outputBytes": raw.len(),
@@ -351,6 +389,7 @@ async fn read_output(
             content.push_str(&state_line(
                 ctx.language,
                 exit,
+                finished,
                 elapsed,
                 raw.len(),
                 truncation.truncated,
@@ -366,6 +405,7 @@ async fn read_output(
         TaskMode::Structured => {
             let facts = structured_facts(
                 exit,
+                finished,
                 elapsed,
                 raw.len(),
                 truncation.truncated,
@@ -477,11 +517,12 @@ fn build_summary_input(
 fn state_line(
     lang: Language,
     exit: Option<i32>,
+    finished: bool,
     elapsed: u64,
     bytes: usize,
     truncated: bool,
 ) -> String {
-    let state = if exit.is_some() { "exited" } else { "running" };
+    let state = if finished { "exited" } else { "running" };
     let code = exit
         .map(|c| c.to_string())
         .unwrap_or_else(|| "null".to_owned());
@@ -538,9 +579,15 @@ fn list(lang: Language) -> Result<ToolResponse, ToolError> {
     let mut out = String::new();
     let mut items = Vec::new();
     for (id, job) in reg.iter() {
-        let exit = job.exit.lock().ok().and_then(|g| *g);
-        let state = match exit {
-            Some(code) => tf(lang, "已退出（{code}）", &[("code", code.to_string())]),
+        let outcome = job.exit.lock().ok().and_then(|g| *g);
+        let exit = outcome.and_then(ExitOutcome::code);
+        let state = match outcome {
+            Some(ExitOutcome::Code(code)) => {
+                tf(lang, "已退出（{code}）", &[("code", code.to_string())])
+            }
+            Some(ExitOutcome::Signal(sig)) => {
+                tf(lang, "已终止（信号 {sig}）", &[("sig", sig.to_string())])
+            }
             None => t(lang, "运行中").into_owned(),
         };
         out.push_str(&tf(
@@ -849,6 +896,69 @@ mod tests {
         run(&json!({ "action": "kill", "task_id": id }), &ctx)
             .await
             .expect("kill ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §5.5：kill 用 SIGKILL 终止时 `ExitStatus::code()` 为 None，必须仍判为已结束，
+    /// 否则 list/read 会把被 kill 的任务误报成「运行中」。
+    #[tokio::test]
+    async fn killed_job_reports_not_running() {
+        let dir = std::env::temp_dir().join(format!("tg-task-kill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let ctx = ToolContext::new(&dir).expect("ctx");
+
+        let resp = run(
+            &json!({ "action": "start", "binary": "sleep", "args": ["30"] }),
+            &ctx,
+        )
+        .await
+        .expect("start ok");
+        let id = resp.meta["taskId"].as_str().expect("taskId").to_owned();
+
+        run(&json!({ "action": "kill", "task_id": id }), &ctx)
+            .await
+            .expect("kill ok");
+
+        // 等 wait 线程观察并回填结束状态（最多 ~2s）。
+        let mut running = json!(true);
+        for _ in 0..50 {
+            let read = run(
+                &json!({ "action": "read", "task_id": id, "intent": "raw" }),
+                &ctx,
+            )
+            .await
+            .expect("read ok");
+            running = read.meta["running"].clone();
+            if running == json!(false) {
+                assert!(read.meta["exitCode"].is_null(), "SIGKILL 无退出码");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        assert_eq!(running, json!(false), "kill 后 read 仍报运行中");
+
+        // list 也必须一致：不再显示「运行中」。
+        let listed = run(&json!({ "action": "list" }), &ctx)
+            .await
+            .expect("list ok");
+        let text = listed
+            .content
+            .iter()
+            .find_map(|c| match c {
+                crate::tools::Content::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .expect("list 应有文本");
+        // 全局任务表跨测试共享，必须只看本任务那一行，别被其他并发任务带偏。
+        let line = text
+            .lines()
+            .find(|line| line.contains(&id))
+            .expect("list 应包含该任务行");
+        assert!(
+            !line.contains("运行中"),
+            "kill 后 list 仍显示运行中：{line}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

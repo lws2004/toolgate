@@ -7,7 +7,7 @@
 > **更新纪律**：每次改动落地后更新对应行（状态 + 证据）。判断下一步只读本文件，
 > 不要重新扫描代码与架构正文——那既慢又容易与事实源漂移。
 >
-> 最后更新：2026-11-14（tools/list 六工具声明瘦身至 ≤1.5K token，中文 5999 B / 英文 5724 B；默认 491 / feature 484）
+> 最后更新：2026-11-14（daemon + govern/pre 新形态；dsh 薄适配器独立仓；附件引用治理与反向委派落地；默认 cargo test 514 passed、适配器 node --test 30 passed）
 
 ## 怎么用
 
@@ -24,6 +24,16 @@
 | decide 批处理（方案 B，turn 内聚合） | 不实现（前提不成立） | §13.4 | 一次 decide 调用只读一个 state，不同工具的输出无法合并；可合并的「同一 state 多问题」在单次调用内已问完。论证与 turn 载体现状见 §13.4「实现状态」 |
 | 有损 WebP | 未做（条件触发） | §10.2b | 三条触发判据未出现，image_pipeline 只检测格式 |
 | 流式输出 | 不做 | §14 阶段 4 | MCP progress notification 不改变返回形态，已定不做 |
+
+## 阶段 R：daemon + govern/pre 接缝（2026-11-14 新形态）
+
+| 项 | 状态 | 架构依据 | 证据 |
+|---|---|---|---|
+| R1 daemon 常驻 + Unix socket 手写 HTTP | 完成 | §18.2 / §18.7 / §1.5 | 新 crate `crates/toolgate-daemon`（`serve()` 监听 Unix socket，手写 HTTP/1.1，不引入 axum/hyper）；路由 POST /govern、POST /pre、GET /health；集成测试 `crates/toolgate-daemon/tests/seams.rs`（真实 socket 往返 health/govern/pre）；CLI 新增 `toolgate daemon [--socket <path>]` |
+| R2 govern 六类处理器（按形状路由、免白名单） | 部分 | §4.0a / §4.1 / §5.3 | `crates/toolgate-core/src/govern.rs`：`sniff_shape` 三级信号前两级（确定性命中：image block / data URI / 魔数；结构自证：JSON；错误标记 / 列表 / 长文 / 元信息）+ `govern_with()` 分派六个 processor；12 个单测覆盖视觉/透传/结构化/错误/长文/空输入及委派成功/失败，并含「文档正文出现 error: 字样不被误判为错误」回归。视觉/长文/列表/错误四类在 `policy.delegate` 存在时反向委派给宿主模型（见 R5），无回调时降级 L0 并告知。缺口：第三级 classify（纯语义判形状）未接，形状仍靠前两级信号 |
+| R3 pre 写前复核 + 写前快照 | 完成 | §18.6 / §18.7 / §20 | `crates/toolgate-core/src/precheck.rs`：`pre()` 逐条按 (mtime,size,sha256) 复核，不一致返回 PRE_STALE 并 block；一致则 `spill.snapshot` 写前快照；4 个单测（匹配放行+快照 / sha 变化阻断 / 新文件无指纹放行 / 期望存在但文件消失阻断） |
+| R4 薄适配器独立仓（pi / dsh） | 完成（dsh；pi 暂不做） | §18.2 / §18.6 | 独立仓 `/Users/lanws/workspace/toolgate-dsh-adapter`：Cordis 插件 `@toolgate/dsh-adapter`，零执行逻辑零工具声明，只挂 `tools/post-execute`（→ daemon `POST /govern`）与 `tools/pre-execute`（`write`/`edit` → `POST /pre`）；图片只传引用+元信息（`attachmentId/mimeType/bytes/width/height/sha256`），不传 base64 字节；写侧期望指纹取「该 agent 上次 read 到的真值」，缓存按 `exec.agent` WeakMap 隔离；`node --test test/*.test.mjs` = 30 passed（含 11 委派协议单测 + 多 agent 缓存隔离）；`check_plugin_spec.py` 0 E / 0 W；真实 DSH headless 实测：读 3000 行文件触发长文治理并成功反向委派 `summarize`（模型 `auto/deepseek-v4.1-flash` 返回摘要）、`edit` 生成写前快照 |
+| R5 反向委派（无本地 SLM 回投宿主会话模型） | 完成（dsh；pi 暂不做） | §18.7 三约束 | core `govern_with(req,spill,Some(&dyn Delegate))` 在 vision/summarize/rerank/classify 四处调用委派，失败/无回调降级 L0；daemon `delegate.rs` 实现 `HttpDelegate`（`unix:` / `http://127.0.0.1`，超时 8s、输出预算 512 token）；适配器 `createDelegateServer` 起同目录 Unix socket，`handleDelegatePayload` 把单条内容交 `ctx.llm.stream`（`ctx.get('llm')` + `agentDefaultModel.currentSelection()`，不声明硬依赖），token 单次登记不落盘；`crates/toolgate-daemon/tests/seams.rs` 真实 socket 委派往返测试通过；真实 DSH headless 长文委派实测成功 |
 
 ## 阶段 1：SLM 接入层
 
@@ -54,6 +64,7 @@
 | 项 | 状态 | 架构依据 | 证据 |
 |---|---|---|---|
 | bash：decide 九问 + summarize | 完成 | §5.1 / §7.2 | `bash_path.rs`；`gate_notices` |
+| bash：结构化线性 pipeline + stdout_to/stderr_to | 完成 | §5.1 | `bash.rs` `exec_segments`/`run_pipeline_blocking`（straight-line 管道、OS 管道连接、超时按组终止）；测试 `pipeline_joins_segments_by_os_pipe` / `pipeline_rejects_shell_segment` / `pipeline_empty_is_rejected` / `stdout_to_redirects_to_file`；tools/list 实测 6000 B/1500 tok 仍达标 |
 | read 图片：vision 理解 + decide 七问 + need_pixels 三档 | 完成 | §5.3 / §10.1 | `read.rs` plan_image；真实 UI 截图复核通过（imageKind=ui_screenshot、hasText=true、need_pixels 概率 0.90），vision 端到端待本机视觉模型 |
 | read 文本：decide 分级判定 + summarize 结构化 | 完成 | §5.3 / §6.4 | `read_path.rs`：`text_decide_questions_for(intent)`（auto 十问；summary/structured 七问，不问 best_view）+ `bounded_ruling_sample`（判定样本头 2000 + 尾 200 字符）；`merge_text_answers` 未判定 best_view 时置 None、`meta.bestView` 省略；测试 `text_decide_questions_summary_and_structured_skip_best_view`、`text_answers_merge_without_best_view_keeps_none` |
 | search：语义重排接线 | 完成 | §5.2 | `search_path.rs`；query 必填主体由 pattern 承担、可选自然语言 query 决定排序：命中 > 20 且 query 非空时 rerank 优先，rerank 槽位不可用而 embedding 可用则按余弦重排；两者都不可用保持命中顺序并告知 |

@@ -61,7 +61,11 @@
 | 术语 | 含义 | 首次定义 |
 |---|---|---|
 | F1 / F2 / F3 | 三种使用形态：直连云端 agent / PTC 云端 agent / 本地 agent | §6.2 |
-| 本地 agent | 进程外、由 30B 级本地模型驱动的 agent 循环，通过 MCP 消费 6 个工具；不是 toolgate 的组件，也不是槽位 | §21.7 |
+| 本地 agent | 进程外、由 30B 级本地模型驱动的 agent 循环，其内置工具输出经接缝适配器交给 toolgate 增强（不再通过 MCP 消费工具）；不是 toolgate 的组件，也不是槽位 | §21.7 |
+| 增强层 | 即 toolgate：拦截宿主内置工具返回、在进上下文前成形的组件 | §0 |
+| 六类处理器 | 按返回形状分派的处理单元（命令输出 / 检索命中 / 整文件 / 图片 / 写前 / 状态） | §4.0a |
+| 接缝 | 宿主提供的工具前后钩子：dsh `tools/post-execute`、`tools/pre-execute`；pi `afterToolCall`、`beforeToolCall` | §18.6 |
+| 反向委派 | govern / pre 需要槽位增强但无本地 SLM 时，把单条内容回投宿主会话模型执行 | §18.7 |
 | 第一期 | v2 首版（阶段 1–4），平台范围只含 macOS（§19.7） | §19.7 |
 | L0–L4 | 成本阶梯：确定性 / 判定 / 生成 / 视觉 / 云端 | §2.1、§6.1 |
 | 槽位 | 能力契约，不是具体模型：classify / rerank / decide / summarize / vision / embedding | §3.1 |

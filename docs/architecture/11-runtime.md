@@ -85,7 +85,7 @@ dsh-ledger-compact 的对照与六条借鉴见附件 E.5。
 | 行锚点 | 完成 | v2 保留为可选模式 |
 | edit 归一化匹配 | 部分完成 | v1 已做行尾/空白归一化（含 CRLF、智能引号、破折号），第 4 级语义对齐未做；v2 扩到四级（§5.4） |
 | MCP 传输 | 完成 | 无握手请求 + 标准 initialize 握手（接入主路径，见 §13.2 / §14 阶段 1.5）；per-request `_meta` 解析与版本校验在 `compat.rs` / `toolgate-mcp/src/lib.rs` |
-| 6 个工具的 L0 层 | 部分完成 | 路径根校验、search 超时、env 白名单已补（§17.2）；剩余 edit 模式 C 与 read 单行超长落盘（逐项状态见 [implementation-status.md](../implementation-status.md)） |
+| 六类处理器的 L0 层 | 部分完成 | 路径根校验、search 超时、env 白名单已补（§17.2）；剩余 edit 模式 C 与 read 单行超长落盘（逐项状态见 [implementation-status.md](../implementation-status.md)） |
 
 ### 13.2 需要新增
 
@@ -199,6 +199,22 @@ PTC 里每次子调用仍是一个独立的 MCP 请求，工具层不做批量�
 第一期（阶段 1–4）只覆盖 macOS（§19.7）；Windows / Linux 从阶段 6 起规划。
 
 **实现状态的唯一事实源是 [implementation-status.md](../implementation-status.md)**：本节只写阶段划分与验收口径，逐项做到哪、证据在哪、下一步做什么，一律查那张表。
+
+### 阶段 R：daemon + govern/pre 接缝（2026-11-14 新形态）
+
+> 2026-11-14 reframe 把 toolgate 从 MCP 六工具供应商重定位为 agent 内置工具感知增强层
+> （见 [reframe-2026-11-14.md](../reframe-2026-11-14.md) 与
+> [architecture-review-2026-11-14.md](../architecture-review-2026-11-14.md)）。本阶段是新目标
+> 形态；下方阶段 0–5 记录的是六工具 MCP 形态，现保留 `serve` 作调试通道（§18.2）。
+
+- R1 定位层：常驻 daemon 进程外运行，手写本地回环 HTTP / Unix socket 传输（禁止层无 Web 框架，§1.5），对外只暴露 govern / pre 两个非 MCP 接缝（§18.7）。
+- R2 读侧治理：govern 按返回形状路由到六类处理器（视觉 / 长文 / 错误 / 列表 / 结构化 / 元信息，§4.0a），免白名单；无 SLM 时确定性 L0 兜底。
+- R3 写侧治理：pre 对经其的 write / edit 做 (mtime,size,sha256) 复核 + 写前快照，不一致 PRE_STALE 阻断（§18.6 / §20）。
+- R4 接入层：薄适配器独立仓（一期 pi / dsh），只搬运，核心仓零框架依赖；多宿主共享一个 daemon。
+- R5 反向委派：本地无 SLM 时不自行出网，回投宿主会话模型，或降级 L0（§18.7 三约束）。
+
+验收：daemon 在 Unix socket 上稳定提供 /govern 与 /pre；六处理器按形状可路由且有回归测试；
+写前复核能阻断 PRE_STALE；核心仓零新增框架依赖。
 
 ### 阶段 0：架构定稿
 
