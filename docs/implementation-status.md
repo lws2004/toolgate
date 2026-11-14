@@ -7,7 +7,7 @@
 > **更新纪律**：每次改动落地后更新对应行（状态 + 证据）。判断下一步只读本文件，
 > 不要重新扫描代码与架构正文——那既慢又容易与事实源漂移。
 >
-> 最后更新：2026-11-14（daemon + govern/pre 新形态；dsh 薄适配器独立仓；附件引用治理与反向委派落地；默认 cargo test 514 passed、适配器 node --test 30 passed）
+> 最后更新：2026-11-14（daemon + govern/pre 新形态；dsh 薄适配器独立仓并已挂载 web profile；附件引用治理与反向委派落地；默认 cargo test 514 passed、适配器 node --test 30 passed）
 
 ## 怎么用
 
@@ -32,7 +32,7 @@
 | R1 daemon 常驻 + Unix socket 手写 HTTP | 完成 | §18.2 / §18.7 / §1.5 | 新 crate `crates/toolgate-daemon`（`serve()` 监听 Unix socket，手写 HTTP/1.1，不引入 axum/hyper）；路由 POST /govern、POST /pre、GET /health；集成测试 `crates/toolgate-daemon/tests/seams.rs`（真实 socket 往返 health/govern/pre）；CLI 新增 `toolgate daemon [--socket <path>]` |
 | R2 govern 六类处理器（按形状路由、免白名单） | 部分 | §4.0a / §4.1 / §5.3 | `crates/toolgate-core/src/govern.rs`：`sniff_shape` 三级信号前两级（确定性命中：image block / data URI / 魔数；结构自证：JSON；错误标记 / 列表 / 长文 / 元信息）+ `govern_with()` 分派六个 processor；12 个单测覆盖视觉/透传/结构化/错误/长文/空输入及委派成功/失败，并含「文档正文出现 error: 字样不被误判为错误」回归。视觉/长文/列表/错误四类在 `policy.delegate` 存在时反向委派给宿主模型（见 R5），无回调时降级 L0 并告知。缺口：第三级 classify（纯语义判形状）未接，形状仍靠前两级信号 |
 | R3 pre 写前复核 + 写前快照 | 完成 | §18.6 / §18.7 / §20 | `crates/toolgate-core/src/precheck.rs`：`pre()` 逐条按 (mtime,size,sha256) 复核，不一致返回 PRE_STALE 并 block；一致则 `spill.snapshot` 写前快照；4 个单测（匹配放行+快照 / sha 变化阻断 / 新文件无指纹放行 / 期望存在但文件消失阻断） |
-| R4 薄适配器独立仓（pi / dsh） | 完成（dsh；pi 暂不做） | §18.2 / §18.6 | 独立仓 `/Users/lanws/workspace/toolgate-dsh-adapter`：Cordis 插件 `@toolgate/dsh-adapter`，零执行逻辑零工具声明，只挂 `tools/post-execute`（→ daemon `POST /govern`）与 `tools/pre-execute`（`write`/`edit` → `POST /pre`）；图片只传引用+元信息（`attachmentId/mimeType/bytes/width/height/sha256`），不传 base64 字节；写侧期望指纹取「该 agent 上次 read 到的真值」，缓存按 `exec.agent` WeakMap 隔离；`node --test test/*.test.mjs` = 30 passed（含 11 委派协议单测 + 多 agent 缓存隔离）；`check_plugin_spec.py` 0 E / 0 W；真实 DSH headless 实测：读 3000 行文件触发长文治理并成功反向委派 `summarize`（模型 `auto/deepseek-v4.1-flash` 返回摘要）、`edit` 生成写前快照 |
+| R4 薄适配器独立仓（pi / dsh） | 完成（dsh；pi 暂不做） | §18.2 / §18.6 | 独立仓 `/Users/lanws/workspace/toolgate-dsh-adapter`：Cordis 插件 `@toolgate/dsh-adapter`，零执行逻辑零工具声明，只挂 `tools/post-execute`（→ daemon `POST /govern`）与 `tools/pre-execute`（`write`/`edit` → `POST /pre`）；图片只传引用+元信息（`attachmentId/mimeType/bytes/width/height/sha256`），不传 base64 字节；写侧期望指纹取「该 agent 上次 read 到的真值」，缓存按 `exec.agent` WeakMap 隔离；`node --test test/*.test.mjs` = 30 passed（含 11 委派协议单测 + 多 agent 缓存隔离）；`check_plugin_spec.py` 0 E / 0 W；真实 DSH headless 实测：读 3000 行文件触发长文治理并成功反向委派 `summarize`（模型 `auto/deepseek-v4.1-flash` 返回摘要）、`edit` 生成写前快照；宿主 web profile `/Users/lanws/.dsh/profiles/web/cordis.patch.yml` 已挂载 `toolgate-adapter`（`socketPath` 指向 `toolgate/.toolgate/daemon.sock`），旧 `mcp:toolgate` 条目已从 `capability-catalog.mcp` 下线；重启后 web PID 84297、`delegate-84297.sock` 活性，长文治理实测返回摘要 + `[TRUNCATED]` 落盘指针 |
 | R5 反向委派（无本地 SLM 回投宿主会话模型） | 完成（dsh；pi 暂不做） | §18.7 三约束 | core `govern_with(req,spill,Some(&dyn Delegate))` 在 vision/summarize/rerank/classify 四处调用委派，失败/无回调降级 L0；daemon `delegate.rs` 实现 `HttpDelegate`（`unix:` / `http://127.0.0.1`，超时 8s、输出预算 512 token）；适配器 `createDelegateServer` 起同目录 Unix socket，`handleDelegatePayload` 把单条内容交 `ctx.llm.stream`（`ctx.get('llm')` + `agentDefaultModel.currentSelection()`，不声明硬依赖），token 单次登记不落盘；`crates/toolgate-daemon/tests/seams.rs` 真实 socket 委派往返测试通过；真实 DSH headless 长文委派实测成功 |
 
 ## 阶段 1：SLM 接入层
