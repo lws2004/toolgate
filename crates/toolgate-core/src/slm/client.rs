@@ -26,8 +26,14 @@ use super::{
     systemone, text_protocol, vision_protocol,
 };
 
-/// 单次外部协议请求的超时（架构暂无该项配置，先用常量）。
+/// 单次外部协议请求的默认超时（架构暂无该项配置，先用常量）。
 pub const REQUEST_TIMEOUT_SECONDS: u64 = 30;
+
+/// summarize 首次调用可能触发本地模型冷启与长文 prefill，单请求超时放宽到 120s。
+pub const SUMMARIZE_TIMEOUT_SECONDS: u64 = 120;
+
+/// rerank 在 daemon 侧按上游文档上限分片串行发送，3000 条量级需数批，单批超时放宽到 180s。
+pub const RERANK_TIMEOUT_SECONDS: u64 = 180;
 
 /// classify 调用结果。
 #[derive(Debug, Clone)]
@@ -687,7 +693,10 @@ impl SlotClient {
             }
         };
         let url = text_protocol::endpoint(base_url);
-        let mut builder = http.post(&url).json(&request);
+        let mut builder = http
+            .post(&url)
+            .json(&request)
+            .timeout(std::time::Duration::from_secs(SUMMARIZE_TIMEOUT_SECONDS));
         if let Some(env_name) = api_key_env
             && let Ok(value) = std::env::var(env_name)
         {
@@ -870,7 +879,10 @@ impl SlotClient {
             };
             (text_protocol::endpoint(base_url), value, false)
         };
-        let mut builder = http.post(&url).json(&request);
+        let mut builder = http
+            .post(&url)
+            .json(&request)
+            .timeout(std::time::Duration::from_secs(RERANK_TIMEOUT_SECONDS));
         if let Some(env_name) = api_key_env
             && let Ok(value) = std::env::var(env_name)
         {
@@ -1044,10 +1056,10 @@ impl SlotClient {
         };
         let url = embedding_protocol::endpoint(base_url);
         let mut builder = http.post(&url).json(&request);
-        if let Some(env_name) = api_key_env {
-            if let Ok(value) = std::env::var(env_name) {
-                builder = builder.bearer_auth(value);
-            }
+        if let Some(env_name) = api_key_env
+            && let Ok(value) = std::env::var(env_name)
+        {
+            builder = builder.bearer_auth(value);
         }
         let started = Instant::now();
         let response = match builder.send().await {

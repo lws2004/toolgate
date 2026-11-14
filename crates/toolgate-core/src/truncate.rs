@@ -227,6 +227,119 @@ pub fn truncate_line_head(line: &str, max_bytes: usize) -> &str {
     &line[..end]
 }
 
+/// 头 + 关键行 + 尾采样（§4.0a 治理时间预算）。
+///
+/// 长文先减输入再谈超时：保留开头、结尾与中间的关键行（错误、路径、异常），
+/// 略去其余，使送给槽位的输入落到 `max_bytes` 量级。按行边界切，不产生半行；
+///
+/// 返回文本自带省略说明，调用方无需再拼提示。输入未超限时原样返回。
+pub fn sample_ends(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content.to_owned();
+    }
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let total_lines = lines.len();
+
+    let head_budget = max_bytes * 2 / 5;
+    let tail_budget = max_bytes * 2 / 5;
+    let key_budget = max_bytes - head_budget - tail_budget;
+
+    let mut head_count = 0usize;
+    let mut head_bytes = 0usize;
+    for line in &lines {
+        if head_bytes + line.len() > head_budget {
+            break;
+        }
+        head_bytes += line.len();
+        head_count += 1;
+    }
+
+    let mut tail_count = 0usize;
+    let mut tail_bytes = 0usize;
+    for line in lines.iter().rev() {
+        if tail_bytes + line.len() > tail_budget {
+            break;
+        }
+        tail_bytes += line.len();
+        tail_count += 1;
+    }
+
+    let mut key_lines: Vec<&str> = Vec::new();
+    let mut key_bytes = 0usize;
+    let middle_end = total_lines.saturating_sub(tail_count);
+    if head_count < middle_end {
+        for line in &lines[head_count..middle_end] {
+            if key_bytes + line.len() > key_budget {
+                break;
+            }
+            if is_key_line(line) {
+                key_lines.push(line);
+                key_bytes += line.len();
+            }
+        }
+    }
+
+    if head_count == 0 && tail_count == 0 && key_lines.is_empty() {
+        // 首行本身就超预算：按字节切一行，避免返回空内容。
+        return truncate_line_head(content, max_bytes).to_owned();
+    }
+    if head_count + tail_count >= total_lines {
+        return content.to_owned();
+    }
+
+    let head: String = lines[..head_count].concat();
+    let tail: String = lines[total_lines - tail_count..].concat();
+    let omitted_lines = total_lines.saturating_sub(head_count + tail_count + key_lines.len());
+    let omitted_bytes = content
+        .len()
+        .saturating_sub(head_bytes + tail_bytes + key_bytes);
+
+    let mut out = String::new();
+    out.push_str(&head);
+    if !key_lines.is_empty() {
+        out.push_str("\n…（关键行：\n");
+        for line in &key_lines {
+            out.push_str(line);
+            if !line.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        out.push('）');
+    }
+    out.push_str(&format!(
+        "\n…（已采样：略去 {omitted_lines} 行 / {} 字节，完整原文见指针）\n",
+        format_size(omitted_bytes)
+    ));
+    out.push_str(&tail);
+    out
+}
+
+/// 关键行判据：错误、异常、路径与退出线索。大小写不敏感，命中即保留。
+fn is_key_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "error",
+        "failed",
+        "failure",
+        "panic",
+        "exception",
+        "traceback",
+        "errno",
+        "错误",
+        "失败",
+        "异常",
+        "/users/",
+        "/usr/",
+        "/var/",
+        ".rs:",
+        ".ts:",
+        ".py:",
+        ".js:",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+}
+
 /// 把字节数格式化为人类可读形式，用于截断提示。
 pub fn format_size(bytes: usize) -> String {
     const KB: usize = 1024;
@@ -303,5 +416,43 @@ mod tests {
         assert!(r.truncated);
         assert!(r.last_line_partial);
         assert_eq!(r.content, "6789");
+    }
+
+    #[test]
+    fn sample_ends_keeps_head_tail_and_within_budget() {
+        let mut text = String::new();
+        for i in 0..4000 {
+            text.push_str(&format!("line {i} padding padding padding padding\n"));
+        }
+        let r = sample_ends(&text, 32 * 1024);
+        assert!(
+            r.len() <= 32 * 1024 + 512,
+            "采样不得明显超出预算：{}",
+            r.len()
+        );
+        assert!(r.contains("已采样"));
+        assert!(r.starts_with("line 0 "));
+        assert!(r.ends_with("line 3999 padding padding padding padding\n"));
+    }
+
+    #[test]
+    fn sample_ends_keeps_error_lines_from_middle() {
+        let mut text = String::new();
+        for i in 0..3000 {
+            if i == 1500 {
+                text.push_str("ERROR: connection refused\n");
+            } else {
+                text.push_str(&format!("filler line {i}\n"));
+            }
+        }
+        let r = sample_ends(&text, 8 * 1024);
+        assert!(r.contains("ERROR: connection refused"));
+        assert!(r.contains("已采样"));
+    }
+
+    #[test]
+    fn sample_ends_returns_short_content_unchanged() {
+        let text = "a\nb\nc";
+        assert_eq!(sample_ends(text, 1024), text);
     }
 }

@@ -701,6 +701,7 @@ spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到�
 4. **多宿主共享**：pi、dsh 共用同一个常驻 daemon（§18.1 的外部模型来源或反向委派），
    不各自加载模型。
 5. **一期范围**：只做 pi 与 dsh；其他宿主按同一接缝模型扩展，不在本期。pi 内置工具无 `task` / `search` 聚合，一期**不覆盖**这两类，只增强 read / bash / edit / write / grep / find / ls 的返回。
+6. **嵌套结果不治理**：宿主若给工具调用带嵌套标记（如 DSH PTC 的 `exec.parent` 非空），其结果只回外层程序、不进模型上下文，因此不请求 `govern`；只治理最终进上下文的外层结果。这是适配器契约，不得当作漏治理「修复」——双层治理会让一次调用耗时翻倍，且治理对象错误。
 
 **价值定位**：读侧卖「进上下文前的成形」（高信噪比 / 结构化 / 错误可行动 / 持续处理能力，
 §1.6）；写侧卖「内置写也不破坏文件、可回退」。省 token 是读侧成形的**结果之一**（§1.1、
@@ -745,6 +746,7 @@ spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到�
   "intent": "raw|summary|structured|visual|auto",
   "policy": {
     "isolation": "summary",
+    "slmPrefer": "auto",
     "delegate": { "endpoint": "unix:/abs/path/delegate.sock", "token": "opaque" }
   }
 }
@@ -754,12 +756,27 @@ spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到�
   daemon 不解释、不取字节；`bytes/width/height/sha256` 供预算与去重。`dataBase64` 字段仅作
   **无附件服务宿主的有界降级**（≤256 KiB，显式配置开启），dsh / pi 不用——base64 会体积膨胀约
   1/3、重复编码、绕开宿主图片预算与版本缓存（§10.1、§4.0a ⑥）。
+- `policy.slmPrefer` 取 `auto|local|delegate`（缺省 `auto`=本地优先，`delegate`=宿主优先），
+  决定本地 SLM 与反向委派谁先试；两档都不可用或失败才降 L0（§3.8），结果来源见 `meta.slmStatus`；
 - 视觉分支响应：`structuredContent` 带 `{shape:"vision", needPixels, images:[{attachmentId,...}]}`；
   `needPixels=true` 时原图块原样保留，`false` 时以委派得到的文本替换图块。
 
 - 响应：`{content, structuredContent:{..., notices}, meta:{intent, slmStatus, confidence, redacted, truncated, spillPointer, noticeOverflow}, isError}`；`notices` 与 MCP 工具返回同源（§4.4b）；`meta` 的 redacted/truncated 是派生视图，不单独承载告知；
 - 处理链与 `read` 相同：类型/大小检查 → 截断/落盘 → 脱敏（含路径用户名）→ 本地 SLM → 协商；web 内容按不可信来源处理（§15.1）；
 - 失败返回结构化 error + next；`govern.fail_open` 默认 `false`，不静默放行敏感内容。
+
+#### 可观测性（`GET /stats`）
+
+daemon 暴露只读聚合计数，用于回答「真实会话里命中多少、降级多少、平均省多少字节」（§15.2）：
+
+- `totals`：请求数、输入 / 输出字节、累计与平均耗时；
+- `byShape`：按 `structuredContent.shape` 分桶的请求数、字节与耗时；
+- `slots`：每个槽位 `local` / `delegated` / `unavailable` 次数；
+- `degradations`：按 notice code（如 `SLOT_UNAVAILABLE`）与槽位聚合的降级次数。
+
+每次 `/govern` 完成追加一行结构化日志（`shape` / `bytesIn` / `bytesOut` / `latencyMs` /
+`slots` / `degraded`）。计数只存内存、可随时丢弃，不是会话状态（§22.5）；它不参与治理
+决策，也不回写模型上下文。
 
 #### `pre` 接口（写侧）
 

@@ -5,24 +5,202 @@
 //! 以及 GET /health。薄适配器（独立仓，一期 pi/dsh）把宿主内置工具的
 //! 输入输出搬运到这里，再搬回宿主上下文。核心仓零框架依赖由本 crate 承接。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
-use toolgate_core::govern::{GovernRequest, govern_with};
+use toolgate_core::govern::{GovernRequest, GovernResponse, LocalSlots, govern_with_slots};
 
 mod delegate;
+mod local_slots;
 
 use delegate::HttpDelegate;
+use toolgate_core::config::{default_config_path, load_config};
 use toolgate_core::precheck::{PreRequest, pre};
+use toolgate_core::slm::SlotClient;
 use toolgate_core::spill::SpillStore;
 
-/// 服务端共享状态：快照/落盘存储与工作目录。
+/// 服务端共享状态：快照/落盘存储、工作目录与只读聚合计数。
 struct ServerCtx {
     spill: SpillStore,
     cwd: PathBuf,
+    /// 本地 SLM 槽位后端（§3.8 降级链第一档）；None 时降级反向委派 / L0。
+    local: Option<Arc<dyn LocalSlots>>,
+    stats: Stats,
+}
+
+/// 只读聚合计数（§18.7）：进程内存态、可随时丢弃，不参与治理决策、无会话状态。
+#[derive(Default)]
+struct Stats {
+    inner: Mutex<StatsInner>,
+}
+
+#[derive(Default)]
+struct StatsInner {
+    requests: u64,
+    bytes_in: u64,
+    bytes_out: u64,
+    latency_ms: u64,
+    by_shape: BTreeMap<String, ShapeCounts>,
+    slots: BTreeMap<String, SlotCounts>,
+    degradations: BTreeMap<String, u64>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct ShapeCounts {
+    requests: u64,
+    bytes_in: u64,
+    bytes_out: u64,
+    latency_ms: u64,
+}
+
+#[derive(Default, Clone, Copy)]
+struct SlotCounts {
+    local: u64,
+    delegated: u64,
+    unavailable: u64,
+}
+
+impl Stats {
+    /// 记录一次 /govern：聚合计数 + 追加一行结构化日志（日志失败不阻断请求）。
+    fn record_govern(
+        &self,
+        bytes_in: usize,
+        bytes_out: usize,
+        latency_ms: u64,
+        resp: &GovernResponse,
+    ) {
+        let shape = resp
+            .structured_content
+            .get("shape")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        let mut degraded: Vec<String> = Vec::new();
+        {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.requests += 1;
+            inner.bytes_in += bytes_in as u64;
+            inner.bytes_out += bytes_out as u64;
+            inner.latency_ms += latency_ms;
+
+            let counts = inner.by_shape.entry(shape.clone()).or_default();
+            counts.requests += 1;
+            counts.bytes_in += bytes_in as u64;
+            counts.bytes_out += bytes_out as u64;
+            counts.latency_ms += latency_ms;
+
+            if let Some(status) = resp.meta.get("slmStatus").and_then(|v| v.as_object()) {
+                for (slot, state) in status {
+                    let counts = inner.slots.entry(slot.clone()).or_default();
+                    match state.as_str() {
+                        Some("local") => counts.local += 1,
+                        Some("delegated") => counts.delegated += 1,
+                        Some("unavailable") => counts.unavailable += 1,
+                        _ => {}
+                    }
+                }
+            }
+
+            // 降级按 notice code 与槽位聚合（§18.7）：notice 是「治理做过的妥协」唯一事实源。
+            if let Some(notices) = resp
+                .structured_content
+                .get("notices")
+                .and_then(|v| v.as_array())
+            {
+                for notice in notices {
+                    let code = notice
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("UNKNOWN");
+                    let slot = notice
+                        .get("params")
+                        .and_then(|p| p.get("slot"))
+                        .and_then(|v| v.as_str());
+                    let key = match slot {
+                        Some(s) => format!("{code}:{s}"),
+                        None => code.to_owned(),
+                    };
+                    *inner.degradations.entry(key.clone()).or_default() += 1;
+                    degraded.push(key);
+                }
+            }
+        }
+        eprintln!(
+            "[toolgate-daemon] govern {}",
+            serde_json::json!({
+                "shape": shape,
+                "bytesIn": bytes_in,
+                "bytesOut": bytes_out,
+                "latencyMs": latency_ms,
+                "slots": resp.meta.get("slmStatus").cloned().unwrap_or(serde_json::Value::Null),
+                "degraded": degraded,
+            })
+        );
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut by_shape = serde_json::Map::new();
+        for (shape, c) in &inner.by_shape {
+            by_shape.insert(
+                shape.clone(),
+                serde_json::json!({
+                    "requests": c.requests,
+                    "bytesIn": c.bytes_in,
+                    "bytesOut": c.bytes_out,
+                    "latencyMs": c.latency_ms,
+                }),
+            );
+        }
+        let mut slots = serde_json::Map::new();
+        for (slot, c) in &inner.slots {
+            slots.insert(
+                slot.clone(),
+                serde_json::json!({
+                    "local": c.local,
+                    "delegated": c.delegated,
+                    "unavailable": c.unavailable,
+                }),
+            );
+        }
+        let avg = inner.latency_ms.checked_div(inner.requests).unwrap_or(0);
+        serde_json::json!({
+            "ok": true,
+            "totals": {
+                "requests": inner.requests,
+                "bytesIn": inner.bytes_in,
+                "bytesOut": inner.bytes_out,
+                "latencyMs": inner.latency_ms,
+                "avgLatencyMs": avg,
+            },
+            "byShape": by_shape,
+            "slots": slots,
+            "degradations": inner.degradations,
+        })
+    }
+}
+
+/// 构建本地 SLM 槽位后端（§3.8）。配置缺失或构建未编入 HTTP 客户端时返回 None，
+/// 让 govern 自动降级到反向委派 / L0。
+fn build_local_slots() -> Option<Arc<dyn LocalSlots>> {
+    let path = default_config_path();
+    match load_config(&path) {
+        Ok(Some(cfg)) => {
+            let client = Arc::new(SlotClient::new(cfg));
+            local_slots::LocalSlotBackend::new(client).map(|backend| {
+                // 冷启可能 20s 级：后台预热 summarize，不阻塞 daemon 开始监听。
+                backend.prewarm();
+                Arc::new(backend) as Arc<dyn LocalSlots>
+            })
+        }
+        _ => None,
+    }
 }
 
 /// 启动 daemon，监听 Unix socket 直至进程被终止。
@@ -39,7 +217,13 @@ pub async fn serve(socket_path: impl AsRef<Path>) -> anyhow::Result<()> {
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let spill = SpillStore::with_default_dir()?;
-    let ctx = Arc::new(ServerCtx { spill, cwd });
+    let local = build_local_slots();
+    let ctx = Arc::new(ServerCtx {
+        spill,
+        cwd,
+        local,
+        stats: Stats::default(),
+    });
 
     loop {
         match listener.accept().await {
@@ -69,26 +253,45 @@ async fn handle_conn(mut stream: UnixStream, ctx: Arc<ServerCtx>) -> anyhow::Res
 
 fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, serde_json::Value) {
     if method == "GET" && (path == "/health" || path == "/") {
-        return (200, serde_json::json!({ "ok": true, "service": "toolgate-daemon" }));
+        return (
+            200,
+            serde_json::json!({ "ok": true, "service": "toolgate-daemon" }),
+        );
+    }
+    if method == "GET" && path == "/stats" {
+        return (200, ctx.stats.snapshot());
     }
     if method != "POST" {
         return (
             405,
-            serde_json::json!({ "error": { "code": "METHOD_NOT_ALLOWED", "message": "仅支持 POST /govern 与 POST /pre" } }),
+            serde_json::json!({ "error": { "code": "METHOD_NOT_ALLOWED", "message": "仅支持 POST /govern、POST /pre 与 GET /stats" } }),
         );
     }
     match path {
         "/govern" => match serde_json::from_slice::<GovernRequest>(body) {
             Ok(req) => {
-                let resp = govern_with(&req, &ctx.spill, Some(&HttpDelegate));
-                (200, serde_json::to_value(resp).unwrap_or_else(|e| bad_req(&e.to_string())))
+                let started = Instant::now();
+                let resp =
+                    govern_with_slots(&req, &ctx.spill, ctx.local.as_deref(), Some(&HttpDelegate));
+                let payload = serde_json::to_value(&resp).unwrap_or_else(|e| bad_req(&e.to_string()));
+                let out_bytes = serde_json::to_vec(&payload).map(|v| v.len()).unwrap_or(0);
+                ctx.stats.record_govern(
+                    body.len(),
+                    out_bytes,
+                    started.elapsed().as_millis() as u64,
+                    &resp,
+                );
+                (200, payload)
             }
             Err(e) => (400, bad_req(&format!("govern 请求解析失败：{e}"))),
         },
         "/pre" => match serde_json::from_slice::<PreRequest>(body) {
             Ok(req) => {
                 let resp = pre(&req, &ctx.spill, &ctx.cwd);
-                (200, serde_json::to_value(resp).unwrap_or_else(|e| bad_req(&e.to_string())))
+                (
+                    200,
+                    serde_json::to_value(resp).unwrap_or_else(|e| bad_req(&e.to_string())),
+                )
             }
             Err(e) => (400, bad_req(&format!("pre 请求解析失败：{e}"))),
         },

@@ -52,7 +52,8 @@ async fn health_govern_and_pre_over_socket() {
     assert!(body_of(&resp).contains("\"ok\":true"));
 
     // govern: 短文本 → pass_through
-    let gov = r#"{"source":{"kind":"tool","tool":"read"},"content":[{"type":"text","text":"hello"}]}"#;
+    let gov =
+        r#"{"source":{"kind":"tool","tool":"read"},"content":[{"type":"text","text":"hello"}]}"#;
     let resp = request(&socket, "POST", "/govern", gov).await;
     assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
     assert!(body_of(&resp).contains("pass_through"));
@@ -67,7 +68,10 @@ async fn health_govern_and_pre_over_socket() {
     );
     let resp = request(&socket, "POST", "/pre", &pre_body).await;
     assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
-    assert!(body_of(&resp).contains("\"decision\":\"allow\""), "resp={resp}");
+    assert!(
+        body_of(&resp).contains("\"decision\":\"allow\""),
+        "resp={resp}"
+    );
 
     let _ = std::fs::remove_file(&socket);
 }
@@ -86,7 +90,10 @@ fn spawn_fake_delegate(path: std::path::PathBuf) {
             let mut tmp = [0u8; 8192];
             let _ = s.read(&mut tmp);
             let body = br#"{"ok":true,"text":"OCR: hi","model":"m1"}"#;
-            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
             let _ = s.write_all(head.as_bytes());
             let _ = s.write_all(body);
             let _ = s.flush();
@@ -118,4 +125,61 @@ async fn govern_delegates_vision_over_socket() {
     assert!(body.contains("\"delegated\":true"), "body={body}");
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_file(&del_sock);
+}
+
+/// /stats 是只读聚合计数（§18.7）：不改变 govern 行为，只记录形状、字节、耗时与降级。
+#[tokio::test]
+async fn stats_reports_totals_shapes_and_degradations() {
+    let socket = socket_path("stats");
+    let _ = std::fs::remove_file(&socket);
+    let sock = socket.clone();
+    tokio::spawn(async move {
+        let _ = toolgate_daemon::serve(&sock).await;
+    });
+
+    // 空统计：尚未有请求。
+    let resp = request(&socket, "GET", "/stats", "").await;
+    assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
+    let v: serde_json::Value = serde_json::from_str(body_of(&resp)).unwrap();
+    assert_eq!(v["totals"]["requests"], 0, "stats={v}");
+    assert_eq!(v["totals"]["avgLatencyMs"], 0, "stats={v}");
+
+    // 一次 pass_through。
+    let gov = r#"{"source":{"kind":"tool","tool":"read"},"content":[{"type":"text","text":"hello"}]}"#;
+    let resp = request(&socket, "POST", "/govern", gov).await;
+    assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
+
+    // 一次 listing：1500 行超过候选上限 → rerank 走确定性兜底（SLOT_UNAVAILABLE）。
+    let lines: Vec<String> = (0..1500)
+        .map(|i| format!("- item {i} src/lib.rs:{i}:1: note"))
+        .collect();
+    let gov = serde_json::json!({
+        "source": {"kind": "tool", "tool": "grep"},
+        "content": [{"type": "text", "text": lines.join("\n")}]
+    });
+    let resp = request(&socket, "POST", "/govern", &gov.to_string()).await;
+    assert!(resp.starts_with("HTTP/1.1 200"), "resp={resp}");
+    assert!(body_of(&resp).contains("listing"), "resp={resp}");
+
+    let resp = request(&socket, "GET", "/stats", "").await;
+    let v: serde_json::Value = serde_json::from_str(body_of(&resp)).unwrap();
+    assert_eq!(v["totals"]["requests"], 2, "stats={v}");
+    assert!(v["totals"]["bytesIn"].as_u64().unwrap() > 0, "stats={v}");
+    assert!(
+        v["byShape"]["listing"]["requests"].as_u64().unwrap() >= 1,
+        "stats={v}"
+    );
+    assert!(
+        v["degradations"]["SLOT_UNAVAILABLE:rerank"]
+            .as_u64()
+            .unwrap()
+            >= 1,
+        "stats={v}"
+    );
+    assert!(
+        v["slots"]["rerank"]["unavailable"].as_u64().unwrap() >= 1,
+        "stats={v}"
+    );
+
+    let _ = std::fs::remove_file(&socket);
 }

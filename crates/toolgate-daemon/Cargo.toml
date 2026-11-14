@@ -10,5 +10,5 @@ description = "常驻感知治理 daemon：在本地回环 HTTP / Unix socket �
 toolgate-core = { path = "../toolgate-core" }
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "time", "io-util"] }
 anyhow.workspace = true

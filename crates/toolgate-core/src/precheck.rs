@@ -176,7 +176,11 @@ pub fn pre(req: &PreRequest, spill: &SpillStore, cwd: &Path) -> PreResponse {
     }
 
     PreResponse {
-        decision: if any_block { "block".to_owned() } else { "allow".to_owned() },
+        decision: if any_block {
+            "block".to_owned()
+        } else {
+            "allow".to_owned()
+        },
         snapshot_pointer: last_pointer,
         ops: results,
     }
@@ -196,7 +200,10 @@ fn compare(current: &Option<CurrentFile>, before: &Fingerprint, path: &str) -> O
             if let Some(size) = before.size
                 && size != cur.size
             {
-                return Some(format!("大小变化：期望 {size} 字节，当前 {} 字节", cur.size));
+                return Some(format!(
+                    "大小变化：期望 {size} 字节，当前 {} 字节",
+                    cur.size
+                ));
             }
             if let Some(sha) = &before.sha256
                 && !sha.eq_ignore_ascii_case(&cur.sha256)
@@ -297,7 +304,10 @@ mod tests {
                 before: Some(before),
                 payload: None,
             }],
-            policy: Some(PrePolicy { snapshot: Some(true), verify: Some(true) }),
+            policy: Some(PrePolicy {
+                snapshot: Some(true),
+                verify: Some(true),
+            }),
         };
         let resp = pre(&req, &store("ok"), &dir);
         assert_eq!(resp.decision, "allow");
@@ -312,7 +322,11 @@ mod tests {
         fs::write(&file, b"v1").unwrap();
         let before = fingerprint_of(&file).unwrap();
         // 并发修改后内容变化。
-        let mut f = fs::OpenOptions::new().write(true).truncate(true).open(&file).unwrap();
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&file)
+            .unwrap();
         f.write_all(b"v2-changed").unwrap();
         drop(f);
         let req = PreRequest {
@@ -327,7 +341,10 @@ mod tests {
         };
         let resp = pre(&req, &store("stale"), &dir);
         assert_eq!(resp.decision, "block");
-        assert_eq!(resp.ops[0].error.as_ref().unwrap()["code"], json!("PRE_STALE"));
+        assert_eq!(
+            resp.ops[0].error.as_ref().unwrap()["code"],
+            json!("PRE_STALE")
+        );
         assert!(resp.snapshot_pointer.is_none());
     }
 
@@ -370,6 +387,9 @@ mod tests {
         };
         let resp = pre(&req, &store("missing"), &dir);
         assert_eq!(resp.decision, "block");
-        assert_eq!(resp.ops[0].error.as_ref().unwrap()["code"], json!("PRE_STALE"));
+        assert_eq!(
+            resp.ops[0].error.as_ref().unwrap()["code"],
+            json!("PRE_STALE")
+        );
     }
 }
