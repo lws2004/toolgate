@@ -214,7 +214,16 @@ pub fn govern_with(
     delegate: Option<&dyn Delegate>,
 ) -> GovernResponse {
     let intent = req.intent.clone().unwrap_or_else(|| "raw".to_owned());
-    match sniff_shape(req) {
+    let deterministic = sniff_shape(req);
+    // 第三级信号（§4.0a）：确定性嗅探无结论时，才把「仍模糊」的文本交 classify。
+    // 仅 intent != raw 时启用：raw 直接透传，避免普通小输出每次多打一次模型。
+    let classified = if deterministic == Shape::PassThrough && intent != "raw" {
+        classify_shape(req, delegate)
+    } else {
+        None
+    };
+    let shape = classified.unwrap_or(deterministic);
+    let mut resp = match shape {
         Shape::Vision => process_vision(req, &intent, delegate),
         Shape::LongText => process_long_text(req, spill, &intent, delegate),
         Shape::Error => process_error(req, &intent, delegate),
@@ -222,6 +231,54 @@ pub fn govern_with(
         Shape::Structured => process_structured(req, &intent),
         Shape::MetaInfo => process_meta(req, &intent),
         Shape::PassThrough => process_pass_through(req, &intent),
+    };
+    if classified.is_some() && shape != Shape::PassThrough {
+        resp.meta["slmStatus"]["classify"] = json!("delegated");
+        if let Some(obj) = resp.structured_content.as_object_mut() {
+            obj.insert("classified".to_owned(), json!(true));
+            obj.insert("classifiedShape".to_owned(), json!(shape.as_str()));
+        }
+    }
+    resp
+}
+
+/// 第三级形状判定：只解决确定性嗅探无法归类的文本，候选限定为长文 / 列表 / 错误。
+/// 视觉与元信息已有确定性信号（image block / 文件来源），不在此重复判定，避免误伤。
+fn classify_shape(req: &GovernRequest, delegate: Option<&dyn Delegate>) -> Option<Shape> {
+    let joined = join_text(&req.content);
+    if joined.trim().is_empty() {
+        return None;
+    }
+    let sample: String = joined.chars().take(4000).collect();
+    let input = json!({
+        "instruction": "判断这段工具输出属于哪种返回形状；只输出一个 JSON 对象 {\"shape\":\"long_text|listing|error|pass_through\"}，不要解释。",
+        "text": sample,
+        "totalChars": joined.chars().count(),
+    });
+    let (text, _model) = call_delegate(req, delegate, "classify", input)?;
+    let label = parse_shape_label(&text)?;
+    match label.as_str() {
+        "long_text" => Some(Shape::LongText),
+        "listing" => Some(Shape::Listing),
+        "error" => Some(Shape::Error),
+        _ => None,
+    }
+}
+
+fn parse_shape_label(text: &str) -> Option<String> {
+    if let Ok(v) = serde_json::from_str::<Value>(text.trim())
+        && let Some(s) = v.get("shape").and_then(Value::as_str)
+    {
+        return Some(s.trim().to_ascii_lowercase());
+    }
+    let cleaned = text.trim().trim_matches('"').trim().to_ascii_lowercase();
+    if matches!(
+        cleaned.as_str(),
+        "long_text" | "listing" | "error" | "pass_through"
+    ) {
+        Some(cleaned)
+    } else {
+        None
     }
 }
 
@@ -1076,5 +1133,52 @@ exit code 3");
         let resp = govern_with(&req, &store("err-del"), Some(&d));
         assert_eq!(resp.structured_content["error"]["code"], json!("E3"));
         assert_eq!(resp.meta["slmStatus"]["classify"], json!("delegated"));
+    }
+
+    #[test]
+    fn ambiguous_text_classified_by_delegate() {
+        let body = (0..10)
+            .map(|i| format!("result line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut req = req_text(&body);
+        req.intent = Some("summary".into());
+        req.policy = Some(Policy {
+            isolation: None,
+            delegate: Some(DelegateRef {
+                endpoint: "unix:/tmp/x.sock".into(),
+                token: None,
+            }),
+        });
+        let d = MockDelegate {
+            task: "classify",
+            resp: Ok(json!({ "ok": true, "text": "{\"shape\":\"listing\"}" })),
+        };
+        let resp = govern_with(&req, &store("shape-classify"), Some(&d));
+        assert_eq!(resp.structured_content["classifiedShape"], json!("listing"));
+        assert_eq!(resp.meta["slmStatus"]["classify"], json!("delegated"));
+    }
+
+    #[test]
+    fn raw_intent_skips_shape_classify() {
+        let body = (0..10)
+            .map(|i| format!("result line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut req = req_text(&body);
+        req.policy = Some(Policy {
+            isolation: None,
+            delegate: Some(DelegateRef {
+                endpoint: "unix:/tmp/x.sock".into(),
+                token: None,
+            }),
+        });
+        let d = MockDelegate {
+            task: "classify",
+            resp: Ok(json!({ "ok": true, "text": "{\"shape\":\"listing\"}" })),
+        };
+        let resp = govern_with(&req, &store("shape-raw"), Some(&d));
+        assert!(resp.structured_content.get("classified").is_none());
+        assert_eq!(resp.meta["slmStatus"]["classify"], json!("unavailable"));
     }
 }
