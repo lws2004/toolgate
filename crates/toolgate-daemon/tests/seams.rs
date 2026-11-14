@@ -80,7 +80,8 @@ fn spawn_fake_delegate(path: std::path::PathBuf) {
         for conn in listener.incoming() {
             let mut s = match conn {
                 Ok(v) => v,
-                Err(_) => break,
+                // accept 可能被信号中断（EINTR）；不能因此关闭整个假服务，否则客户端会立刻连接失败。
+                Err(_) => continue,
             };
             let mut tmp = [0u8; 8192];
             let _ = s.read(&mut tmp);
