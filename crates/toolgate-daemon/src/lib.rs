@@ -14,13 +14,13 @@ use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
-use toolgate_core::govern::{GovernRequest, GovernResponse, LocalSlots, govern_with_slots};
+use toolgate_core::govern::{GovernRequest, GovernResponse, LocalSlots, govern_with_policy};
 
 mod delegate;
 mod local_slots;
 
 use delegate::HttpDelegate;
-use toolgate_core::config::{default_config_path, load_config};
+use toolgate_core::config::{IsolationConfig, default_config_path, load_config};
 use toolgate_core::precheck::{PreRequest, pre};
 use toolgate_core::slm::SlotClient;
 use toolgate_core::spill::SpillStore;
@@ -29,6 +29,8 @@ use toolgate_core::spill::SpillStore;
 struct ServerCtx {
     spill: SpillStore,
     cwd: PathBuf,
+    /// 隔离策略（§8 / 附录 D）：启动时按配置注入，govern 入口按它算输出硬顶。
+    isolation: IsolationConfig,
     /// 本地 SLM 槽位后端（§3.8 降级链第一档）；None 时降级反向委派 / L0。
     local: Option<Arc<dyn LocalSlots>>,
     stats: Stats,
@@ -131,7 +133,7 @@ impl Stats {
                 }
             }
         }
-        eprintln!(
+        tracing::info!(
             "[toolgate-daemon] govern {}",
             serde_json::json!({
                 "shape": shape,
@@ -194,12 +196,20 @@ fn build_local_slots() -> Option<Arc<dyn LocalSlots>> {
         Ok(Some(cfg)) => {
             let client = Arc::new(SlotClient::new(cfg));
             local_slots::LocalSlotBackend::new(client).map(|backend| {
-                // 冷启可能 20s 级：后台预热 summarize，不阻塞 daemon 开始监听。
+                // 冷启可能 20s 级：后台预热 summarize（仅暖连通/权重，不送大样本——见 ADR 0009 P2），不阻塞 daemon 开始监听。
                 backend.prewarm();
                 Arc::new(backend) as Arc<dyn LocalSlots>
             })
         }
         _ => None,
+    }
+}
+
+/// 加载隔离策略（§8 / 附录 D）：配置文件缺失或解析失败时退回内置默认（保守可运行）。
+fn load_isolation() -> IsolationConfig {
+    match load_config(&default_config_path()) {
+        Ok(Some(cfg)) => cfg.isolation,
+        _ => IsolationConfig::default(),
     }
 }
 
@@ -218,9 +228,11 @@ pub async fn serve(socket_path: impl AsRef<Path>) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let spill = SpillStore::with_default_dir()?;
     let local = build_local_slots();
+    let isolation = load_isolation();
     let ctx = Arc::new(ServerCtx {
         spill,
         cwd,
+        isolation,
         local,
         stats: Stats::default(),
     });
@@ -231,12 +243,12 @@ pub async fn serve(socket_path: impl AsRef<Path>) -> anyhow::Result<()> {
                 let ctx = Arc::clone(&ctx);
                 tokio::spawn(async move {
                     if let Err(err) = handle_conn(stream, ctx).await {
-                        eprintln!("[toolgate-daemon] 连接处理失败：{err}");
+                        tracing::error!("[toolgate-daemon] 连接处理失败：{err}");
                     }
                 });
             }
             Err(err) => {
-                eprintln!("[toolgate-daemon] accept 失败：{err}");
+                tracing::error!("[toolgate-daemon] accept 失败：{err}");
             }
         }
     }
@@ -271,8 +283,13 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, serde_
         "/govern" => match serde_json::from_slice::<GovernRequest>(body) {
             Ok(req) => {
                 let started = Instant::now();
-                let resp =
-                    govern_with_slots(&req, &ctx.spill, ctx.local.as_deref(), Some(&HttpDelegate));
+                let resp = govern_with_policy(
+                    &req,
+                    &ctx.spill,
+                    ctx.local.as_deref(),
+                    Some(&HttpDelegate),
+                    &ctx.isolation,
+                );
                 let payload = serde_json::to_value(&resp).unwrap_or_else(|e| bad_req(&e.to_string()));
                 let out_bytes = serde_json::to_vec(&payload).map(|v| v.len()).unwrap_or(0);
                 ctx.stats.record_govern(

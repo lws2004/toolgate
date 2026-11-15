@@ -238,80 +238,142 @@ pub fn sample_ends(content: &str, max_bytes: usize) -> String {
         return content.to_owned();
     }
     let lines: Vec<&str> = content.split_inclusive('\n').collect();
-    let total_lines = lines.len();
+    let n = lines.len();
 
+    // 头尾各 2/5、关键行 1/5；关键行额度未用尽时回收给头尾（§4.0a：不让预算空转）。
     let head_budget = max_bytes * 2 / 5;
     let tail_budget = max_bytes * 2 / 5;
     let key_budget = max_bytes - head_budget - tail_budget;
 
-    let mut head_count = 0usize;
+    let mut head_cnt = 0usize;
     let mut head_bytes = 0usize;
     for line in &lines {
         if head_bytes + line.len() > head_budget {
             break;
         }
         head_bytes += line.len();
-        head_count += 1;
+        head_cnt += 1;
     }
-
-    let mut tail_count = 0usize;
+    let mut tail_cnt = 0usize;
     let mut tail_bytes = 0usize;
     for line in lines.iter().rev() {
-        if tail_bytes + line.len() > tail_budget {
+        if tail_cnt + head_cnt >= n || tail_bytes + line.len() > tail_budget {
             break;
         }
         tail_bytes += line.len();
-        tail_count += 1;
+        tail_cnt += 1;
     }
+    let mid_start = head_cnt;
+    let mid_end = n - tail_cnt;
 
-    let mut key_lines: Vec<&str> = Vec::new();
+    let mut key_idx: Vec<usize> = Vec::new();
     let mut key_bytes = 0usize;
-    let middle_end = total_lines.saturating_sub(tail_count);
-    if head_count < middle_end {
-        for line in &lines[head_count..middle_end] {
-            if key_bytes + line.len() > key_budget {
-                break;
-            }
-            if is_key_line(line) {
-                key_lines.push(line);
-                key_bytes += line.len();
-            }
+    for (i, line) in lines.iter().enumerate().take(mid_end).skip(mid_start) {
+        if key_bytes + line.len() > key_budget {
+            break;
+        }
+        if is_key_line(line) {
+            key_idx.push(i);
+            key_bytes += line.len();
         }
     }
 
-    if head_count == 0 && tail_count == 0 && key_lines.is_empty() {
+    if head_cnt == 0 && tail_cnt == 0 && key_idx.is_empty() {
         // 首行本身就超预算：按字节切一行，避免返回空内容。
         return truncate_line_head(content, max_bytes).to_owned();
     }
-    if head_count + tail_count >= total_lines {
-        return content.to_owned();
+
+    // 关键行额度剩余时，从中间区两侧补给头/尾（跳过已选关键行，避免重复）。
+    // 顺序有意不对称：先让头侧吃满（读者看头优先），再给尾侧；两侧都放不下才停。
+    let key_set: std::collections::HashSet<usize> = key_idx.iter().copied().collect();
+    let mut leftover = key_budget.saturating_sub(key_bytes);
+    let mut extra_head: Vec<usize> = Vec::new();
+    let mut extra_tail: Vec<usize> = Vec::new();
+    let mut lo = mid_start;
+    let mut hi = mid_end;
+    while leftover > 0 && lo < hi {
+        while lo < hi && key_set.contains(&lo) {
+            lo += 1;
+        }
+        if lo >= hi || lines[lo].len() > leftover {
+            break;
+        }
+        extra_head.push(lo);
+        leftover -= lines[lo].len();
+        lo += 1;
+    }
+    while leftover > 0 && lo < hi {
+        while hi > lo && key_set.contains(&(hi - 1)) {
+            hi -= 1;
+        }
+        if hi <= lo || lines[hi - 1].len() > leftover {
+            break;
+        }
+        extra_tail.push(hi - 1);
+        leftover -= lines[hi - 1].len();
+        hi -= 1;
     }
 
-    let head: String = lines[..head_count].concat();
-    let tail: String = lines[total_lines - tail_count..].concat();
-    let omitted_lines = total_lines.saturating_sub(head_count + tail_count + key_lines.len());
-    let omitted_bytes = content
-        .len()
-        .saturating_sub(head_bytes + tail_bytes + key_bytes);
-
     let mut out = String::new();
-    out.push_str(&head);
-    if !key_lines.is_empty() {
+    for line in lines.iter().take(head_cnt) {
+        out.push_str(line);
+    }
+    for &i in &extra_head {
+        out.push_str(lines[i]);
+    }
+    if !key_idx.is_empty() {
         out.push_str("\n…（关键行：\n");
-        for line in &key_lines {
-            out.push_str(line);
-            if !line.ends_with('\n') {
+        for &i in &key_idx {
+            out.push_str(lines[i]);
+            if !lines[i].ends_with('\n') {
                 out.push('\n');
             }
         }
         out.push('）');
     }
+    let kept_lines = head_cnt + extra_head.len() + key_idx.len() + extra_tail.len() + tail_cnt;
+    let omitted_lines = n.saturating_sub(kept_lines);
+    let omitted_bytes = content.len().saturating_sub(out.len());
     out.push_str(&format!(
         "\n…（已采样：略去 {omitted_lines} 行 / {} 字节，完整原文见指针）\n",
         format_size(omitted_bytes)
     ));
-    out.push_str(&tail);
+    for &i in extra_tail.iter().rev() {
+        out.push_str(lines[i]);
+    }
+    for line in lines.iter().take(n).skip(mid_end) {
+        out.push_str(line);
+    }
     out
+}
+
+/// 按字节上限保留文本开头（列表读者看头更合理）：超限时在行边界截断并附略去说明。
+/// 返回 (正文, Some(保留行数))/未截断时 (原文, None)。与行数阈值互补，防「行数合规但字节超标」。
+pub fn clamp_head_bytes(content: &str, max_bytes: usize) -> (String, Option<usize>) {
+    if content.len() <= max_bytes {
+        return (content.to_owned(), None);
+    }
+    let mut out = String::new();
+    let mut bytes = 0usize;
+    let mut kept = 0usize;
+    for line in content.split_inclusive('\n') {
+        if bytes + line.len() > max_bytes {
+            break;
+        }
+        out.push_str(line);
+        bytes += line.len();
+        kept += 1;
+    }
+    if kept == 0 {
+        return (truncate_line_head(content, max_bytes).to_owned(), Some(0));
+    }
+    let total_lines = content.lines().count();
+    out.push_str(&format!(
+        "\n…（已按 {} 字节上限截断：保留前 {kept} 行 / 共 {total_lines} 行，原 {}）",
+        format_size(max_bytes),
+        format_size(content.len())
+    ));
+    (out, Some(kept))
 }
 
 /// 关键行判据：错误、异常、路径与退出线索。大小写不敏感，命中即保留。
@@ -436,6 +498,20 @@ mod tests {
     }
 
     #[test]
+    fn sample_ends_reclaims_unused_key_budget() {
+        // 无关键行时 1/5 的关键行额度应回收给头尾，输出接近满额而非只剩 4/5。
+        let mut text = String::new();
+        for i in 0..4000 {
+            text.push_str(&format!("line {i} padding padding padding padding\n"));
+        }
+        let r = sample_ends(&text, 32 * 1024);
+        assert!(r.len() >= 31 * 1024, "关键行额度应回收：{}", r.len());
+        assert!(r.len() <= 32 * 1024 + 512);
+        assert!(r.starts_with("line 0 "));
+        assert!(r.ends_with("line 3999 padding padding padding padding\n"));
+    }
+
+    #[test]
     fn sample_ends_keeps_error_lines_from_middle() {
         let mut text = String::new();
         for i in 0..3000 {
@@ -454,5 +530,15 @@ mod tests {
     fn sample_ends_returns_short_content_unchanged() {
         let text = "a\nb\nc";
         assert_eq!(sample_ends(text, 1024), text);
+    }
+
+    #[test]
+    fn clamp_head_bytes_returns_zero_when_first_line_exceeds() {
+        // 首行本身就超上限：无整行可留，回退按字节切一行并报 kept=0（提示调用方「保留 0 行」）。
+        let text = "x".repeat(200);
+        let (out, kept) = clamp_head_bytes(&text, 16);
+        assert_eq!(kept, Some(0));
+        assert_eq!(out.len(), 16);
+        assert!(out.bytes().all(|b| b == b'x'));
     }
 }

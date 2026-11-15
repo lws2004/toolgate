@@ -176,10 +176,13 @@ async fn stats_reports_totals_shapes_and_degradations() {
             >= 1,
         "stats={v}"
     );
-    assert!(
-        v["slots"]["rerank"]["unavailable"].as_u64().unwrap() >= 1,
-        "stats={v}"
-    );
+    // §7.3 状态真实性：未参与本次治理的槽位报「绑定态」（ready / unavailable 视配置而定），
+    // 不再一律记 unavailable，故这里只断言六键结构完整且 rerank 未被误标为实际调用。
+    for key in ["classify", "decide", "embedding", "rerank", "summarize", "vision"] {
+        assert!(v["slots"][key].is_object(), "stats={v}");
+    }
+    assert_eq!(v["slots"]["rerank"]["local"], 0, "stats={v}");
+    assert_eq!(v["slots"]["rerank"]["delegated"], 0, "stats={v}");
 
     let _ = std::fs::remove_file(&socket);
 }

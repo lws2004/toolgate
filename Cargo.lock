@@ -1148,6 +1148,7 @@ dependencies = [
  "hex",
  "ignore",
  "image",
+ "libc",
  "noyalib",
  "regex",
  "reqwest",
@@ -1168,6 +1169,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "toolgate-core",
+ "tracing",
 ]
 
 [[package]]

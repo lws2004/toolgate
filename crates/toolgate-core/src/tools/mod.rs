@@ -39,6 +39,9 @@ pub struct ToolContext {
     /// §17.2 路径穿越：read / write / edit / search 的文件路径必须落在这些根内。
     /// 默认只有工作目录；调用方按 paths.allowed_roots 注入扩大范围。
     pub allowed_roots: Vec<PathBuf>,
+    /// §8.11 路径呈现：由外部配置 paths.expose_absolute 注入，默认 false。
+    /// 仅 true 时工具层回传绝对路径（仍过 path_username 规则）。
+    pub expose_absolute: bool,
     pub spill: SpillStore,
     pub snapshots: SpillStore,
     pub limits: TruncationOptions,
@@ -60,11 +63,23 @@ impl ToolContext {
     /// 传入的形态，bash / task 的子进程工作目录与模型可见路径都按它表示。
     pub fn new(cwd: impl Into<PathBuf>) -> std::io::Result<Self> {
         let cwd = cwd.into();
-        let spill = SpillStore::with_default_dir()?;
-        let snapshots = SpillStore::new(cwd.join(".toolgate").join("snapshots"))?;
+        let mut spill = SpillStore::with_default_dir()?;
+        spill.set_policy(
+            crate::spill::DEFAULT_SPILL_TTL_DAYS,
+            crate::spill::DEFAULT_SPILL_MAX_BYTES,
+        );
+        let mut snapshots = SpillStore::new(cwd.join(".toolgate").join("snapshots"))?;
+        snapshots.set_snapshot_policy(
+            crate::spill::DEFAULT_SNAPSHOT_TTL_DAYS,
+            crate::spill::DEFAULT_SNAPSHOT_MAX_BYTES,
+            crate::spill::DEFAULT_SNAPSHOT_KEEP_PER_FILE,
+            crate::spill::DEFAULT_SNAPSHOT_MIN_RETENTION_HOURS,
+            crate::spill::DEFAULT_SNAPSHOT_MIN_FREE_BYTES,
+        );
         let allowed_roots = vec![std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone())];
         Ok(Self {
             allowed_roots,
+            expose_absolute: false,
             cwd,
             spill,
             snapshots,

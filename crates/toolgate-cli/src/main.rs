@@ -21,6 +21,7 @@ use toolgate_core::config::{
     ConfigError, ConfigErrors, ResolvedConfig, default_config_path, load_config,
 };
 use toolgate_core::locale::{Language, localize_value, tf};
+use toolgate_core::truncate::TruncationOptions;
 use toolgate_core::slm::{DecideOutcome, SlotCallError, SlotClient, SummarizeOutcome};
 use toolgate_core::slots::{
     ConfidenceGate, DecideInput, SlotKind, SummarizeInput, confidence_gate,
@@ -41,6 +42,7 @@ const USAGE: &str = "\
   config check          校验配置文件并打印六个槽位的最终绑定（§18.9）
   decide                调用 decide 槽位判定一次并打印概率与门控结论（调试用）
   summarize             调用 summarize 槽位摘要一段文本（调试用）
+  snapshot prune        按 snapshot 策略清理工作区快照（运维 / cron）
 
 选项:
   --config <路径>       指定配置文件路径（默认 ~/.toolgate/config.yaml）
@@ -73,6 +75,7 @@ Subcommands:
   config check          Validate the config file and print the six slot bindings (§18.9)
   decide                Run one decide-slot judgment and print probabilities and the gate
   summarize             Summarize a text with the summarize slot (debug only)
+  snapshot prune        Prune workspace snapshots per the snapshot policy (ops/cron)
 
 Options:
   --config <path>       Config file path (default ~/.toolgate/config.yaml)
@@ -147,11 +150,13 @@ impl SlotRow {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let default_level = early_log_level(&args);
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level)),
         )
         .init();
 
@@ -160,7 +165,6 @@ async fn main() -> ExitCode {
         Language::En => USAGE_EN,
         Language::Zh => USAGE,
     };
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else {
         eprintln!("{usage}");
         return ExitCode::FAILURE;
@@ -229,6 +233,42 @@ async fn main() -> ExitCode {
                         "{}",
                         tf(lang, "MCP server 异常退出：{e}", &[("e", e.to_string())])
                     );
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "snapshot" => {
+            let rest = &args[1..];
+            if rest.first().map(|s| s.as_str()) != Some("prune") {
+                eprintln!("{}", tf(lang, "snapshot 需要子命令 prune。", &[]));
+                return ExitCode::FAILURE;
+            }
+            let config_path = match parse_config_arg(lang, &rest[1..]) {
+                Ok(p) => p,
+                Err(code) => return code,
+            };
+            let (ctx, _rows) = match build_context(lang, config_path.as_deref()) {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
+            match ctx.snapshots.prune_now() {
+                Ok((before, after)) => {
+                    eprintln!(
+                        "{}",
+                        tf(
+                            lang,
+                            "快照清理完成：{before} → {after} 字节（释放 {freed}）",
+                            &[
+                                ("before", before.to_string()),
+                                ("after", after.to_string()),
+                                ("freed", before.saturating_sub(after).to_string()),
+                            ]
+                        )
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{}", tf(lang, "快照清理失败：{e}", &[("e", e.to_string())]));
                     ExitCode::FAILURE
                 }
             }
@@ -554,7 +594,7 @@ async fn run_decide(lang: Language, args: DecideArgs) -> ExitCode {
     }
 
     let cfg = match load_cli_config(lang, args.config_path.as_deref()) {
-        ConfigOutcome::Resolved(cfg) => cfg,
+        ConfigOutcome::Resolved(cfg) => *cfg,
         ConfigOutcome::Missing => {
             report_errors(
                 lang,
@@ -617,7 +657,7 @@ async fn run_summarize(lang: Language, args: SummarizeArgs) -> ExitCode {
     };
 
     let cfg = match load_cli_config(lang, args.config_path.as_deref()) {
-        ConfigOutcome::Resolved(cfg) => cfg,
+        ConfigOutcome::Resolved(cfg) => *cfg,
         ConfigOutcome::Missing => {
             report_errors(
                 lang,
@@ -926,6 +966,30 @@ fn usage_text(lang: Language) -> String {
     }
 }
 
+/// 启动期读取 --config 的 logging.level 作为默认日志级别（RUST_LOG 仍优先）。
+fn early_log_level(args: &[String]) -> String {
+    let mut cfg_path: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--config" {
+            if let Some(v) = args.get(i + 1) {
+                cfg_path = Some(PathBuf::from(v));
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(v) = args[i].strip_prefix("--config=") {
+            cfg_path = Some(PathBuf::from(v));
+        }
+        i += 1;
+    }
+    let path = cfg_path.unwrap_or_else(default_config_path);
+    match load_config(&path) {
+        Ok(Some(cfg)) => cfg.logging.level,
+        _ => "warn".to_owned(),
+    }
+}
+
 /// 构造工具上下文：按配置加载槽位客户端并注入（§18.1）。
 ///
 /// 配置文件不存在不是错误：槽位全空（slm = None），工具照常降级（§3.8）。
@@ -956,19 +1020,32 @@ fn build_context(
     };
     ctx.language = lang;
 
-    let (slm, rows, extra_roots) = match load_cli_config(lang, config_path) {
+    let (slm, rows, extra_roots, limits) = match load_cli_config(lang, config_path) {
         ConfigOutcome::Resolved(cfg) => {
+            let cfg = *cfg;
+            // §8.11 阶段4：路径呈现开关由外部配置注入工具上下文。
+            ctx.expose_absolute = cfg.paths.expose_absolute;
             let rows = SlotRow::from_config(&cfg);
             let roots = cfg.paths.allowed_roots.clone();
-            (Some(std::sync::Arc::new(SlotClient::new(cfg))), rows, roots)
+            let limits = TruncationOptions::new(cfg.limits.max_lines, cfg.limits.max_bytes);
+            ctx.spill.set_policy(cfg.spill.ttl_days, cfg.spill.max_bytes);
+            ctx.snapshots.set_snapshot_policy(
+                cfg.snapshot.ttl_days,
+                cfg.snapshot.max_bytes,
+                cfg.snapshot.keep_per_file,
+                cfg.snapshot.min_retention_hours,
+                cfg.snapshot.min_free_bytes,
+            );
+            (Some(std::sync::Arc::new(SlotClient::new(cfg))), rows, roots, limits)
         }
-        ConfigOutcome::Missing => (None, SlotRow::empty(), Vec::new()),
+        ConfigOutcome::Missing => (None, SlotRow::empty(), Vec::new(), TruncationOptions::default()),
         ConfigOutcome::Failed(errors) => {
             report_errors(lang, &errors, false);
             return Err(ExitCode::FAILURE);
         }
     };
     ctx.slm = slm;
+    ctx.limits = limits;
     // §17.2：配置的允许根是在「启动时工作目录」之上的追加，不是替换。
     if !extra_roots.is_empty() {
         ctx.set_allowed_roots(merge_allowed_roots(&ctx.allowed_roots, &extra_roots));
@@ -989,7 +1066,7 @@ fn merge_allowed_roots(defaults: &[PathBuf], extra: &[String]) -> Vec<PathBuf> {
 
 /// 加载配置的四种结局：解析成功 / 文件缺失 / 校验失败。
 enum ConfigOutcome {
-    Resolved(ResolvedConfig),
+    Resolved(Box<ResolvedConfig>),
     Missing,
     Failed(ConfigErrors),
 }
@@ -1005,7 +1082,7 @@ fn load_cli_config(lang: Language, config_path: Option<&Path>) -> ConfigOutcome 
     };
 
     match load_config(&path) {
-        Ok(Some(cfg)) => ConfigOutcome::Resolved(cfg),
+        Ok(Some(cfg)) => ConfigOutcome::Resolved(Box::new(cfg)),
         Ok(None) if explicit => ConfigOutcome::Failed(ConfigErrors {
             items: vec![ConfigError {
                 code: "CONFIG_FILE_NOT_FOUND".to_owned(),
@@ -1024,6 +1101,7 @@ fn load_cli_config(lang: Language, config_path: Option<&Path>) -> ConfigOutcome 
 fn run_config_check(lang: Language, config_path: Option<&Path>, json_out: bool) -> ExitCode {
     match load_cli_config(lang, config_path) {
         ConfigOutcome::Resolved(cfg) => {
+            let cfg = *cfg;
             let rows = SlotRow::from_config(&cfg);
             if json_out {
                 println!("{}", pretty_json(lang, &slots_json(&rows)));

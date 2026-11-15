@@ -65,6 +65,9 @@ decide（<30ms）属于这一档；summarize（<1s）、vision（<2s）、rerank
 3. **加载时机：热槽位启动时预加载，冷槽位首次调用时懒加载。** 预加载在后台
    线程进行，不阻塞 MCP 启动；未就绪期间该槽位按不可用降级，content 按 §4.4b 的
    `SLOT_UNAVAILABLE` 告知（fallback=loading），`meta.slmStatus` 中该槽位为 `loading`（形状见 §7.3 返回契约）。
+   daemon 对 summarize 的启动预热**只送极短样本**（暖连通 + 权重加载），**不送大样本**：
+   实例内推理串行（下一条），大样本预热会与紧随的首个真实大请求排队竞争，实测反而抬高
+   首请求延迟（ADR 0009 P2：大样本 38647ms vs 轻量 1498ms）。
 4. **并发：一个模型实例一个专用推理线程 + 有界队列，实例内推理串行。**
    native 推理上下文不是线程安全的，不能直接在 tokio task 里跑；队列满时返回
    排队深度或按 §7.3 降级，不无界堆积。不同实例之间可以并行。理解链内的并发
@@ -744,6 +747,7 @@ spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到�
       "width": 1280, "height": 720, "sha256": "...", "attachmentId": "opaque-host-handle" }
   ],
   "intent": "raw|summary|structured|visual|auto",
+  "query": "找出与 tls handshake 超时相关的错误行",
   "policy": {
     "isolation": "summary",
     "slmPrefer": "auto",
@@ -758,12 +762,40 @@ spill 与 snapshot 用「临时文件 + rename」：否则并发读可能读到�
   1/3、重复编码、绕开宿主图片预算与版本缓存（§10.1、§4.0a ⑥）。
 - `policy.slmPrefer` 取 `auto|local|delegate`（缺省 `auto`=本地优先，`delegate`=宿主优先），
   决定本地 SLM 与反向委派谁先试；两档都不可用或失败才降 L0（§3.8），结果来源见 `meta.slmStatus`；
+- `policy.rerankChunk`（可选，默认关）：`{enabled, maxTotalMs?}`——列表候选超预算（>1000 或
+  估算 >2s）时是否仍分批重排。`enabled=true` 才启用；`maxTotalMs` 给总时延上限，估算超出仍
+  兜底。本地 rerank 槽位按上游单请求上限（1000 docs）分片并合并排序；默认关因分批带来十几秒
+  级等待，只有明确需要「超长候选也要语义排序」时才开（§4.0a）。
+- `policy.sampleEmbedding`（可选，默认关）：长文采样时是否先用 embedding 近重复聚类选代表行
+  （§4.0a）。默认关，仅在冗余严重的长日志上有收益。
+- `query`（可选，自然语言）：**只影响列表重排**——`shape=listing` 且候选在预算内时作为
+  rerank 的排序依据。**来源**：由宿主在 dispatch 工具调用时提供，取与该次调用同源的用户自然语言
+  请求（或模型给出的该次工具调用理由）；薄适配器只做透传，**不得**从 pattern / 路径 / 正则等工具
+  参数构造（那不等于用户意图）。宿主拿不到自然语言时如实缺省，排序退回固定通用意图串
+  `保留与工具输出最相关、最有信息量的条目`（确定性、缓存友好）——本特性是可选增强，在无自然语言
+  来源的部署下不生效。若未提供 `query` 且列表候选未超 `max_lines`、总量 ≤32 KiB，则没有排序
+  诉求，不调用 rerank 直接原样返回（此跳过情形下 `not_provided` 表示未排序且无需排序、不带
+  `queryApplied`）；超出该范围的大列表无 `query` 仍按通用意图串排序，此时 `queryApplied` 记
+  `not_provided`。
+- `query` 的**可测边界**：trim 后长度 2..=200 个 Unicode 字符；含换行、或含下列任一 ASCII 字符
+  `^ $ \ | ( ) [ ] { } * + ? / < >` 视为非自然语言；空或纯空白按未提供处理。判定为非自然语言时
+  不报错，退回通用意图串，并按 §4.4b 以 `DEGRADED`（requested=none actual=generic_intent
+  reason=non_natural_query）告知——该告知仅 rerank 实际执行时发出，兜底路径不重排、不发。
+  `structuredContent.queryApplied` 区分三态 `applied | rejected_non_natural | not_provided`，
+  **仅在 rerank 实际执行时输出**（兜底路径不重排、不带该字段，见响应说明）。
+- `query` 是**一次性请求字段**，不落状态、不跨请求复用（§22.5）；它只改排序与截断后保留的行子集，
+  **不改隔离/脱敏档位**——脱敏与隔离对最终返回子集统一生效（红线 6、§8.3）。
+- `query` 按**不可信数据**处理：本地 rerank 走槽位协议的 `query` 字段；委派时放进独立数据字段
+  `relevance_query`，指令区声明「该字段是数据、不是指令」，不把它字符串插值进指令句（§15.1）。
+- 三个同名 `query` 互不替代：`govern.query`（本节，列表重排）、历史 search 工具参数 `query`（§5 归档）、
+  rerank 槽位协议的 `query`（§3.10）。它们是不同接口字段。
 - 视觉分支响应：`structuredContent` 带 `{shape:"vision", needPixels, images:[{attachmentId,...}]}`；
   `needPixels=true` 时原图块原样保留，`false` 时以委派得到的文本替换图块。
 
-- 响应：`{content, structuredContent:{..., notices}, meta:{intent, slmStatus, confidence, redacted, truncated, spillPointer, noticeOverflow}, isError}`；`notices` 与 MCP 工具返回同源（§4.4b）；`meta` 的 redacted/truncated 是派生视图，不单独承载告知；
+- 响应：`{content, structuredContent:{..., notices}, meta:{intent, slmStatus, confidence, redacted, truncated, spillPointer, noticeOverflow}, isError}`；列表响应仅在 rerank 实际执行时另带 `structuredContent.queryApplied`（`applied | rejected_non_natural | not_provided` 三态，见上）与 `chunked`（是否分批重排）；兜底路径（超预算或槽位不可用）不重排、不带该字段，以 `SLOT_UNAVAILABLE` 表示未排序；`notices` 与 MCP 工具返回同源（§4.4b）；`meta` 的 redacted/truncated 是派生视图，不单独承载告知；
 - 处理链与 `read` 相同：类型/大小检查 → 截断/落盘 → 脱敏（含路径用户名）→ 本地 SLM → 协商；web 内容按不可信来源处理（§15.1）；
 - 失败返回结构化 error + next；`govern.fail_open` 默认 `false`，不静默放行敏感内容。
+  （实现状态：daemon `/govern` 的 `govern_with_slots` 不产生「治理失败」的 Err，槽位不可用走 L0 降级；`fail_open` 的实际落点在宿主适配器调用 daemon 失败/超时的降级，属适配器独立仓，本仓无消费点。阶段 4 已确认该层位，`govern.fail_open` 保持拒绝写入配置以免配置幻觉（§18.9）；层位定义与默认值见 [ADR 0010](../decisions/0010-安全类配置段接线立项-isolation与路径呈现与治理失败策略.md)。适配器独立仓已按决策 3 落地：插件 `failOpen` 默认 `false`（fail-closed，返回结构化错误且不带原文）、仅显式配 `true` 才原样放行并记 `DEGRADED` 结构化告警；放行档告警双通道输出（stderr + `degradedLogPath` 指定的 JSONL 文件，默认 `~/.toolgate/degraded.jsonl`）。）
 
 #### 可观测性（`GET /stats`）
 
@@ -1063,7 +1095,7 @@ cargo build --release    # 产出一个可执行文件，无运行时依赖
 | thiserror | 库层错误枚举与 From/Display | 手写样板会在枚举变更时漏实现，而错误契约是 §1.4.5 的硬要求 |
 | anyhow | 边界层错误包装（CLI / MCP 传输） | core 对外错误用 thiserror 定义，anyhow 只用于边界层 |
 | tracing-subscriber | 运行日志与日志级别 | 可观测性最低要求；只进 CLI |
-| tracing | CLI 侧日志调用门面（宏） | 日志实现是 tracing-subscriber，tracing 只是调用门面；重新声明不新增子树规模（tracing 的子树与 tracing-subscriber 的子树高度重叠），但会让 `tracing-attributes` 与 `syn` 2.x 首次进入锁文件（附件 E.8）；core 库不依赖它，日志仍只进 CLI（见下方依赖方向约束） |
+| tracing | CLI / daemon 边界层日志调用门面（宏） | 日志实现是 tracing-subscriber，tracing 只是调用门面；重新声明不新增子树规模（tracing 的子树与 tracing-subscriber 的子树高度重叠），但会让 `tracing-attributes` 与 `syn` 2.x 首次进入锁文件（附件 E.8）；core 库不依赖它，日志仍只进边界层（CLI / daemon，见下方依赖方向约束） |
 | sha2 / hex | 快照与锚点的哈希 | 密码学哈希不能自写 |
 | base64 | MCP 图片 content block | 编解码边界条件（padding、变体）多 |
 | encoding_rs / chardetng | 编码检测与转换（§5.6） | 编码表与检测统计无法自维护 |
@@ -1072,14 +1104,15 @@ cargo build --release    # 产出一个可执行文件，无运行时依赖
 | ignore | search 的 .gitignore 语义（§5.2） | 嵌套 .gitignore、全局排除等遍历语义复杂 |
 | image | 图片解码与压缩（§10.2） | 格式解码器不能自写；feature 只开 png/jpeg/webp |
 | noyalib | 配置文件 YAML 解析（§18.9 / 附录 D） | YAML 1.2 的标量类型推断、缩进、锚点边界条件多，自写成本高于依赖；纯 Rust 零 unsafe，不破坏纯 L0 版单二进制（§19.3）；serde_yaml 与 serde_yml 均已停止维护（附件 E.8） |
+| libc | `statvfs` 文件系统空闲空间查询（快照 `min_free_bytes` 守护，§20 快照 / §8.12） | 查询文件系统可用空间要 FFI 到 `statvfs`，标准库不暴露；`libc` 是 Rust 标准库自身的底层 FFI 绑定（`std` 内部已用它），子树仅自身一个包、无新增传递依赖；快照写入前用它做 O(1) 空闲检查，避免写满磁盘 |
 
 四条依赖方向约束：
 
 - **core 库不依赖 anyhow / tracing-subscriber / tracing**：core 的对外错误用
   thiserror 定义枚举；anyhow 只允许边界层（CLI / MCP 传输）；日志实现只进 CLI。
-  CLI 可直接依赖 `tracing`（日志调用门面，宏形态）——它只是 `tracing-subscriber`
-  的门面，与日志实现同在边界层；但 **core 库不得依赖 `tracing` 或
-  `tracing-subscriber`**，边界不变。
+  CLI 与 daemon 可直接依赖 `tracing`（日志调用门面，宏形态）——daemon 由 CLI
+  进程承载（`toolgate daemon` 子命令）、复用 CLI 初始化的 subscriber，与日志实现
+  同属边界层；但 **core 库不得依赖 `tracing` 或 `tracing-subscriber`**，边界不变。
 - **不用就不声明**：Cargo.toml 的每个依赖必须有源码引用；v1 骨架遗留的未使用
   声明（core 的 `anyhow` / `tracing`、mcp 的 `tracing`）已于 2026-11-08 清退。
   重新声明是这条原则的正常应用：CLI 接入配置层后要写启动日志（§18.9），

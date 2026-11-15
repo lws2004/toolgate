@@ -25,4 +25,5 @@ ignore.workspace = true
 regex.workspace = true
 image.workspace = true
 noyalib.workspace = true
+libc.workspace = true
 reqwest = { workspace = true, optional = true }

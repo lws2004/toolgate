@@ -698,7 +698,7 @@ fn metadata_response(
     notices: Vec<Notice>,
     ctx: &ToolContext,
 ) -> ToolResponse {
-    let display = display_path(path, &ctx.cwd);
+    let display = display_path(path, &ctx.cwd, ctx.expose_absolute);
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("image");
     let channels = budgeted_notices(notices);
     let facts = metadata_facts(mime, meta.len(), width, height, &display);
@@ -731,7 +731,7 @@ async fn text_understanding_response(
     ctx: &ToolContext,
     bytes: &[u8],
 ) -> Result<ToolResponse, ToolError> {
-    let display = display_path(path, &ctx.cwd);
+    let display = display_path(path, &ctx.cwd, ctx.expose_absolute);
     let (width, height) = match dims {
         Some((w, h)) => (Some(w), Some(h)),
         None => (None, None),

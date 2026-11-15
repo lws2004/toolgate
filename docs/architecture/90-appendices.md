@@ -167,7 +167,7 @@ slm:
 
 ### 本版本已实现的配置段
 
-上表是**完整配置面**（架构的最终形态）；但**当前版本只实现并消费其中三段**。
+上表是**完整配置面**（架构的最终形态）；但**当前版本只实现并消费其中九段**。
 分段状态如下：
 
 | 配置段 | 状态 | 说明 |
@@ -176,13 +176,20 @@ slm:
 | `slots` | **已实现** | 槽位绑定解析：显式覆盖优先，否则按 `serves` 推导（§3.10） |
 | `slm` | **已实现** | 槽位运行参数：`mode` / `probe` / `disable_after_failures` / `embedded.*` / `http.base_url`（§18.1、§3.11） |
 | `paths.allowed_roots` | **已实现** | 文件访问允许根（§17.2）：默认 `[启动时工作目录]`，可追加扩大 |
-| `intent` / `isolation` / `paths.expose_absolute` / `limits` / `spill` / `snapshot` / `cache` / `logging` / `fetch` / `govern` | **配置参考，尚未接线** | 这些段与字段目前只有架构定义，还没有被运行时消费 |
+| `limits.max_lines` / `limits.max_bytes` | **已实现** | 双阈值截断（§9.1）：默认 2000 行 / 51200 字节；CLI 解析后注入 `ToolContext.limits`（`TruncationOptions`），bash/read/search/task 共用 |
+| `spill.ttl_days` / `spill.max_bytes` | **已实现** | 落盘副本存活天数与每工作区字节上限；`ToolContext.spill` 写入前做 TTL 清理与配额淘汰（§22.5 同源） |
+| `snapshot.*`（data / min_free_bytes / keep_per_file / min_retention_hours / ttl_days / max_bytes / gc_interval_hours） | **已实现（data / gc_interval_hours 除外）** | 写前快照生命周期 GC：每文件保留 N 份、最短保护期、TTL、每工作区上限（`SpillStore::set_snapshot_policy` + 写入时淘汰）；创建前 `statvfs` 空闲检查低于 `min_free_bytes` 拒绝创建；`snapshot prune` CLI 手动收敛；`data` 数据面与 `gc_interval_hours` 后台巡检留待后续（§20 快照） |
+| `logging.level` | **已实现** | 日志级别（默认 `warn`）：CLI 启动期按配置设定 `EnvFilter` 默认（`RUST_LOG` 仍优先）；daemon 日志已迁到 `tracing`，同受该级别控制（§19.6） |
+| `isolation.*`（default / max_exposure / rules / content_rules / fallback_chain / redact_min_retention） | **已实现（阶段1–4）** | §8.3 硬上限与 §8.6 回退：`config.rs` 解析并注入 `IsolationConfig`；daemon govern 入口 `govern_with_policy` 按 `effective = min(max_exposure, 请求级 isolation, 来源路径规则)` 算输出硬顶，`none` 档直接拒绝并告知，其余把 intent 收紧到不超过硬顶；默认 `max_exposure=raw` 向后兼容。脱敏执行链（含五种 `content_rules` 与 `fallback_chain` 逐级降级：`structure` 产真实骨架、`summarize` 接本地槽位产摘要、槽位不可用/无可提取结构继续降级）与 `paths.expose_absolute` 路径呈现已按阶段3/4 落地，见 ADR 0010 |
+| `intent` / `cache` / `fetch` / `govern` | **配置参考，尚未接线** | 这些段与字段目前只有架构定义，还没有被运行时消费 |
 
 **未接线段配了会被明确拒绝**：写入上表标记为「尚未接线」的段，配置校验按
 §18.9 的结构层失败处理，报出该段名并说明「当前版本未实现该配置段」的可行动
 错误，**不静默忽略**。理由与 §18.9 的未知字段拒绝同源：静默忽略会让用户以为配
 了会生效——配置幻觉（§18.9）。用户要这些能力时，先不写该段；等该段接线后自然
 生效，期间用架构正文记录的目标行为（默认值表）理解其语义。
+
+**安全类三段的接线**：`isolation` / `paths.expose_absolute` / `govern.fail_open` 触 §8 安全边界与 §2 红线 6（隔离强度外部可配、模型不能经 intent 绕过）。**`isolation` 阶段1–4 已落地**：配置解析 + `govern_with_policy` 的硬顶/`none` 拒绝/intent 收紧（阶段1+2）、`sensitivity.rs` 的脱敏执行链与 `content_rules` 落地（阶段3）、`paths.expose_absolute` 路径呈现（阶段4），经评审后分期实现，见 [ADR 0010](../decisions/0010-安全类配置段接线立项-isolation与路径呈现与治理失败策略.md)；**`govern.fail_open` 未接线**：实际落点在宿主适配器仓调用 daemon 失败/超时的降级（§18.7），本仓 `govern_with_slots` 无治理失败的 Err 分支，保持拒绝写入以免配置幻觉（§18.9）。五种 `content_rules`（含 `sensitive_path_mention` / `high_entropy`）与 `fallback_chain` 降级执行已接线：`govern_with_policy` 返回前统一逐级尝试「第一可行级」，`structure` 产真实骨架（键名/结构，值略去）、`summarize` 在本地槽位可用时产摘要、不可行则继续到 `refuse`，链耗尽 fail closed；降级不返回原文、按实际生效级改写 `ISOLATION_FALLBACK` 告知（reason 按实际情形），命中记 `meta.contentRedacted` / `meta.retention`。分期见 ADR 0010 与 [评审报告](../architecture-review-2026-11-15-adr0010.md)。
 
 **加载顺序**：CLI 参数 > 环境变量 `TOOLGATE_*` > 配置文件（`--config`，默认 `~/.toolgate/config.yaml`）> 内置默认。
 **缺省**：配置文件不存在时全部使用内置默认，不视为错误；存在但字段非法才 fail loud。

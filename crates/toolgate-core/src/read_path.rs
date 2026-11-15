@@ -593,7 +593,15 @@ pub fn image_chain() -> Vec<ChainNode> {
 }
 
 /// §8.11：模型可见路径默认工作区相对，工作区外不暴露绝对路径。
-pub fn display_path(path: &Path, cwd: &Path) -> String {
+///
+/// `expose_absolute` 来自外部配置 `paths.expose_absolute`（§2-6，模型不能经 intent
+/// 绕过）：仅 raw 类输出（工具层元信息路径）显式配 true 时回传绝对路径，且仍过
+/// `path_username` 规则（用户名→[USER]、主机→[HOST]、内网 IP→[IP]、临时目录→<tmp>）。
+/// none / understand 档不调用本函数，走 opaque 句柄。
+pub fn display_path(path: &Path, cwd: &Path, expose_absolute: bool) -> String {
+    if expose_absolute {
+        return crate::sensitivity::redact_identity(&path.display().to_string()).0;
+    }
     match path.strip_prefix(cwd) {
         Ok(rel) if !rel.as_os_str().is_empty() => format!("<workspace>/{}", rel.display()),
         _ => "<external>".to_owned(),
@@ -1153,10 +1161,25 @@ mod tests {
     fn display_path_is_workspace_relative() {
         let cwd = Path::new("/Users/me/project");
         assert_eq!(
-            display_path(Path::new("/Users/me/project/src/a.png"), cwd),
+            display_path(Path::new("/Users/me/project/src/a.png"), cwd, false),
             "<workspace>/src/a.png"
         );
-        assert_eq!(display_path(Path::new("/tmp/x.png"), cwd), "<external>");
+        assert_eq!(
+            display_path(Path::new("/tmp/x.png"), cwd, false),
+            "<external>"
+        );
+    }
+
+    /// §8.11 阶段4：expose_absolute=true 回传绝对路径，但用户名仍脱敏为 [USER]。
+    #[test]
+    fn display_path_exposes_absolute_with_identity_redacted() {
+        let cwd = Path::new("/Users/me/project");
+        let out = display_path(Path::new("/Users/alice/project/src/a.png"), cwd, true);
+        assert!(out.starts_with("/Users/[USER]/"), "out={out}");
+        assert!(!out.contains("alice"), "out={out}");
+        let external = display_path(Path::new("/Users/me/other/b.png"), cwd, true);
+        assert!(external.starts_with("/Users/[USER]/"), "out={external}");
+        assert!(!external.contains("/Users/me/"), "out={external}");
     }
 
     #[test]

@@ -58,7 +58,13 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
             Ok(old_bytes) => {
                 let enc = crate::encoding::FileEncoding::detect(&old_bytes);
                 let (old_text, _) = enc.decode(&old_bytes);
-                (enc, ctx.snapshots.snapshot(&path, &old_text).ok(), old_text)
+                let snap = ctx.snapshots.snapshot(&path, &old_text).map_err(|e| {
+                    ToolError::failed(format!(
+                        "{} 写入前快照失败，已拒绝写入：{e}",
+                        path.display()
+                    ))
+                })?;
+                (enc, Some(snap), old_text)
             }
             Err(_) => (
                 crate::encoding::FileEncoding::default(),
@@ -82,7 +88,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
 
     let lines = content.lines().count();
     // §5.7：改动后的事实，不含「你该跑什么」的指令；diff 超长时截断。
-    let diff = unified_diff(&original, content, &display_path(&path, &ctx.cwd));
+    let diff = unified_diff(&original, content, &display_path(&path, &ctx.cwd, ctx.expose_absolute));
     let diff_truncated = truncate_head(&diff, TruncationOptions::new(200, 40_000));
     let stats = diff_stats(&original, content);
     let file_facts = FileFacts {
@@ -93,7 +99,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     };
     let nearby = nearby_build_files(path.parent().unwrap_or_else(|| Path::new(".")));
     let facts = change_facts(
-        &display_path(&path, &ctx.cwd),
+        &display_path(&path, &ctx.cwd, ctx.expose_absolute),
         stats,
         file_facts,
         nearby,

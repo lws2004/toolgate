@@ -15,7 +15,7 @@
 | 视觉 | 含 image block / 图片魔数 | vision | 压缩 + OCR / 描述 + 判定 need_pixels |
 | 长文 | 超长文本 / ANSI 日志 / 行缓冲 | summarize | 双阈值截断 + 落盘指针 + 摘要 |
 | 错误 | isError / exit≠0 / stack | （L0 + decide） | fact / reason / nextSteps 三段（§1.4.4） |
-| 列表 | 大量行列表 / 命中清单 | rerank | 按意图重排 + 截断 |
+| 列表 | 大量行列表 / 命中清单 | rerank | 按 query（缺省通用意图串）重排 + 截断 |
 | 结构化 | 已是带 outputSchema 的 JSON | 归一 | 保留结构，仅补 meta / notices |
 | 元信息 | 二进制 / 未知 MIME | （无） | 路径 + 类型 + 大小，不瞎解析 |
 
@@ -28,19 +28,47 @@
 预算分工不同：槽位预算是选型与观测基线，不作运行时门控；本节是对一次工具结果的
 端到端等待约束。
 
-- **长文**：输入超 64 KiB 时先采样（头 + 尾 + 关键行）到 32 KiB 再送 summarize，
-  `intent=summary` 放宽到 120 KiB；完整原文一律落盘并回指针（§9.1）。先减输入再谈
-  超时——延迟随输入增长，调超时只会拉长等待。
-- **列表**：调用 rerank 前按候选数与实测延迟估算（约 100ms + 15ms/条），估算超 2s 或
-  候选 > 1000 时不调模型，直接头尾采样 + `max_lines` 截断（≤2000 行，毫秒级）；语义
-  排序只在搜索 / 多文档候选来源开启。不满足条件仍调模型属于「为了治理而治理」。
+- **长文**：送模型前两级减输入——先精确行去重（免费，重复行不占采样预算），再按去重后
+  体量判断：超 32 KiB 即采样（头 + 尾 + 关键行）到 32 KiB。完整原文一律落盘并回指针
+  （§9.1）。先减输入再谈超时——延迟随输入增长，调超时只会拉长等待。`intent=summary` 不再
+  放宽触发线：放宽到 120 KiB 会让近 100 KiB 原文全量进模型（实测约 42 s，采样到 32 KiB 后
+  同量级降到约 2.4 s），摘要意图同样要先减输入。采样按头 2/5、关键行 1/5、尾 2/5 分配，
+  关键行额度未用尽时回收给头尾（不让预算空转）。
+- **长文去重**：送 summarize 前先做输入去重——精确行去重（无模型成本），再在有界
+  窗口（≤800 行 / ≤32 KiB）内用 embedding 余弦聚类（阈值 0.92、批 ≤32）。只作用于送模型
+  的文本，不回写返回正文；embedding 不可用、形状不符或超窗口时保留精确去重结果。统计写
+  `structuredContent.dedup`（inputLines / uniqueLines / outputLines / batches）。
+- **按密度选行（可选，默认关）**：`policy.sampleEmbedding=true` 时，采样前先在有界窗口
+  （≤800 行）内用 embedding 近重复聚类选代表行，减少送模型的冗余；embedding 不可用或超
+  窗口时退回确定性头/尾/关键行采样。默认关——多一次 embed 调用，仅在冗余严重的日志上有收益。
+- **列表**：调用 rerank 前按候选数与实测延迟估算（约 100ms + 15ms/条 + 0.005ms/字节），估算超 2s 或
+  候选 > 1000 时默认不调模型，直接头尾采样 + `max_lines` 截断（≤2000 行，毫秒级）；显式
+  开启 `policy.rerankChunk`（默认关）时允许超预算分批重排（本地槽位按上游单请求上限分片），
+  `maxTotalMs` 给总时延上限、超出仍兜底。候选未超 `max_lines`、总量 ≤32 KiB 且请求无 `query`
+  时没有排序诉求，原样返回、不调 rerank；其余在预算内（≤1000 候选且估算 ≤2s）即调 rerank，
+  不区分来源，无 `query` 时用固定通用意图串排序。**已知边界**：32 KiB 跳过只覆盖「≤max_lines
+  且无 query」的小列表；少行而单行很长的列表（如 120 行 × 330B ≈ 39 KiB）虽 ≤max_lines 但
+  超 32 KiB，仍进预算判定。预算估算已含字节项（100ms + 15ms/条 + 0.005ms/字节，ADR 0009 P1），
+  39 KiB/120 行估算越 2s 预算 → 走确定性兜底（实测 4952ms → 1ms）。正文字节上限：兜底与
+  rerank 输出都按 32 KiB 头截断，防「行数
+  合规但字节超标」（3000 行 × ~34B 的行数截断后仍可能约 68 KiB）。排序依据
+  取请求的可选 `query`（自然语言，来源与可测边界见 §18.7）；缺省时用固定通用意图串
+  `保留与工具输出最相关、最有信息量的条目`（确定性、缓存友好）。`query` 提供了但不像
+  自然语言时同样退回该串，并按 §4.4b 以 `DEGRADED`（requested=none actual=generic_intent
+  reason=non_natural_query）告知，不退化为报错——该告知与 `structuredContent.queryApplied`
+  都只在 rerank 实际执行时出现；兜底（超预算或槽位不可用）不重排、不发 `DEGRADED`
+  （只发 `SLOT_UNAVAILABLE`，§4.4b 第 1 条）、不带 `queryApplied`。rerank 不可用时一律
+  确定性兜底，不降级到 embedding（§3.8）。
 - **错误**：短错误逐字保真；超 32 KiB 走上面的确定性压缩，不走模型。
 
 **免白名单三条**：① 截获是**全局钩子**（每次工具 dispatch 必过），不需登记装了哪些工具；
 ② 路由看**返回形状**不看工具名，新工具自动覆盖；③ 形状不识别 → **退回纯 L0 治理**（机械
 截断 / 落盘 / 脱敏 / 错误可行动化），不瞎摘要——未知形状不会出错，只是增强得少（§3.8 同构）。
 三级信号：确定性命中 → 返回自带 `structuredContent` / `outputSchema` → 仍模糊才交 classify /
-decide 按内容判。完整论证见提案 §5。
+decide 按内容判。classify 的判定须与体量自洽，否则退回确定性结论：`long_text` 是纯体量属性，
+确定性嗅探已排除超阈值长文，故 `pass_through` 下的 `long_text` 标签一律视为误判丢弃；`listing`
+须至少 20 个非空行（与确定性 `looks_like_listing` 同门槛）；`error` 可因错误标记出现在前 8 行
+之外而被确定性漏检，予以放行。完整论证见提案 §5。
 
 **视觉处理器约束（OCR / 描述档）**：视觉处理器把图片转成文本或结构时，遵守：
 
@@ -100,6 +128,10 @@ decide 按内容判。完整论证见提案 §5。
 
 **适用范围**：write / edit 不产生需要理解的大块内容（§4.0），它们的 intent 只做统一
 校验与 `meta.intent` 标注，不切换输出形态——输出固定为写入事实 / diff 与失败归因。
+
+**与 `query` 的区别**：列表重排另接受请求级可选 `query`（自然语言，§18.7），它是**排序
+轴**，与 intent 的输出形态偏好正交——intent 决定「返回多细」，query 决定「先返回哪几行」。
+query 不是 intent，intent 也不能承载语义查询；两者都不改变隔离档位（红线 6）。
 
 ### 4.3 协商结果必须可预测
 
@@ -197,7 +229,8 @@ content 由固定模板渲染，structuredContent 原样携带同一份 `notices
 - `reason` 只允许有限枚举，禁止自由文本（见「敏感信息」）。
 
 **枚举值域**：
-- `DEGRADED.requested` / `actual`：输出形态 `raw` / `summary` / `structured` / `visual` / `none`；`actual` 另可 `metadata` / `compressed`；
+- `DEGRADED.requested` / `actual`：输出形态 `raw` / `summary` / `structured` / `visual` / `none`；`actual` 另可 `metadata` / `compressed` / `generic_intent`（列表重排的 query 不像自然语言、退回固定通用意图串时，requested 记 `none`）；
+- `DEGRADED.reason`：`capability_missing` / `upstream_no_vision` / `latency_over_budget` / `lossy_compression` / `compression_exceeded` / `non_natural_query`（最后一项对应「query 收到但不像自然语言、改用通用意图串」，§18.7）；
 - `ISOLATION_FALLBACK.requested`：隔离档位 `none` / `understand` / `summary` / `raw`；`actual`：回退动作 `redact` / `structure` / `summarize` / `refuse`；
 - `unit`：`lines` / `bytes`；`views`：`both` / `local`；`fallback`：`metadata` / `text` / `mechanical` / `loading`；
 - `SLOT_UNAVAILABLE.reason`：`unbound`（没有能服务该槽位的模型）/ `source_slot_mismatch`（来源×槽位在能力矩阵里不可用）/ `no_client`（当前构建未含该来源的协议客户端）/ `disabled`（连续失败被禁用）/ `call_failed`（本次调用失败或超时，槽位本身仍可用）。它是**可执行下一步的判据**：前两者改配置，`no_client` 重编译（`--features external-protocols`），`disabled` 等恢复或换模型，`call_failed` 检查模型服务监听与地址后重试；

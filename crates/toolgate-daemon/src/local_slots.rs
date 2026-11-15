@@ -7,12 +7,18 @@ use std::cmp::Ordering;
 use std::future::Future;
 use std::sync::Arc;
 
+use serde_json::{Value, json};
+use toolgate_core::capability::SlotBlocker;
 use toolgate_core::govern::LocalSlots;
 use toolgate_core::slm::SlotClient;
-use toolgate_core::slots::{ClassifyInput, RerankInput, RerankResult, SummarizeInput};
+use toolgate_core::slots::{
+    ClassifyInput, EmbeddingInput, RerankInput, RerankResult, SlotKind, SummarizeInput,
+};
 
 /// 上游 /v1/rerank 单请求文档上限（jina 服务 --rerank-max-documents 实测 1000）。
 const RERANK_BATCH_DOCUMENTS: usize = 1000;
+/// embedding 契约单请求文本上限（slots.rs validate 约束 1..=32）。
+const EMBEDDING_BATCH: usize = 32;
 
 /// 本地槽位后端：持 SlotClient 与专属 Runtime。
 pub struct LocalSlotBackend {
@@ -34,6 +40,8 @@ impl LocalSlotBackend {
     }
 
     /// 预热 summarize 模型：冷启可能 20s 级，daemon 启动后后台调用一次。
+    /// 只送极短样本暖「连通 + 权重加载」；不送大样本——实测大样本会占用 GPU、
+    /// 与紧随其后的首个真实大请求串行竞争，反而抬高冷启（ADR 0009 P2 实测证伪）。
     pub fn prewarm(&self) {
         let client = Arc::clone(&self.client);
         let rt = Arc::clone(&self.rt);
@@ -99,16 +107,22 @@ impl LocalSlots for LocalSlotBackend {
         }
     }
 
-    fn rerank(&self, text: &str, limit: usize) -> Option<String> {
+    fn rerank(&self, query: &str, text: &str, limit: usize) -> Option<String> {
         let documents: Vec<String> = text.lines().map(str::to_owned).collect();
         if documents.is_empty() {
             return None;
         }
+        // §18.7：用请求携带的自然语言 query 打分；空串退回 core 的默认意图串。
+        let query_owned = if query.trim().is_empty() {
+            toolgate_core::govern::DEFAULT_RERANK_QUERY.to_owned()
+        } else {
+            query.to_owned()
+        };
         // §6.4 输入有界：按上游单请求文档上限分片，逐批取回分数后全局合并排序。
         let mut batches: Vec<(usize, Vec<RerankResult>)> = Vec::new();
         for (offset, chunk) in documents.chunks(RERANK_BATCH_DOCUMENTS).enumerate() {
             let input = RerankInput {
-                query: "保留与工具输出最相关、最有信息量的条目".to_owned(),
+                query: query_owned.clone(),
                 documents: chunk.to_vec(),
                 top_n: None,
             };
@@ -130,6 +144,47 @@ impl LocalSlots for LocalSlotBackend {
         } else {
             Some(picked.join("\n"))
         }
+    }
+
+    /// embedding 槽位：按契约上限分批取向量；任一批失败或维度不齐按不可用返回。
+    fn embed(&self, texts: &[String]) -> Option<Vec<Vec<f64>>> {
+        if texts.is_empty() {
+            return None;
+        }
+        let mut vectors: Vec<Vec<f64>> = Vec::new();
+        for chunk in texts.chunks(EMBEDDING_BATCH) {
+            let input = EmbeddingInput {
+                texts: chunk.to_vec(),
+            };
+            let client = Arc::clone(&self.client);
+            let out = self
+                .run(async move { client.embedding(&input).await.ok() })
+                .flatten()?;
+            vectors.extend(out.output.vectors);
+        }
+        if vectors.len() != texts.len() {
+            return None;
+        }
+        // 维度不一致时 cosine 会退化为 0（等于没去重），按不可用处理让调用方保留精确去重。
+        let dim = vectors.first()?.len();
+        if vectors.iter().any(|vector| vector.len() != dim) {
+            return None;
+        }
+        Some(vectors)
+    }
+
+    /// 六槽位可用性快照（§7.3 四态）：阻塞判定解出 ready / degraded / unavailable。
+    fn slot_status(&self) -> Option<Value> {
+        let mut map = serde_json::Map::new();
+        for slot in SlotKind::ALL {
+            let state = match self.client.slot_blocker(slot) {
+                None => "ready",
+                Some(SlotBlocker::Disabled) => "degraded",
+                Some(_) => "unavailable",
+            };
+            map.insert(slot.as_str().to_owned(), json!(state));
+        }
+        Some(Value::Object(map))
     }
 }
 

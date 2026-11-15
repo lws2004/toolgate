@@ -46,18 +46,45 @@ pub async fn dedup_all(ctx: &ToolContext, text: &str) -> Option<Outcome> {
     dedup_lines(ctx, text).await
 }
 
-async fn dedup_lines(ctx: &ToolContext, text: &str) -> Option<Outcome> {
-    let lines: Vec<&str> = text.lines().collect();
-    if !(MIN_LINES..=MAX_LINES).contains(&lines.len()) {
-        return None;
-    }
+/// 精确行去重：保持首次出现顺序，无模型成本。
+pub fn unique_lines(text: &str) -> Vec<&str> {
     let mut seen = HashSet::new();
     let mut unique: Vec<&str> = Vec::new();
-    for line in &lines {
-        if seen.insert(*line) {
-            unique.push(*line);
+    for line in text.lines() {
+        if seen.insert(line) {
+            unique.push(line);
         }
     }
+    unique
+}
+
+/// 余弦聚类：每簇保留首行；向量数与行数不符时返回 None（调用方回退）。
+pub fn cluster_representatives<'a>(
+    unique: &[&'a str],
+    vectors: &[Vec<f64>],
+    threshold: f64,
+) -> Option<Vec<&'a str>> {
+    if vectors.len() != unique.len() || unique.is_empty() {
+        return None;
+    }
+    let mut representatives: Vec<(Vec<f64>, &'a str)> = Vec::new();
+    for (line, vector) in unique.iter().zip(vectors.iter()) {
+        let near_duplicate = representatives
+            .iter()
+            .any(|(representative, _)| cosine(vector, representative) >= threshold);
+        if !near_duplicate {
+            representatives.push((vector.clone(), line));
+        }
+    }
+    Some(representatives.into_iter().map(|(_, line)| line).collect())
+}
+
+async fn dedup_lines(ctx: &ToolContext, text: &str) -> Option<Outcome> {
+    let input_lines = text.lines().count();
+    if !(MIN_LINES..=MAX_LINES).contains(&input_lines) {
+        return None;
+    }
+    let unique = unique_lines(text);
     if unique.len() < 2 {
         return None;
     }
@@ -73,29 +100,12 @@ async fn dedup_lines(ctx: &ToolContext, text: &str) -> Option<Outcome> {
         vectors.extend(outcome.output.vectors);
         batches += 1;
     }
-    if vectors.len() != unique.len() {
-        return None;
-    }
+    let representatives = cluster_representatives(&unique, &vectors, THRESHOLD)?;
 
-    let mut representatives: Vec<(Vec<f64>, &str)> = Vec::new();
-    for (line, vector) in unique.iter().zip(vectors.iter()) {
-        let near_duplicate = representatives
-            .iter()
-            .any(|(representative, _)| cosine(vector, representative) >= THRESHOLD);
-        if !near_duplicate {
-            representatives.push((vector.clone(), line));
-        }
-    }
-
-    let text = representatives
-        .iter()
-        .map(|(_, line)| *line)
-        .collect::<Vec<_>>()
-        .join("\n");
     Some(Outcome {
-        text,
+        text: representatives.join("\n"),
         stats: Stats {
-            input_lines: lines.len(),
+            input_lines,
             output_lines: representatives.len(),
             batches,
         },
@@ -137,5 +147,25 @@ mod tests {
     #[test]
     fn mismatched_dimensions_are_zero() {
         assert_eq!(cosine(&[1.0], &[1.0, 2.0]), 0.0);
+    }
+
+    #[test]
+    fn unique_lines_keeps_first_occurrence_order() {
+        assert_eq!(unique_lines("a\nb\na\nc\nb"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn cluster_representatives_merges_near_duplicates() {
+        let unique = vec!["x", "y", "z"];
+        let vectors = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![0.999, 0.001]];
+        let got = cluster_representatives(&unique, &vectors, 0.92).unwrap();
+        assert_eq!(got, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn cluster_representatives_rejects_length_mismatch() {
+        let unique = vec!["x", "y"];
+        let vectors = vec![vec![1.0, 0.0]];
+        assert!(cluster_representatives(&unique, &vectors, 0.92).is_none());
     }
 }

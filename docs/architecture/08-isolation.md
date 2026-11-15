@@ -439,5 +439,18 @@ isolation:
 
 回传绝对路径会泄露目录结构、用户名、项目名。模型可见路径默认一律工作区相对路径（`<workspace>/...`）；工作区外用 `<external>/...`。用户名段替换为 `[USER]`，主机名替换为 `[HOST]`，内网 IP 替换为 `[IP]`。`none` / `understand` 档用 opaque 句柄（`spill://<hash>`）；`raw` 档只有显式配置 `paths.expose_absolute: true` 才返回绝对路径，且仍要过 `path_username` 规则。
 
+### 8.13 工具层实现状态（2026-11-15）
+
+本节描述目标形态；**当前工具层只落地了其中一部分**，接线进度以 [implementation-status.md](../implementation-status.md) 与 [ADR 0010](../decisions/0010-安全类配置段接线立项-isolation与路径呈现与治理失败策略.md) 为准：
+
+- **决策结构**：`crates/toolgate-core/src/decision.rs` 的 `decide_output` 实现 `effective = min(max_exposure, path_rule.level)`、`isolation_refused`、回退链取首步。
+- **治理主路径（阶段1+2 已接线）**：`crates/toolgate-core/src/govern.rs` 新增 `govern_with_policy`，daemon `/govern` 走它：按 `IsolationConfig` 算 `effective = min(max_exposure, 请求级 isolation, 来源路径规则)` 输出硬顶，`none` 档直接拒绝并告知（`isolationRefused`），其余把 intent 收紧到不超过硬顶（复用 `decide_output`）。旧 `govern`/`govern_with_slots` 签名不变，默认 `max_exposure=raw` 向后兼容。
+- **配置**：`crates/toolgate-core/src/config.rs` 已解析并消费 `isolation.*`（default / max_exposure / rules / content_rules / fallback_chain / redact_min_retention）与 `paths.expose_absolute`（布尔，默认 `false`，非法值 fail loud），分别注入 daemon `ServerCtx` 与 CLI `ToolContext`；`govern.fail_open` 仍拒绝写入（层位见 §18.7）。
+- **阶段3 已接线（脱敏与内容规则执行链）**：`sensitivity.rs` 新增 `redact_secrets` / `redact_identity`（用户名→`[USER]`、主机→`[HOST]`、内网 IP→`[IP]`、临时目录→`<tmp>`）与 `redact_high_entropy`（Shannon 熵 > 4.5、长度 ≥ 20 且字母数字混合的 token→`[REDACTED]`）；`govern_with_policy` 返回前按 `content_rules` 改写 content，五种 kind 全部执行——`sensitive_path_mention` 复用 `IsolationConfig::path_rule_for` 判敏感路径提及、`high_entropy` 走 `redact_high_entropy`，命中记 `meta.contentRedacted`；命中后按 `fallback_chain` 逐级降级（`redact` 仅在脱敏后保留率 ≥ `redact_min_retention` 时采纳，否则 `structure` / `summarize` / `refuse`，链耗尽 fail closed 拒绝），降级不返回原文：`structure` 档给真实结构化骨架（行数 / 可识别键名，值一律略去；纯散文提取不到结构即跳过该级）、`summarize` 档在本地 summarize 槽位可用时给摘要（槽位不可用继续降级）、`refuse` 档只给一行结构化告知（行数 / 字节数 / 命中规则）；`ISOLATION_FALLBACK` 的 actual 改为实际生效级，reason 按实际情形改写 `redact_optimal` / `retention_below_threshold` / `no_redactable_pattern`，命中记 `meta.retention`。7 个回归单测（阶段3 5 个 + 回退链逐级落地 2 个）。
+- **阶段4 已接线（路径呈现）**：`read_path.rs` 的 `display_path` 增加 `expose_absolute` 参数（由 `ToolContext.expose_absolute` 注入，默认 `false`）：false 保持工作区相对 / `<external>`，true 回传绝对路径且仍过 `path_username` 规则；read / write / edit 共 7 处调用点透传。`none` / `understand` 档走 opaque 句柄，不调用本函数。
+- **未接线**：`govern.fail_open` 的实际落点在宿主适配器仓（daemon `govern_with_slots` 不产生治理失败的 Err，§18.7），本仓无消费点，保持拒绝写入以免配置幻觉（§18.9）。
+- 分期见 [ADR 0010](../decisions/0010-安全类配置段接线立项-isolation与路径呈现与治理失败策略.md)。
+- 评审与分期见 [architecture-review-2026-11-15-adr0010.md](../architecture-review-2026-11-15-adr0010.md)。
+
 ---
 

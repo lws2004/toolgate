@@ -150,7 +150,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
             let result = apply_text_mode(
                 &original,
                 edits,
-                &display_path(&path, &ctx.cwd),
+                &display_path(&path, &ctx.cwd, ctx.expose_absolute),
                 decider.as_ref().map(|decider| decider as &dyn EditDecider),
             )
             .await?;
@@ -162,8 +162,13 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         return Ok(ToolResponse::text(t(lang, "内容未变化，未写入。")));
     }
 
-    // 落盘前留一份原文，供回滚。
-    let snapshot = ctx.snapshots.snapshot(&path, &original).ok();
+    // 落盘前留一份原文，供回滚；快照失败则拒绝写入（§20.2）。
+    let snapshot = Some(ctx.snapshots.snapshot(&path, &original).map_err(|e| {
+        ToolError::failed(format!(
+            "{} 写入前快照失败，已拒绝写入：{e}",
+            path.display()
+        ))
+    })?);
 
     // §5.4 写前复核：指纹与读时不一致即拒绝，不做三方合并（§18.5）。
     stamp.verify(&path).await?;
@@ -174,7 +179,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
         .map_err(|e| ToolError::failed(format!("{} 写回失败：{e}", path.display())))?;
     tokio::fs::write(&path, &out_bytes).await?;
 
-    let diff = unified_diff(&original, &updated, &display_path(&path, &ctx.cwd));
+    let diff = unified_diff(&original, &updated, &display_path(&path, &ctx.cwd, ctx.expose_absolute));
     let snapshot_meta = snapshot
         .as_ref()
         .map(|s| json!(s.path.display().to_string()))
@@ -190,7 +195,7 @@ pub async fn run(args: &Value, ctx: &ToolContext) -> Result<ToolResponse, ToolEr
     };
     let nearby = nearby_build_files(path.parent().unwrap_or_else(|| Path::new(".")));
     let facts = change_facts(
-        &display_path(&path, &ctx.cwd),
+        &display_path(&path, &ctx.cwd, ctx.expose_absolute),
         stats,
         file_facts,
         nearby,

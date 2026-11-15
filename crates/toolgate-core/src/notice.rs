@@ -47,6 +47,8 @@ pub enum DegradedActual {
     None,
     Metadata,
     Compressed,
+    /// 列表重排的 query 不像自然语言，排序退回固定通用意图串（§18.7）。
+    GenericIntent,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -137,6 +139,8 @@ pub enum DegradeReason {
     LatencyOverBudget,
     LossyCompression,
     CompressionExceeded,
+    /// 请求带了 query 但不像自然语言，排序退回通用意图串（§18.7）。
+    NonNaturalQuery,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]

@@ -1491,6 +1491,11 @@ fn systemone_config() -> ResolvedConfig {
         }],
         slots: BTreeMap::new(),
         paths: Default::default(),
+        limits: Default::default(),
+        spill: Default::default(),
+        snapshot: Default::default(),
+        logging: Default::default(),
+        isolation: Default::default(),
         slm: SlmConfig {
             mode: None,
             probe: None,

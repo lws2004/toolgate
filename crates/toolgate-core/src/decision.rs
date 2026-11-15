@@ -7,6 +7,8 @@
 //! 第一段 decide_output 的输入契约尚不完整（§4.5 的 7 个参数未列
 //! fallback_chain，但决策规则与属性测试都依赖它），需先与架构对齐后实现。
 
+use serde::{Deserialize, Serialize};
+
 use crate::notice::{
     AdapterKind, ConfidenceViews, DegradeReason, DegradedActual, NormalizeKind, NormalizeLevel,
     Notice, OutputShape, SniffActual, TruncUnit, sort_notices,
@@ -360,7 +362,8 @@ pub enum Intent {
 }
 
 /// 四档隔离强度（§8.1），按「暴露量」递增：None 最严、Raw 最宽。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExposureLevel {
     None,
     Understand,
@@ -369,7 +372,8 @@ pub enum ExposureLevel {
 }
 
 /// 四级回退动作（§8.6），信息量从多到少。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FallbackStep {
     Redact,
     Structure,
@@ -377,7 +381,8 @@ pub enum FallbackStep {
     Refuse,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContentRuleKind {
     SecretPattern,
     SensitivePathMention,
@@ -386,13 +391,13 @@ pub enum ContentRuleKind {
     HighEntropy,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PathRule {
     pub glob: String,
     pub level: ExposureLevel,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContentRule {
     pub kind: ContentRuleKind,
     pub level: FallbackStep,
@@ -473,7 +478,7 @@ fn isolation_level(l: ExposureLevel) -> IsolationLevel {
     }
 }
 
-fn fallback_action(step: FallbackStep) -> FallbackAction {
+pub(crate) fn fallback_action(step: FallbackStep) -> FallbackAction {
     match step {
         FallbackStep::Redact => FallbackAction::Redact,
         FallbackStep::Structure => FallbackAction::Structure,

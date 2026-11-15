@@ -404,6 +404,7 @@ crate），`[workspace.dependencies]` 直接依赖 18 个；默认构建依赖�
 | tracing | 11 | image | 23 |
 | sha2 | 11 | noyalib | 12 |
 | hex | 1 | reqwest | **79**（可选层） |
+| libc | 1 | | |
 
 **审计命令**：
 
@@ -412,6 +413,8 @@ cargo tree --duplicates                       # 同名多版本
 cargo tree --prefix none | sort -u | wc -l    # 默认构建依赖规模
 cargo tree -p <crate> --prefix none | sort -u | wc -l   # 单个依赖的子树
 ```
+
+**2026-11-15 新增 `libc` 为默认层直接依赖**（快照 `min_free_bytes` 用 `statvfs` 做空闲检查，§20 / §19.6）：`libc` 早已在 `Cargo.lock`（v0.2.191）且子树仅自身 1 个包，无新增传递包；它作为 std 自身的底层 FFI 绑定进入直接依赖，不扩大默认构建规模。daemon 日志改用 `tracing` 门面不新增依赖（`tracing` 已在默认层、workspace 已声明）。
 
 **2026-11-09 现状**：`--duplicates` 有两组同名多版本：
 

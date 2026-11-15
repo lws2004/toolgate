@@ -16,6 +16,7 @@ use noyalib::{Mapping, Value as YamlValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
+use crate::decision::{ContentRule, ContentRuleKind, ExposureLevel, FallbackStep, PathRule};
 use crate::locale::Language;
 use crate::slots::SlotKind;
 
@@ -286,12 +287,212 @@ pub struct SlmConfig {
     pub http: Option<HttpConfig>,
 }
 
-/// 路径语义配置（§17.2 / 附录 D）。只接线 allowed_roots；expose_absolute 等字段尚未接线。
+/// 路径语义配置（§17.2 / §8.11 / 附录 D）。
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PathsConfig {
     /// 文件访问允许根（§17.2）：read / write / edit / search 的路径必须落在其中。
     /// 缺省空 = 只用启动时工作目录。
     pub allowed_roots: Vec<String>,
+    /// §8.11 路径呈现：默认 false，模型可见路径一律工作区相对；
+    /// 仅 raw 类输出显式配 true 才回传绝对路径（仍过 path_username 规则）。
+    /// 由外部配置决定（§2-6），模型不能经 intent 绕过。
+    pub expose_absolute: bool,
+}
+
+/// 隔离策略配置（§8 / 附录 D）：isolation.* 段。
+///
+/// 缺省值取自附录 D：default=summary、max_exposure=raw、内置路径规则、内容规则
+/// redact、回退链 redact→structure→summarize→refuse、保留率 0.5。消费点：daemon
+/// govern 入口（govern_with_policy）按本策略算输出硬顶，none 档拒绝、其余把 intent
+/// 收紧到不超过硬顶（§8.3 模型不能经 intent 绕过外部隔离配置）。
+#[derive(Debug, Clone, Serialize)]
+pub struct IsolationConfig {
+    /// 默认隔离档（intent 为 auto 时采用）。
+    pub default: ExposureLevel,
+    /// 外部策略硬上限（§8.3）。
+    pub max_exposure: ExposureLevel,
+    /// 路径规则：命中即把该来源的硬顶收紧到规则 level。
+    pub rules: Vec<PathRule>,
+    /// 内容规则（§8.11）：命中即走对应回退动作。
+    pub content_rules: Vec<ContentRule>,
+    /// 脱敏无意义时的降级顺序（§8.6）。
+    pub fallback_chain: Vec<FallbackStep>,
+    /// 脱敏后保留率下限（低于此值降级）。
+    pub redact_min_retention: f32,
+}
+
+impl Default for IsolationConfig {
+    fn default() -> Self {
+        Self {
+            default: ExposureLevel::Summary,
+            max_exposure: ExposureLevel::Raw,
+            rules: vec![
+                PathRule { glob: ".env*".to_owned(), level: ExposureLevel::None },
+                PathRule { glob: "secrets/**".to_owned(), level: ExposureLevel::None },
+                PathRule { glob: "*.log".to_owned(), level: ExposureLevel::Summary },
+            ],
+            content_rules: vec![
+                ContentRule { kind: ContentRuleKind::SecretPattern, level: FallbackStep::Redact },
+                ContentRule { kind: ContentRuleKind::PathUsername, level: FallbackStep::Redact },
+                ContentRule { kind: ContentRuleKind::HostMetadata, level: FallbackStep::Redact },
+            ],
+            fallback_chain: vec![
+                FallbackStep::Redact,
+                FallbackStep::Structure,
+                FallbackStep::Summarize,
+                FallbackStep::Refuse,
+            ],
+            redact_min_retention: 0.5,
+        }
+    }
+}
+
+impl IsolationConfig {
+    /// 按请求级 isolation 覆盖与硬上限算有效硬顶（§8.3）：只能收紧不能放宽。
+    pub fn effective_cap(&self, requested: Option<ExposureLevel>) -> ExposureLevel {
+        match requested {
+            Some(level) => level.min(self.max_exposure),
+            None => self.max_exposure,
+        }
+    }
+
+    /// 按来源路径匹配内置/追加路径规则，返回最严（level 最小）的命中规则。
+    /// 不含 '/' 的模式（如 `.env*` / `*.log`）按文件名匹配，可用于任意目录。
+    pub fn path_rule_for(&self, path: &str) -> Option<PathRule> {
+        let norm = path.replace('\\', "/");
+        let base = norm.rsplit('/').next().unwrap_or(&norm);
+        self.rules
+            .iter()
+            .filter(|r| {
+                if r.glob.contains('/') {
+                    glob_match(&r.glob, &norm)
+                } else {
+                    glob_match(&r.glob, base)
+                }
+            })
+            .min_by_key(|r| r.level)
+            .cloned()
+    }
+}
+
+/// 极简 glob 匹配：`**` 跨目录任意串，`*` 段内任意串，`?` 单字符，其余按字面。
+fn glob_match(pattern: &str, text: &str) -> bool {
+    fn rec(p: &[u8], t: &[u8]) -> bool {
+        if p.is_empty() {
+            return t.is_empty();
+        }
+        match p[0] {
+            b'*' if p.get(1) == Some(&b'*') => (0..=t.len()).any(|i| rec(&p[2..], &t[i..])),
+            b'*' => {
+                for i in 0..=t.len() {
+                    if rec(&p[1..], &t[i..]) {
+                        return true;
+                    }
+                    if i < t.len() && t[i] == b'/' {
+                        break;
+                    }
+                }
+                false
+            }
+            b'?' => !t.is_empty() && t[0] != b'/' && rec(&p[1..], &t[1..]),
+            c => !t.is_empty() && t[0] == c && rec(&p[1..], &t[1..]),
+        }
+    }
+    rec(pattern.as_bytes(), text.as_bytes())
+}
+
+/// 工具输出双阈值截断配置（附录 D）：limits.max_lines / limits.max_bytes。
+///
+/// 缺省值与 truncate::DEFAULT_MAX_LINES / DEFAULT_MAX_BYTES 一致；
+/// 消费点为六工具上下文的 ToolContext.limits（bash / read / search / task）。
+#[derive(Debug, Clone, Serialize)]
+pub struct LimitsConfig {
+    /// 单次工具返回允许的最大行数。
+    pub max_lines: usize,
+    /// 单次工具返回允许的最大字节数。
+    pub max_bytes: usize,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_lines: crate::truncate::DEFAULT_MAX_LINES,
+            max_bytes: crate::truncate::DEFAULT_MAX_BYTES,
+        }
+    }
+}
+
+/// 落盘副本存活与配额配置（附录 D）：spill.ttl_days / spill.max_bytes。
+///
+/// 缺省值与 spill::DEFAULT_SPILL_TTL_DAYS / DEFAULT_SPILL_MAX_BYTES 一致；
+/// 消费点为 ToolContext.spill 的 TTL 清理与每工作区配额。
+#[derive(Debug, Clone, Serialize)]
+pub struct SpillConfig {
+    /// 落盘副本存活天数。
+    pub ttl_days: u64,
+    /// 每工作区落盘总字节上限。
+    pub max_bytes: u64,
+}
+
+impl Default for SpillConfig {
+    fn default() -> Self {
+        Self {
+            ttl_days: crate::spill::DEFAULT_SPILL_TTL_DAYS,
+            max_bytes: crate::spill::DEFAULT_SPILL_MAX_BYTES,
+        }
+    }
+}
+
+/// 写前快照生命周期与数据面配置（附录 D）：snapshot.* 段。
+///
+/// 消费点：ToolContext.snapshots 的快照 GC（TTL / 每文件保留 / 每工作区上限 /
+/// 最短保护期）与创建前 min_free_bytes 空闲检查；data 数据面与 gc_interval_hours
+/// 后台巡检留待后续（本期仅保留配置，默认值为 auto / 24h）。
+#[derive(Debug, Clone, Serialize)]
+pub struct SnapshotConfig {
+    /// 数据面策略：auto / reflink / copy（本期未消费，保留 auto）。
+    pub data: String,
+    /// 创建快照前的空闲空间下限（字节）；低于此值拒绝创建。
+    pub min_free_bytes: u64,
+    /// 每文件保留最近 N 份。
+    pub keep_per_file: usize,
+    /// 最短保护期（小时），期内不清理。
+    pub min_retention_hours: u64,
+    /// 过期时间（天）。
+    pub ttl_days: u64,
+    /// 每工作区快照总字节上限。
+    pub max_bytes: u64,
+    /// 后台巡检间隔（小时，本期未消费）。
+    pub gc_interval_hours: u64,
+}
+
+impl Default for SnapshotConfig {
+    fn default() -> Self {
+        Self {
+            data: "auto".to_owned(),
+            min_free_bytes: crate::spill::DEFAULT_SNAPSHOT_MIN_FREE_BYTES,
+            keep_per_file: crate::spill::DEFAULT_SNAPSHOT_KEEP_PER_FILE,
+            min_retention_hours: crate::spill::DEFAULT_SNAPSHOT_MIN_RETENTION_HOURS,
+            ttl_days: crate::spill::DEFAULT_SNAPSHOT_TTL_DAYS,
+            max_bytes: crate::spill::DEFAULT_SNAPSHOT_MAX_BYTES,
+            gc_interval_hours: 24,
+        }
+    }
+}
+
+/// 日志级别配置（附录 D）：logging.level。
+#[derive(Debug, Clone, Serialize)]
+pub struct LoggingConfig {
+    /// 日志级别：trace / debug / info / warn / error / off。
+    pub level: String,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: "warn".to_owned(),
+        }
+    }
 }
 
 /// 槽位绑定结果（§3.10）：某个槽位由哪个模型承担。
@@ -322,6 +523,16 @@ pub struct ResolvedConfig {
     pub slm: SlmConfig,
     /// 路径语义配置（§17.2）。
     pub paths: PathsConfig,
+    /// 工具输出截断阈值（附录 D）。
+    pub limits: LimitsConfig,
+    /// 落盘副本存活与配额（附录 D）。
+    pub spill: SpillConfig,
+    /// 写前快照生命周期与数据面（附录 D）。
+    pub snapshot: SnapshotConfig,
+    /// 日志级别（附录 D）。
+    pub logging: LoggingConfig,
+    /// 隔离策略（§8 / 附录 D）。
+    pub isolation: IsolationConfig,
     /// 六个槽位的绑定，顺序同 SlotKind::ALL。
     pub bindings: Vec<SlotBinding>,
 }
@@ -329,9 +540,22 @@ pub struct ResolvedConfig {
 // ---------- 合法取值表 ----------
 
 /// 顶层合法段（§18.9：未知字段一律拒绝）。
-const TOP_LEVEL_FIELDS: &str = "models / slots / slm / paths";
+const TOP_LEVEL_FIELDS: &str =
+    "models / slots / slm / paths / limits / spill / snapshot / logging / isolation";
 /// paths 段合法字段。
-const PATHS_FIELDS: &str = "allowed_roots";
+const PATHS_FIELDS: &str = "allowed_roots / expose_absolute";
+/// isolation 段合法字段。
+const ISOLATION_FIELDS: &str =
+    "default / max_exposure / rules / content_rules / fallback_chain / redact_min_retention";
+/// limits 段合法字段。
+const LIMITS_FIELDS: &str = "max_lines / max_bytes";
+/// spill 段合法字段。
+const SPILL_FIELDS: &str = "ttl_days / max_bytes";
+/// snapshot 段合法字段。
+const SNAPSHOT_FIELDS: &str =
+    "data / min_free_bytes / keep_per_file / min_retention_hours / ttl_days / max_bytes / gc_interval_hours";
+/// logging 段合法字段。
+const LOGGING_FIELDS: &str = "level";
 /// 模型配置合法字段。
 const MODEL_FIELDS: &str =
     "source / mode / adapter / path / base_url / model / api_key_env / allow_remote / serves";
@@ -536,7 +760,11 @@ pub fn parse_config(text: &str, origin: &str) -> Result<ResolvedConfig, ConfigEr
 
     // 顶层：只允许 models / slots / slm / paths（§18.9）。
     for (key, _) in root_map.iter() {
-        if !matches!(key.as_str(), "models" | "slots" | "slm" | "paths") {
+        if !matches!(
+            key.as_str(),
+            "models" | "slots" | "slm" | "paths" | "limits" | "spill" | "snapshot" | "logging"
+                | "isolation"
+        ) {
             errors.push(ConfigError {
                 code: "CONFIG_UNKNOWN_FIELD".to_owned(),
                 field: key.clone(),
@@ -551,6 +779,11 @@ pub fn parse_config(text: &str, origin: &str) -> Result<ResolvedConfig, ConfigEr
     let slots = parse_slots(root_map.get("slots"), &mut errors);
     let slm = parse_slm(root_map.get("slm"), &mut errors);
     let paths = parse_paths(root_map.get("paths"), &mut errors);
+    let limits = parse_limits(root_map.get("limits"), &mut errors);
+    let spill = parse_spill(root_map.get("spill"), &mut errors);
+    let snapshot = parse_snapshot(root_map.get("snapshot"), &mut errors);
+    let logging = parse_logging(root_map.get("logging"), &mut errors);
+    let isolation = parse_isolation(root_map.get("isolation"), &mut errors);
 
     // 结构层有错即返回：结构不完整时语义校验只会产生连锁噪音（§18.9 同层一次列全）。
     if !errors.is_empty() {
@@ -666,6 +899,11 @@ pub fn parse_config(text: &str, origin: &str) -> Result<ResolvedConfig, ConfigEr
         slots,
         slm,
         paths,
+        limits,
+        spill,
+        snapshot,
+        logging,
+        isolation,
         bindings,
     })
 }
@@ -1029,7 +1267,7 @@ fn parse_http(value: &YamlValue, field: &str, errors: &mut Vec<ConfigError>) -> 
     Some(http)
 }
 
-/// 解析 paths 段：只允许 allowed_roots（§17.2）。本版本其余 paths 字段尚未接线。
+/// 解析 paths 段：allowed_roots（§17.2）与 expose_absolute（§8.11）。
 fn parse_paths(value: Option<&YamlValue>, errors: &mut Vec<ConfigError>) -> PathsConfig {
     let mut paths = PathsConfig::default();
     let map = match value {
@@ -1069,17 +1307,484 @@ fn parse_paths(value: Option<&YamlValue>, errors: &mut Vec<ConfigError>) -> Path
                     }
                 }
             }
+            "expose_absolute" => match item {
+                YamlValue::Bool(v) => paths.expose_absolute = *v,
+                other => errors.push(type_error(&field, other, "布尔（true / false）")),
+            },
             _ => errors.push(ConfigError {
                 code: "CONFIG_UNKNOWN_FIELD".to_owned(),
                 field,
                 value: Some(value_repr(item)),
                 expected: PATHS_FIELDS.to_owned(),
-                fix: "该字段不在 paths 段的合法字段表内（expose_absolute 等字段本版本尚未接线），请检查拼写或移除"
-                    .to_owned(),
+                fix: "该字段不在 paths 段的合法字段表内，请检查拼写或移除".to_owned(),
             }),
         }
     }
     paths
+}
+
+/// 解析 limits 段（附录 D）：只允许 max_lines / max_bytes 两个正整数阈值。
+fn parse_limits(value: Option<&YamlValue>, errors: &mut Vec<ConfigError>) -> LimitsConfig {
+    let mut limits = LimitsConfig::default();
+    let map = match value {
+        None => return limits,
+        Some(YamlValue::Mapping(map)) => map,
+        Some(other) => {
+            errors.push(type_error("limits", other, "映射（截断阈值配置）"));
+            return limits;
+        }
+    };
+    for (key, item) in map.iter() {
+        let field = format!("limits.{key}");
+        match key.as_str() {
+            "max_lines" => {
+                if let Some(v) = positive_usize(item, &field, errors) {
+                    limits.max_lines = v;
+                }
+            }
+            "max_bytes" => {
+                if let Some(v) = positive_usize(item, &field, errors) {
+                    limits.max_bytes = v;
+                }
+            }
+            _ => errors.push(ConfigError {
+                code: "CONFIG_UNKNOWN_FIELD".to_owned(),
+                field,
+                value: Some(value_repr(item)),
+                expected: LIMITS_FIELDS.to_owned(),
+                fix: "该字段不在 limits 段的合法字段表内，请检查拼写或移除".to_owned(),
+            }),
+        }
+    }
+    limits
+}
+
+/// 取正整数阈值：非数字报类型错，0 报取值错。
+fn positive_usize(value: &YamlValue, field: &str, errors: &mut Vec<ConfigError>) -> Option<usize> {
+    let v = as_u64(value, field, errors)?;
+    if v == 0 {
+        errors.push(ConfigError {
+            code: "CONFIG_INVALID_VALUE".to_owned(),
+            field: field.to_owned(),
+            value: Some(value_repr(value)),
+            expected: "正整数".to_owned(),
+            fix: "截断阈值必须为正整数".to_owned(),
+        });
+        return None;
+    }
+    Some(v as usize)
+}
+
+/// 解析 isolation 段（§8 / 附录 D）：default / max_exposure / rules /
+/// content_rules / fallback_chain / redact_min_retention。
+fn parse_isolation(value: Option<&YamlValue>, errors: &mut Vec<ConfigError>) -> IsolationConfig {
+    let mut iso = IsolationConfig::default();
+    let map = match value {
+        None => return iso,
+        Some(YamlValue::Mapping(map)) => map,
+        Some(other) => {
+            errors.push(type_error("isolation", other, "映射（隔离策略配置）"));
+            return iso;
+        }
+    };
+    for (key, item) in map.iter() {
+        let field = format!("isolation.{key}");
+        match key.as_str() {
+            "default" => {
+                if let Some(l) = exposure_level(item, &field, errors) {
+                    iso.default = l;
+                }
+            }
+            "max_exposure" => {
+                if let Some(l) = exposure_level(item, &field, errors) {
+                    iso.max_exposure = l;
+                }
+            }
+            "rules" => {
+                if let Some(rules) = parse_path_rules(item, &field, errors) {
+                    iso.rules = rules;
+                }
+            }
+            "content_rules" => {
+                if let Some(rules) = parse_content_rules(item, &field, errors) {
+                    iso.content_rules = rules;
+                }
+            }
+            "fallback_chain" => {
+                if let Some(chain) = parse_fallback_chain(item, &field, errors) {
+                    iso.fallback_chain = chain;
+                }
+            }
+            "redact_min_retention" => {
+                if let Some(v) = parse_ratio(item, &field, errors) {
+                    iso.redact_min_retention = v;
+                }
+            }
+            _ => errors.push(ConfigError {
+                code: "CONFIG_UNKNOWN_FIELD".to_owned(),
+                field,
+                value: Some(value_repr(item)),
+                expected: ISOLATION_FIELDS.to_owned(),
+                fix: "该字段不在 isolation 段的合法字段表内，请检查拼写或移除".to_owned(),
+            }),
+        }
+    }
+    iso
+}
+
+/// 解析隔离档字符串：none / understand / summary / raw。
+fn exposure_level(value: &YamlValue, field: &str, errors: &mut Vec<ConfigError>) -> Option<ExposureLevel> {
+    match value {
+        YamlValue::String(s) => match s.as_str() {
+            "none" => Some(ExposureLevel::None),
+            "understand" => Some(ExposureLevel::Understand),
+            "summary" => Some(ExposureLevel::Summary),
+            "raw" => Some(ExposureLevel::Raw),
+            other => {
+                errors.push(ConfigError {
+                    code: "CONFIG_INVALID_VALUE".to_owned(),
+                    field: field.to_owned(),
+                    value: Some(other.to_owned()),
+                    expected: "隔离档 none / understand / summary / raw".to_owned(),
+                    fix: "改为四档之一".to_owned(),
+                });
+                None
+            }
+        },
+        other => {
+            errors.push(type_error(field, other, "隔离档字符串"));
+            None
+        }
+    }
+}
+
+/// 解析回退动作字符串：redact / structure / summarize / refuse。
+fn fallback_step(value: &YamlValue, field: &str, errors: &mut Vec<ConfigError>) -> Option<FallbackStep> {
+    match value {
+        YamlValue::String(s) => match s.as_str() {
+            "redact" => Some(FallbackStep::Redact),
+            "structure" => Some(FallbackStep::Structure),
+            "summarize" => Some(FallbackStep::Summarize),
+            "refuse" => Some(FallbackStep::Refuse),
+            other => {
+                errors.push(ConfigError {
+                    code: "CONFIG_INVALID_VALUE".to_owned(),
+                    field: field.to_owned(),
+                    value: Some(other.to_owned()),
+                    expected: "回退动作 redact / structure / summarize / refuse".to_owned(),
+                    fix: "改为四档之一".to_owned(),
+                });
+                None
+            }
+        },
+        other => {
+            errors.push(type_error(field, other, "回退动作字符串"));
+            None
+        }
+    }
+}
+
+/// 解析内容规则类型字符串。
+fn content_rule_kind(value: &YamlValue, field: &str, errors: &mut Vec<ConfigError>) -> Option<ContentRuleKind> {
+    match value {
+        YamlValue::String(s) => match s.as_str() {
+            "secret_pattern" => Some(ContentRuleKind::SecretPattern),
+            "sensitive_path_mention" => Some(ContentRuleKind::SensitivePathMention),
+            "path_username" => Some(ContentRuleKind::PathUsername),
+            "host_metadata" => Some(ContentRuleKind::HostMetadata),
+            "high_entropy" => Some(ContentRuleKind::HighEntropy),
+            other => {
+                errors.push(ConfigError {
+                    code: "CONFIG_INVALID_VALUE".to_owned(),
+                    field: field.to_owned(),
+                    value: Some(other.to_owned()),
+                    expected: "内容规则 secret_pattern / sensitive_path_mention / path_username / host_metadata / high_entropy".to_owned(),
+                    fix: "改为上述取值之一".to_owned(),
+                });
+                None
+            }
+        },
+        other => {
+            errors.push(type_error(field, other, "内容规则字符串"));
+            None
+        }
+    }
+}
+
+/// 解析 rules：路径 glob 列表，每项 {glob, level}。
+fn parse_path_rules(value: &YamlValue, field: &str, errors: &mut Vec<ConfigError>) -> Option<Vec<PathRule>> {
+    let seq = match value {
+        YamlValue::Sequence(seq) => seq,
+        other => {
+            errors.push(type_error(field, other, "规则数组（每项 {glob, level}）"));
+            return None;
+        }
+    };
+    let mut out = Vec::new();
+    for (i, item) in seq.iter().enumerate() {
+        let f = format!("{field}[{i}]");
+        let m = match item {
+            YamlValue::Mapping(m) => m,
+            other => {
+                errors.push(type_error(&f, other, "映射 {glob, level}"));
+                continue;
+            }
+        };
+        let glob = match m.get("glob") {
+            Some(YamlValue::String(g)) => g.clone(),
+            Some(other) => {
+                errors.push(type_error(&format!("{f}.glob"), other, "字符串"));
+                continue;
+            }
+            None => {
+                errors.push(ConfigError {
+                    code: "CONFIG_MISSING_FIELD".to_owned(),
+                    field: format!("{f}.glob"),
+                    value: None,
+                    expected: "路径 glob 字符串".to_owned(),
+                    fix: "补 glob 字段".to_owned(),
+                });
+                continue;
+            }
+        };
+        let level = match m.get("level").and_then(|v| exposure_level(v, &format!("{f}.level"), errors)) {
+            Some(l) => l,
+            None => continue,
+        };
+        out.push(PathRule { glob, level });
+    }
+    Some(out)
+}
+
+/// 解析 content_rules：每项 {kind, level}。
+fn parse_content_rules(value: &YamlValue, field: &str, errors: &mut Vec<ConfigError>) -> Option<Vec<ContentRule>> {
+    let seq = match value {
+        YamlValue::Sequence(seq) => seq,
+        other => {
+            errors.push(type_error(field, other, "规则数组（每项 {kind, level}）"));
+            return None;
+        }
+    };
+    let mut out = Vec::new();
+    for (i, item) in seq.iter().enumerate() {
+        let f = format!("{field}[{i}]");
+        let m = match item {
+            YamlValue::Mapping(m) => m,
+            other => {
+                errors.push(type_error(&f, other, "映射 {kind, level}"));
+                continue;
+            }
+        };
+        let kind = match m.get("kind").and_then(|v| content_rule_kind(v, &format!("{f}.kind"), errors)) {
+            Some(k) => k,
+            None => continue,
+        };
+        let level = match m.get("level").and_then(|v| fallback_step(v, &format!("{f}.level"), errors)) {
+            Some(l) => l,
+            None => continue,
+        };
+        out.push(ContentRule { kind, level });
+    }
+    Some(out)
+}
+
+/// 解析 fallback_chain：回退动作字符串数组。
+fn parse_fallback_chain(value: &YamlValue, field: &str, errors: &mut Vec<ConfigError>) -> Option<Vec<FallbackStep>> {
+    let seq = match value {
+        YamlValue::Sequence(seq) => seq,
+        other => {
+            errors.push(type_error(field, other, "回退动作数组"));
+            return None;
+        }
+    };
+    let mut out = Vec::new();
+    for (i, item) in seq.iter().enumerate() {
+        if let Some(step) = fallback_step(item, &format!("{field}[{i}]"), errors) {
+            out.push(step);
+        }
+    }
+    Some(out)
+}
+
+/// 解析保留率：0.0–1.0 之间的小数。
+fn parse_ratio(value: &YamlValue, field: &str, errors: &mut Vec<ConfigError>) -> Option<f32> {
+    match value {
+        YamlValue::Number(n) => {
+            let v = n.as_f64();
+            if (0.0..=1.0).contains(&v) {
+                Some(v as f32)
+            } else {
+                errors.push(ConfigError {
+                    code: "CONFIG_INVALID_VALUE".to_owned(),
+                    field: field.to_owned(),
+                    value: Some(value_repr(value)),
+                    expected: "0.0–1.0 之间的小数".to_owned(),
+                    fix: "把保留率限定在 0.0 到 1.0 之间".to_owned(),
+                });
+                None
+            }
+        }
+        other => {
+            errors.push(type_error(field, other, "0.0–1.0 的小数"));
+            None
+        }
+    }
+}
+
+/// 解析 spill 段（附录 D）：只允许 ttl_days / max_bytes 两个正整数。
+fn parse_spill(value: Option<&YamlValue>, errors: &mut Vec<ConfigError>) -> SpillConfig {
+    let mut spill = SpillConfig::default();
+    let map = match value {
+        None => return spill,
+        Some(YamlValue::Mapping(map)) => map,
+        Some(other) => {
+            errors.push(type_error("spill", other, "映射（落盘副本配置）"));
+            return spill;
+        }
+    };
+    for (key, item) in map.iter() {
+        let field = format!("spill.{key}");
+        match key.as_str() {
+            "ttl_days" => {
+                if let Some(v) = positive_u64(item, &field, errors) {
+                    spill.ttl_days = v;
+                }
+            }
+            "max_bytes" => {
+                if let Some(v) = positive_u64(item, &field, errors) {
+                    spill.max_bytes = v;
+                }
+            }
+            _ => errors.push(ConfigError {
+                code: "CONFIG_UNKNOWN_FIELD".to_owned(),
+                field,
+                value: Some(value_repr(item)),
+                expected: SPILL_FIELDS.to_owned(),
+                fix: "该字段不在 spill 段的合法字段表内，请检查拼写或移除".to_owned(),
+            }),
+        }
+    }
+    spill
+}
+
+/// 解析 snapshot 段（附录 D）：数据面、空闲下限与快照 GC 生命周期参数。
+fn parse_snapshot(value: Option<&YamlValue>, errors: &mut Vec<ConfigError>) -> SnapshotConfig {
+    let mut snap = SnapshotConfig::default();
+    let map = match value {
+        None => return snap,
+        Some(YamlValue::Mapping(map)) => map,
+        Some(other) => {
+            errors.push(type_error("snapshot", other, "映射（写前快照配置）"));
+            return snap;
+        }
+    };
+    for (key, item) in map.iter() {
+        let field = format!("snapshot.{key}");
+        match key.as_str() {
+            "data" => match item.as_str() {
+                Some(v @ ("auto" | "reflink" | "copy")) => snap.data = v.to_owned(),
+                _ => errors.push(ConfigError {
+                    code: "CONFIG_INVALID_VALUE".to_owned(),
+                    field,
+                    value: Some(value_repr(item)),
+                    expected: "auto / reflink / copy".to_owned(),
+                    fix: "snapshot.data 只能是 auto、reflink 或 copy".to_owned(),
+                }),
+            },
+            "min_free_bytes" => {
+                if let Some(v) = positive_u64(item, &field, errors) {
+                    snap.min_free_bytes = v;
+                }
+            }
+            "keep_per_file" => {
+                if let Some(v) = positive_usize(item, &field, errors) {
+                    snap.keep_per_file = v;
+                }
+            }
+            "min_retention_hours" => {
+                if let Some(v) = positive_u64(item, &field, errors) {
+                    snap.min_retention_hours = v;
+                }
+            }
+            "ttl_days" => {
+                if let Some(v) = positive_u64(item, &field, errors) {
+                    snap.ttl_days = v;
+                }
+            }
+            "max_bytes" => {
+                if let Some(v) = positive_u64(item, &field, errors) {
+                    snap.max_bytes = v;
+                }
+            }
+            "gc_interval_hours" => {
+                if let Some(v) = positive_u64(item, &field, errors) {
+                    snap.gc_interval_hours = v;
+                }
+            }
+            _ => errors.push(ConfigError {
+                code: "CONFIG_UNKNOWN_FIELD".to_owned(),
+                field,
+                value: Some(value_repr(item)),
+                expected: SNAPSHOT_FIELDS.to_owned(),
+                fix: "该字段不在 snapshot 段的合法字段表内，请检查拼写或移除".to_owned(),
+            }),
+        }
+    }
+    snap
+}
+
+/// 解析 logging 段（附录 D）：只允许 level，取值限定为常见级别。
+fn parse_logging(value: Option<&YamlValue>, errors: &mut Vec<ConfigError>) -> LoggingConfig {
+    let mut logging = LoggingConfig::default();
+    let map = match value {
+        None => return logging,
+        Some(YamlValue::Mapping(map)) => map,
+        Some(other) => {
+            errors.push(type_error("logging", other, "映射（日志配置）"));
+            return logging;
+        }
+    };
+    for (key, item) in map.iter() {
+        let field = format!("logging.{key}");
+        match key.as_str() {
+            "level" => match item.as_str() {
+                Some(v @ ("trace" | "debug" | "info" | "warn" | "error" | "off")) => {
+                    logging.level = v.to_owned();
+                }
+                _ => errors.push(ConfigError {
+                    code: "CONFIG_INVALID_VALUE".to_owned(),
+                    field,
+                    value: Some(value_repr(item)),
+                    expected: "trace / debug / info / warn / error / off".to_owned(),
+                    fix: "logging.level 只能是 trace、debug、info、warn、error 或 off".to_owned(),
+                }),
+            },
+            _ => errors.push(ConfigError {
+                code: "CONFIG_UNKNOWN_FIELD".to_owned(),
+                field,
+                value: Some(value_repr(item)),
+                expected: LOGGING_FIELDS.to_owned(),
+                fix: "该字段不在 logging 段的合法字段表内，请检查拼写或移除".to_owned(),
+            }),
+        }
+    }
+    logging
+}
+
+/// 取正整数（u64）：非数字报类型错，0 报取值错。
+fn positive_u64(value: &YamlValue, field: &str, errors: &mut Vec<ConfigError>) -> Option<u64> {
+    let v = as_u64(value, field, errors)?;
+    if v == 0 {
+        errors.push(ConfigError {
+            code: "CONFIG_INVALID_VALUE".to_owned(),
+            field: field.to_owned(),
+            value: Some(value_repr(value)),
+            expected: "正整数".to_owned(),
+            fix: "存活天数与配额必须为正整数".to_owned(),
+        });
+        return None;
+    }
+    Some(v)
 }
 
 // ---------- 内部：绑定与取值辅助 ----------
@@ -1414,6 +2119,279 @@ mod tests {
         parse_config(text, "test.yaml").expect_err("应当报错").items
     }
 
+    /// 附录 D：limits 段缺省取 truncate 的 2000 行 / 51200 字节。
+    #[test]
+    fn limits_default_when_absent() {
+        let config = parse_config("", "test.yaml").expect("空配置应解析成功");
+        assert_eq!(config.limits.max_lines, 2000);
+        assert_eq!(config.limits.max_bytes, 51200);
+    }
+
+    /// 附录 D：limits 段自定义阈值生效（不再按未知段拒绝）。
+    #[test]
+    fn limits_overrides_applied() {
+        let config = parse_config(
+            r#"limits:
+  max_lines: 100
+  max_bytes: 4096
+"#,
+            "test.yaml",
+        )
+        .expect("limits 段应被接受");
+        assert_eq!(config.limits.max_lines, 100);
+        assert_eq!(config.limits.max_bytes, 4096);
+    }
+
+    /// §18.9：limits 段未知字段拒绝并回显合法字段表。
+    #[test]
+    fn limits_unknown_field_rejected() {
+        let errors = errors_of("limits:\n  foo: 1\n");
+        assert!(errors.iter().any(|e| e.code == "CONFIG_UNKNOWN_FIELD"
+            && e.field == "limits.foo"
+            && e.expected.contains("max_lines")));
+    }
+
+    /// 附录 D：阈值必须为正整数，0 报取值错。
+    #[test]
+    fn limits_zero_rejected() {
+        let errors = errors_of("limits:\n  max_lines: 0\n");
+        assert!(errors
+            .iter()
+            .any(|e| e.code == "CONFIG_INVALID_VALUE" && e.field == "limits.max_lines"));
+    }
+
+    /// 附录 D：阈值非数字报类型错。
+    #[test]
+    fn limits_non_integer_rejected() {
+        let errors = errors_of("limits:\n  max_bytes: abc\n");
+        assert!(errors
+            .iter()
+            .any(|e| e.code == "CONFIG_TYPE" && e.field == "limits.max_bytes"));
+    }
+
+    /// 附录 D：isolation 段缺省取 default=summary / max_exposure=raw / 内置规则。
+    #[test]
+    fn isolation_default_when_absent() {
+        let config = parse_config("", "test.yaml").expect("空配置应解析成功");
+        assert_eq!(config.isolation.default, ExposureLevel::Summary);
+        assert_eq!(config.isolation.max_exposure, ExposureLevel::Raw);
+        assert!((config.isolation.redact_min_retention - 0.5).abs() < 1e-6);
+        assert_eq!(config.isolation.fallback_chain.len(), 4);
+        assert!(config
+            .isolation
+            .rules
+            .iter()
+            .any(|r| r.glob == ".env*" && r.level == ExposureLevel::None));
+    }
+
+    /// §8.3：isolation 段自定义档位、规则、内容规则与回退链生效（不再按未知段拒绝）。
+    #[test]
+    fn isolation_overrides_applied() {
+        let config = parse_config(
+            r#"isolation:
+  default: understand
+  max_exposure: summary
+  rules:
+    - glob: "db/**"
+      level: none
+  content_rules:
+    - kind: high_entropy
+      level: redact
+  fallback_chain: [redact, refuse]
+  redact_min_retention: 0.8
+"#,
+            "test.yaml",
+        )
+        .expect("isolation 段应被接受");
+        assert_eq!(config.isolation.default, ExposureLevel::Understand);
+        assert_eq!(config.isolation.max_exposure, ExposureLevel::Summary);
+        assert_eq!(config.isolation.rules.len(), 1);
+        assert_eq!(
+            config.isolation.content_rules[0].kind,
+            ContentRuleKind::HighEntropy
+        );
+        assert_eq!(
+            config.isolation.fallback_chain,
+            vec![FallbackStep::Redact, FallbackStep::Refuse]
+        );
+        assert!((config.isolation.redact_min_retention - 0.8).abs() < 1e-6);
+    }
+
+    /// §18.9：isolation 段未知字段拒绝并回显合法字段表。
+    #[test]
+    fn isolation_unknown_field_rejected() {
+        let errors = errors_of("isolation:\n  foo: 1\n");
+        assert!(errors.iter().any(|e| e.code == "CONFIG_UNKNOWN_FIELD"
+            && e.field == "isolation.foo"
+            && e.expected.contains("max_exposure")));
+    }
+
+    /// §8.1：非法隔离档字符串报取值错。
+    #[test]
+    fn isolation_bad_level_rejected() {
+        let errors = errors_of("isolation:\n  default: secret\n");
+        assert!(errors
+            .iter()
+            .any(|e| e.code == "CONFIG_INVALID_VALUE" && e.field == "isolation.default"));
+    }
+
+    /// 保留率越界报取值错。
+    #[test]
+    fn isolation_ratio_out_of_range_rejected() {
+        let errors = errors_of("isolation:\n  redact_min_retention: 2.0\n");
+        assert!(errors.iter().any(|e| e.code == "CONFIG_INVALID_VALUE"
+            && e.field == "isolation.redact_min_retention"));
+    }
+
+    /// §8.3：有效硬顶只在请求级覆盖与 max_exposure 之间取最严（不能放宽）。
+    #[test]
+    fn isolation_effective_cap_only_tightens() {
+        let iso = IsolationConfig {
+            max_exposure: ExposureLevel::Summary,
+            ..IsolationConfig::default()
+        };
+        assert_eq!(
+            iso.effective_cap(Some(ExposureLevel::Raw)),
+            ExposureLevel::Summary
+        );
+        assert_eq!(
+            iso.effective_cap(Some(ExposureLevel::None)),
+            ExposureLevel::None
+        );
+    }
+
+    /// §8：路径规则按 glob 命中，最严规则优先。
+    #[test]
+    fn isolation_path_rule_matches_most_restrictive() {
+        let iso = IsolationConfig::default();
+        assert_eq!(
+            iso.path_rule_for("conf/.env.local").map(|r| r.level),
+            Some(ExposureLevel::None)
+        );
+        assert_eq!(
+            iso.path_rule_for("secrets/db/key").map(|r| r.level),
+            Some(ExposureLevel::None)
+        );
+        assert_eq!(
+            iso.path_rule_for("var/app.log").map(|r| r.level),
+            Some(ExposureLevel::Summary)
+        );
+        assert!(iso.path_rule_for("src/main.rs").is_none());
+    }
+
+    /// 附录 D：spill 段缺省取 7 天 / 1GiB。
+    #[test]
+    fn spill_default_when_absent() {
+        let config = parse_config("", "test.yaml").expect("空配置应解析成功");
+        assert_eq!(config.spill.ttl_days, 7);
+        assert_eq!(config.spill.max_bytes, 1024 * 1024 * 1024);
+    }
+
+    /// 附录 D：spill 段自定义值生效。
+    #[test]
+    fn spill_overrides_applied() {
+        let config = parse_config("spill:\n  ttl_days: 3\n  max_bytes: 1048576\n", "test.yaml")
+            .expect("spill 段应被接受");
+        assert_eq!(config.spill.ttl_days, 3);
+        assert_eq!(config.spill.max_bytes, 1048576);
+    }
+
+    /// §18.9：spill 段未知字段拒绝并回显合法字段表。
+    #[test]
+    fn spill_unknown_field_rejected() {
+        let errors = errors_of("spill:\n  foo: 1\n");
+        assert!(errors.iter().any(|e| e.code == "CONFIG_UNKNOWN_FIELD"
+            && e.field == "spill.foo"
+            && e.expected.contains("ttl_days")));
+    }
+
+    /// 附录 D：spill 值必须为正整数，0 报取值错。
+    #[test]
+    fn spill_zero_rejected() {
+        let errors = errors_of("spill:\n  ttl_days: 0\n");
+        assert!(errors
+            .iter()
+            .any(|e| e.code == "CONFIG_INVALID_VALUE" && e.field == "spill.ttl_days"));
+    }
+
+    /// 附录 D：snapshot 段缺省取 auto / 512MB / 20 / 24h / 30d / 1GiB / 24h。
+    #[test]
+    fn snapshot_default_when_absent() {
+        let config = parse_config("", "test.yaml").expect("空配置应解析成功");
+        assert_eq!(config.snapshot.data, "auto");
+        assert_eq!(config.snapshot.min_free_bytes, 512 * 1024 * 1024);
+        assert_eq!(config.snapshot.keep_per_file, 20);
+        assert_eq!(config.snapshot.min_retention_hours, 24);
+        assert_eq!(config.snapshot.ttl_days, 30);
+        assert_eq!(config.snapshot.max_bytes, 1024 * 1024 * 1024);
+        assert_eq!(config.snapshot.gc_interval_hours, 24);
+    }
+
+    /// 附录 D：snapshot 段自定义值生效。
+    #[test]
+    fn snapshot_overrides_applied() {
+        let config = parse_config(
+            "snapshot:\n  data: copy\n  keep_per_file: 5\n  ttl_days: 10\n  max_bytes: 1048576\n",
+            "test.yaml",
+        )
+        .expect("snapshot 段应被接受");
+        assert_eq!(config.snapshot.data, "copy");
+        assert_eq!(config.snapshot.keep_per_file, 5);
+        assert_eq!(config.snapshot.ttl_days, 10);
+        assert_eq!(config.snapshot.max_bytes, 1048576);
+    }
+
+    /// §18.9：snapshot 段未知字段拒绝并回显合法字段表。
+    #[test]
+    fn snapshot_unknown_field_rejected() {
+        let errors = errors_of("snapshot:\n  foo: 1\n");
+        assert!(errors.iter().any(|e| e.code == "CONFIG_UNKNOWN_FIELD"
+            && e.field == "snapshot.foo"
+            && e.expected.contains("keep_per_file")));
+    }
+
+    /// 附录 D：snapshot.data 只接受 auto / reflink / copy。
+    #[test]
+    fn snapshot_invalid_data_rejected() {
+        let errors = errors_of("snapshot:\n  data: link\n");
+        assert!(errors
+            .iter()
+            .any(|e| e.code == "CONFIG_INVALID_VALUE" && e.field == "snapshot.data"));
+    }
+
+    /// 附录 D：snapshot 数值必须为正整数，0 报取值错。
+    #[test]
+    fn snapshot_zero_rejected() {
+        let errors = errors_of("snapshot:\n  ttl_days: 0\n");
+        assert!(errors
+            .iter()
+            .any(|e| e.code == "CONFIG_INVALID_VALUE" && e.field == "snapshot.ttl_days"));
+    }
+
+    /// 附录 D：logging 段缺省 warn。
+    #[test]
+    fn logging_default_when_absent() {
+        let config = parse_config("", "test.yaml").expect("空配置应解析成功");
+        assert_eq!(config.logging.level, "warn");
+    }
+
+    /// 附录 D：logging.level 自定义值生效。
+    #[test]
+    fn logging_level_override() {
+        let config = parse_config("logging:\n  level: debug\n", "test.yaml")
+            .expect("logging 段应被接受");
+        assert_eq!(config.logging.level, "debug");
+    }
+
+    /// 附录 D：logging.level 取值限定，非法值拒绝。
+    #[test]
+    fn logging_invalid_level_rejected() {
+        let errors = errors_of("logging:\n  level: verbose\n");
+        assert!(errors
+            .iter()
+            .any(|e| e.code == "CONFIG_INVALID_VALUE" && e.field == "logging.level"));
+    }
+
     /// §3.10 + §3.8：最小配置能解析，两个模型覆盖四个槽位，rerank 与 embedding 为空。
     #[test]
     fn minimal_config_parses_and_binds() {
@@ -1516,14 +2494,14 @@ mod tests {
     #[test]
     fn unknown_top_level_field_is_rejected_with_aggregated_errors() {
         let errors = errors_of(
-            "isolation:\n  default: summary\nintent:\n  default: raw\nmodels:\n  jev:\n    serve: [classify]\n",
+            "fetch:\n  enabled: true\nintent:\n  default: raw\nmodels:\n  jev:\n    serve: [classify]\n",
         );
         assert!(errors.len() >= 3, "应当一次列全所有错误：{errors:?}");
         let unknown: Vec<&ConfigError> = errors
             .iter()
             .filter(|e| e.code == "CONFIG_UNKNOWN_FIELD")
             .collect();
-        assert!(unknown.iter().any(|e| e.field == "isolation"));
+        assert!(unknown.iter().any(|e| e.field == "fetch"));
         assert!(unknown.iter().any(|e| e.field == "intent"));
         assert!(unknown.iter().any(|e| e.field == "models.jev.serve"));
         for error in &errors {
@@ -1920,12 +2898,15 @@ mod tests {
     #[test]
     fn unimplemented_section_and_interpolated_text_localize() {
         let errors =
-            parse_config("isolation:\n  default: summary\n", "test.yaml").expect_err("应当报错");
+            parse_config("cache:\n  enabled: true\n", "test.yaml").expect_err("应当报错");
         let en = errors.localized(Language::En);
         assert_eq!(en.items[0].code, "CONFIG_UNKNOWN_FIELD");
-        assert_eq!(en.items[0].field, "isolation");
+        assert_eq!(en.items[0].field, "cache");
         // 段名是字面标识符，不翻译；fix 必须整句英文。
-        assert_eq!(en.items[0].expected, "models / slots / slm / paths");
+        assert_eq!(
+            en.items[0].expected,
+            "models / slots / slm / paths / limits / spill / snapshot / logging / isolation"
+        );
         assert_eq!(
             en.items[0].fix,
             "This configuration section is not implemented in this version; remove it or wait for a later version"
@@ -1984,13 +2965,35 @@ mod tests {
         assert!(errors[0].fix.contains("绝对路径"));
     }
 
-    /// §18.9：paths 段未接线的字段明确拒绝，不静默忽略。
+    /// §18.9：paths 段未知字段明确拒绝，不静默忽略。
     #[test]
     fn paths_unknown_field_rejected() {
-        let errors = errors_of("paths:\n  expose_absolute: true\n");
+        let errors = errors_of("paths:\n  bogus: true\n");
         assert_eq!(errors[0].code, "CONFIG_UNKNOWN_FIELD");
-        assert_eq!(errors[0].field, "paths.expose_absolute");
+        assert_eq!(errors[0].field, "paths.bogus");
         assert!(errors[0].expected.contains("allowed_roots"));
+        assert!(errors[0].expected.contains("expose_absolute"));
+    }
+
+    /// §8.11：expose_absolute 默认 false，显式 true 才打开绝对路径呈现。
+    #[test]
+    fn paths_expose_absolute_defaults_false() {
+        let empty = parse_config("", "test.yaml").expect("空配置应当解析成功");
+        assert!(!empty.paths.expose_absolute);
+        let config = parse_config("paths:\n  expose_absolute: true\n", "test.yaml")
+            .expect("应当解析成功");
+        assert!(config.paths.expose_absolute);
+        let off = parse_config("paths:\n  expose_absolute: false\n", "test.yaml")
+            .expect("应当解析成功");
+        assert!(!off.paths.expose_absolute);
+    }
+
+    /// §18.9：expose_absolute 非法值 fail loud，不静默当 false。
+    #[test]
+    fn paths_expose_absolute_rejects_non_bool() {
+        let errors = errors_of("paths:\n  expose_absolute: \"true\"\n");
+        assert_eq!(errors[0].code, "CONFIG_TYPE");
+        assert_eq!(errors[0].field, "paths.expose_absolute");
     }
 
     /// §18.9：allowed_roots 类型错要 fail loud 并指出字段路径。
