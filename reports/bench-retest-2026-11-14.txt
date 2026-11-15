@@ -1,0 +1,87 @@
+# socket=.toolgate/daemon.sock
+| 形态 | 输入字节 | 输出字节 | 输出行 | 耗时ms | shape | sampled | notices | slmStatus |
+|---|---|---|---|---|---|---|---|---|
+| 长文2200行/raw | 186999 | 782 | 13 | 3596 | long_text | True | TRUNCATED | {"classify": "ready", "decide": "ready", "embedding": "local", "rerank": "ready", "summarize": "local", "vision": "ready"} |
+| 长文2200行/summary | 186999 | 782 | 13 | 3315 | long_text | True | TRUNCATED | {"classify": "ready", "decide": "ready", "embedding": "local", "rerank": "ready", "summarize": "local", "vision": "ready"} |
+| 长文600行/raw | 50999 | 50999 | 600 | 1 | pass_through | None |  | {"classify": "ready", "decide": "ready", "embedding": "ready", "rerank": "ready", "summarize": "ready", "vision": "ready"} |
+| 长文600行/summary | 50999 | 294 | 3 | 2465 | long_text | False |  | {"classify": "local", "decide": "ready", "embedding": "ready", "rerank": "ready", "summarize": "local", "vision": "ready"} |
+| 列表3000行 | 108779 | 71927 | 2004 | 2 | listing | None | TRUNCATED,SLOT_UNAVAILABLE | {"classify": "ready", "decide": "ready", "embedding": "ready", "rerank": "ready", "summarize": "ready", "vision": "ready"} |
+| 短文本60行 | 1179 | 1179 | 60 | 1 | pass_through | None |  | {"classify": "ready", "decide": "ready", "embedding": "ready", "rerank": "ready", "summarize": "ready", "vision": "ready"} |
+| 错误40KB | 101779 | 16397 | 263 | 1 | error | True |  | {"classify": "ready", "decide": "ready", "embedding": "ready", "rerank": "ready", "summarize": "ready", "vision": "ready"} |
+
+## /stats（0ms）
+
+```json
+{
+  "byShape": {
+    "error": {
+      "bytesIn": 207036,
+      "bytesOut": 34730,
+      "latencyMs": 0,
+      "requests": 2
+    },
+    "listing": {
+      "bytesIn": 223840,
+      "bytesOut": 148914,
+      "latencyMs": 0,
+      "requests": 2
+    },
+    "long_text": {
+      "bytesIn": 877706,
+      "bytesOut": 9077,
+      "latencyMs": 53788,
+      "requests": 7
+    },
+    "pass_through": {
+      "bytesIn": 106313,
+      "bytesOut": 107458,
+      "latencyMs": 131,
+      "requests": 5
+    }
+  },
+  "degradations": {
+    "SLOT_UNAVAILABLE:rerank": 2,
+    "TRUNCATED": 7
+  },
+  "ok": true,
+  "slots": {
+    "classify": {
+      "delegated": 0,
+      "local": 2,
+      "unavailable": 0
+    },
+    "decide": {
+      "delegated": 0,
+      "local": 0,
+      "unavailable": 0
+    },
+    "embedding": {
+      "delegated": 0,
+      "local": 5,
+      "unavailable": 0
+    },
+    "rerank": {
+      "delegated": 0,
+      "local": 0,
+      "unavailable": 0
+    },
+    "summarize": {
+      "delegated": 0,
+      "local": 7,
+      "unavailable": 0
+    },
+    "vision": {
+      "delegated": 0,
+      "local": 0,
+      "unavailable": 0
+    }
+  },
+  "totals": {
+    "avgLatencyMs": 3369,
+    "bytesIn": 1414895,
+    "bytesOut": 300179,
+    "latencyMs": 53919,
+    "requests": 16
+  }
+}
+```

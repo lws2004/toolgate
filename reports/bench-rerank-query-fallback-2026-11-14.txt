@@ -1,0 +1,22 @@
+== A) 1200 行（超预算兜底）query=数据库迁移失败的原因 ==
+{"inBytes": 80983, "outBytes": 79654, "outLines": 1201, "ms": 3, "shape": "listing", "queryApplied": null, "notices": [{"code": "SLOT_UNAVAILABLE", "params": {"fallback": "mechanical", "slot": "rerank"}}], "slmStatus": {"classify": "ready", "decide": "ready", "embedding": "ready", "rerank": "ready", "summarize": "ready", "vision": "ready"}}
+  | crates/util/src/mod_01.rs:1: warning: unused variable `tmp_1`
+  | crates/util/src/mod_02.rs:2: warning: unused variable `tmp_2`
+  | crates/util/src/mod_03.rs:3: warning: unused variable `tmp_3`
+  …
+  | [SLOT_UNAVAILABLE] slot=rerank fallback=mechanical
+
+== B) 120 行 query=数据库迁移失败的原因 ==
+{"inBytes": 8221, "outBytes": 7920, "outLines": 120, "ms": 1694, "shape": "listing", "queryApplied": "applied", "notices": [], "slmStatus": {"classify": "ready", "decide": "ready", "embedding": "ready", "rerank": "local", "summarize": "ready", "vision": "ready"}}
+  | crates/db/src/migrate.rs:203: note: 数据库迁移 0009 需人工核对：表 orders 出现重复列
+  | crates/store/src/migrate.rs:42: note: migration 0007 blocked by stale schema, DATABASE_URL points to old snapshot
+  | crates/db/src/migrate.rs:118: note: migration 0007 needs attention -- column type mismatch on orders table
+  …
+  | crates/util/src/mod_01.rs:81: warning: unused variable `tmp_81`
+
+== C) 120 行 query=^fn .*handler ==
+{"inBytes": 8204, "outBytes": 8006, "outLines": 121, "ms": 1574, "shape": "listing", "queryApplied": "rejected_non_natural", "notices": [{"code": "DEGRADED", "params": {"actual": "generic_intent", "reason": "non_natural_query", "requested": "none", "slot": "rerank"}}], "slmStatus": {"classify": "ready", "decide": "ready", "embedding": "ready", "rerank": "local", "summarize": "ready", "vision": "ready"}}
+  | crates/util/src/mod_25.rs:25: warning: unused variable `tmp_25`
+  | crates/util/src/mod_38.rs:118: warning: unused variable `tmp_118`
+  …
+  | [DEGRADED] requested=none actual=generic_intent reason=non_natural_query slot=rerank

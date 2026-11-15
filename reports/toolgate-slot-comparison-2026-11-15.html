@@ -1,0 +1,65 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>toolgate 槽位「有配置 / 无配置」与三态对比（2026-11-15）</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1f2937;--muted:#6b7280;--line:#e5e7eb;--accent:#1e40af;--ok:#065f46;--okbg:#d1fae5;--no:#7c2d12;--nobg:#fee2e2;--warn:#b45309;--warnbg:#fef3c7}
+@media(prefers-color-scheme:dark){:root{--bg:#0f172a;--card:#111827;--fg:#e5e7eb;--muted:#9ca3af;--line:#374151;--accent:#93c5fd;--ok:#6ee7b7;--okbg:#064e3b;--no:#fca5a5;--nobg:#7f1d1d;--warn:#fcd34d;--warnbg:#78350f}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.65 system-ui,-apple-system,"PingFang SC",sans-serif}
+.wrap{max-width:1140px;margin:0 auto;padding:36px 22px 70px}
+h1{font-size:25px;margin:0 0 6px;letter-spacing:-.01em}h2{font-size:18px;margin:36px 0 10px;padding-left:10px;border-left:4px solid var(--accent)}
+h3{font-size:15px;margin:20px 0 6px}.sub{color:var(--muted);font-size:13px;margin-bottom:8px}
+.lead{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:14px 18px;margin:16px 0}
+.kpi{display:flex;gap:12px;flex-wrap:wrap;margin:14px 0}.kpi div{flex:1 1 200px;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:12px 14px}
+.kpi b{display:block;font-size:21px;margin-top:2px}.kpi .k{font-size:12px;color:var(--muted)}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;font-size:13.5px;margin:10px 0}
+th,td{padding:8px 11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:rgba(127,127,127,.08);font-weight:600;white-space:nowrap}tr:last-child td{border-bottom:none}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.b{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600}
+.b.ok{color:var(--ok);background:var(--okbg)}.b.no{color:var(--no);background:var(--nobg)}.b.w{color:var(--warn);background:var(--warnbg)}
+code{background:rgba(127,127,127,.14);padding:1px 5px;border-radius:4px;font-size:12.5px}
+ul{margin:8px 0 0 20px;padding:0}li{margin:5px 0}.note{color:var(--muted);font-size:12.5px}
+footer{margin-top:44px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+</style></head><body><div class="wrap">
+<h1>toolgate 槽位「有配置 / 无配置」与三态对比（2026-11-15）</h1><div class="sub">实测 2026-11-15 · 仓库 /Users/lanws/workspace/toolgate · 数据源 reports/tg_slot_compare.json（本轮重跑）</div>
+
+<div class="lead"><b>结论</b>：本地 <b>4 个槽位真实进入 daemon 的 govern 降级链</b>——summarize / rerank 在正式 daemon 下 <code>meta.slmStatus</code> 报 <code>local</code> 且实际改写输出；embedding 用于长文输入去重（R8）；classify 可服务，但确定性嗅探优先命中时不再调用（本轮 error-like 由链接器前缀直接判 error，0.7ms）。vision 本地仍未接（图片只传引用、不传字节）；decide 不在 govern 链。R9 列表按请求 query 排序的三态已落地（第三节）。</div>
+<div class="kpi">
+<div><div class="k">长文 28.8KB → 本地摘要</div><b>101 B <span class="note">(0.4%)</span></b><div class="note">2528.7ms（热态）</div></div>
+<div><div class="k">三态②默认本地优先</div><b>101 B <span class="note">/ 1984.6ms</span></b></div>
+<div><div class="k">小列表无 query（R10）</div><b>1 ms</b><div class="note">跳过 rerank 原样返回</div></div>
+<div><div class="k">验证基线</div><b>554 / 547</b><div class="note">cargo test / feature 构建</div></div>
+</div>
+
+<h2>一、每个槽位：有配置（A） vs 无配置（B）</h2>
+<table><tr><th>场景</th><th>原始字节</th><th>A 有配置（命中）</th><th>输出字节</th><th>延迟</th><th>B 无配置（命中）</th><th>输出字节</th><th>延迟</th></tr>
+<tr><td>summarize/long_text</td><td class='num'>28766</td><td>local:summarize<div class='note'>shape=long_text</div></td><td class='num'>101 (0.4%)</td><td class='num'>2528.7ms</td><td>L0/机械<div class='note'>shape=long_text</div></td><td class='num'>28766 (100.0%)</td><td class='num'>2.8ms</td></tr><tr><td>rerank/listing</td><td class='num'>4950</td><td>local:rerank<div class='note'>shape=listing</div></td><td class='num'>4950 (100.0%)</td><td class='num'>448.4ms</td><td>L0/机械<div class='note'>shape=listing</div></td><td class='num'>5002 (101.1%)</td><td class='num'>1.4ms</td></tr><tr><td>classify/error-like</td><td class='num'>2335</td><td>L0/机械<div class='note'>shape=error</div></td><td class='num'>2335 (100.0%)</td><td class='num'>0.7ms</td><td>L0/机械<div class='note'>shape=error</div></td><td class='num'>2335 (100.0%)</td><td class='num'>0.7ms</td></tr><tr><td>vision/image</td><td class='num'>0</td><td>L0/机械<div class='note'>shape=vision</div></td><td class='num'>144 (-)</td><td class='num'>0.6ms</td><td>L0/机械<div class='note'>shape=vision</div></td><td class='num'>144 (-)</td><td class='num'>0.7ms</td></tr>
+</table>
+<p class="note">A = 正式 daemon（~/.toolgate/config.yaml，6 槽位全部绑定本地服务）；B = 同一 release 二进制以 HOME=/tmp/tg_nohome 启动（无 config → 本地槽位 None）。两实例走同一 /govern 路径。</p>
+
+<h2>二、三态对比（同一段长文，28.8KB）</h2>
+<table><tr><th>形态</th><th>原始字节</th><th>输出字节</th><th>model / 来源</th><th>延迟</th></tr>
+<tr><td>① 无包装(raw)</td><td class='num'>28766</td><td class='num'>28766 (100.0%)</td><td>—</td><td class='num'>Nonems</td></tr><tr><td>② 有包装/默认(本地优先)</td><td class='num'>28766</td><td class='num'>101 (0.4%)</td><td>local:summarize</td><td class='num'>1984.6ms</td></tr><tr><td>③ 有包装/会话模型(slmPrefer=delegate)</td><td class='num'>28766</td><td class='num'>144 (0.5%)</td><td>session/deepseek-v4.1-flash</td><td class='num'>1341.3ms</td></tr><tr><td>④ 有包装/无本地无委派(L0)</td><td class='num'>28766</td><td class='num'>28766 (100.0%)</td><td>—</td><td class='num'>1.5ms</td></tr>
+</table>
+<p class="note">① 无包装=不经 daemon；② 默认=policy 缺省（本地优先）；③ slmPrefer=delegate 指向宿主 stub（链路验证，非真实宿主延迟）；④ 无本地无委派=B 实例 L0 机械兜底。</p>
+
+<h2>三、R9：列表按请求 query 排序的三态（新增）</h2>
+<table><tr><th>场景</th><th>shape</th><th>queryApplied</th><th>槽位</th><th>耗时</th><th>观察</th></tr><tr><td>120 行 + query=「数据库迁移失败的原因」</td><td>listing</td><td>applied</td><td>rerank=local</td><td class='num'>1198ms</td><td>3 条 migration 行排最前（query 生效）</td></tr><tr><td>120 行 + query=「^fn .*handler」</td><td>listing</td><td>rejected_non_natural</td><td>rerank=local</td><td class='num'>1574ms</td><td>notices 含 DEGRADED(actual=generic_intent reason=non_natural_query)，content 末行同步</td></tr><tr><td>60 行（无 query，R10 跳过）</td><td>listing</td><td>无（跳过不重排）</td><td>未调用</td><td class='num'>1ms</td><td>小列表无排序诉求，原样返回、不带 queryApplied</td></tr><tr><td>120 行 39KB 长行（无 query）</td><td>listing</td><td>not_provided</td><td>rerank=local</td><td class='num'>4952ms</td><td>超 32KiB 仍走 rerank（已知边界：估算按行数未计字节）</td></tr><tr><td>1200 行（&gt;1000 候选，超预算）</td><td>listing</td><td>缺失（兜底不重排）</td><td>未调用</td><td class='num'>3ms</td><td>只发 SLOT_UNAVAILABLE；无 DEGRADED</td></tr><tr><td>1500 行 + rerankChunk 开（R12）</td><td>listing</td><td>applied</td><td>rerank=local（分批）</td><td class='num'>13941ms</td><td>chunked=true；1500 docs 分 2 批 → 32KiB clamp</td></tr></table>
+<p class="note">口径：query 只影响 <code>shape=listing</code> 且候选在预算内的 rerank 排序；非自然语言（含正则元字符/换行/超长）退回固定通用意图串并按 §4.4b 发 DEGRADED；兜底路径（超预算或槽位不可用）不重排、不带 queryApplied，只发 SLOT_UNAVAILABLE。</p>
+
+<h2>四、发现与边界</h2>
+<ul>
+<li><b>长文收益最高、代价也最高</b>：28.8KB→101B（0.4%）用 2.5s；R10 把触发线下调到 32KiB 后，600 行 40.4s→2.5s、1000 行 42.1s→2.2s（此前 600 行 35.3s、1000 行 42.1s 全量送模型）。延迟随输入增长，所以「先减输入」比「调超时」有效。</li>
+<li><b>列表超预算走毫秒级兜底</b>：3000 行 108.8KB → 71927B/2004 行仅 2ms（TRUNCATED + SLOT_UNAVAILABLE）；候选 ≤1000 且 ≤2s 才真实调用 rerank；R10 起无 query 且 ≤32KiB 的小列表直接跳过 rerank（60 行 448ms→1ms）。</li>
+<li><b>错误保真分档</b>：短错误逐字 100% 保留；超 32KiB 走确定性压缩（40KB 样本 101779B→16397B，263 行），不入模型。</li>
+<li><b>确定性嗅探优先</b>：/usr/bin/ld、undefined reference to、collect2、error[CODE] 等前缀已识别为 error，不再依赖 classify；因此本轮 error-like 的 A 态与 B 态一致（均 0.7ms L0）。</li>
+<li><b>vision 本地未接、decide 不在链</b>：前者受「图片只传引用」限制，后者属各工具判定用途；均按红线 #3 保持「增强不是依赖」。</li>
+</ul>
+
+<h2>五、方法与复现</h2>
+<ul>
+<li>脚本：<code>reports/tg_slot_compare.py</code>（Python 标准库）：Unix socket 手写 HTTP/1.1 调 POST /govern；内置 127.0.0.1:18080 委派 stub；以 HOME=/tmp/tg_nohome 起第二 daemon 作 B 态。</li>
+<li>数据：<code>reports/tg_slot_compare.json</code>（本轮重跑；旧版备份 <code>tg_slot_compare-2026-11-14.json</code>）；query 三态数据见 <code>reports/bench-rerank-query-fallback-2026-11-14.txt</code>、<code>bench-rerank-query-2026-11-14.txt</code>。</li>
+<li>验证基线（2026-11-15）：<code>cargo test --workspace</code> 554 passed；<code>--features external-protocols</code> 547 passed；clippy 无告警；<code>./scripts/check-doc.sh</code> 通过（7081 行）；适配器 <code>node --test</code> 35 passed。</li>
+</ul>
+<footer>toolgate · 2026-11-15 · 数据口径：daemon /govern 实测，UTF-8 字节，墙钟延迟；本报告为单机单次快照</footer>
+</div></body></html>

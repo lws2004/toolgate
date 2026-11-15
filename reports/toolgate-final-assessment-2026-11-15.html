@@ -1,0 +1,95 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>toolgate 最终评估：作用、边界与下一步（2026-11-15）</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1f2937;--muted:#6b7280;--line:#e5e7eb;--accent:#1e40af;--ok:#065f46;--okbg:#d1fae5;--no:#7c2d12;--nobg:#fee2e2;--warn:#b45309;--warnbg:#fef3c7}
+@media(prefers-color-scheme:dark){:root{--bg:#0f172a;--card:#111827;--fg:#e5e7eb;--muted:#9ca3af;--line:#374151;--accent:#93c5fd;--ok:#6ee7b7;--okbg:#064e3b;--no:#fca5a5;--nobg:#7f1d1d;--warn:#fcd34d;--warnbg:#78350f}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.65 system-ui,-apple-system,"PingFang SC",sans-serif}
+.wrap{max-width:1140px;margin:0 auto;padding:36px 22px 70px}
+h1{font-size:25px;margin:0 0 6px;letter-spacing:-.01em}h2{font-size:18px;margin:36px 0 10px;padding-left:10px;border-left:4px solid var(--accent)}
+h3{font-size:15px;margin:20px 0 6px}.sub{color:var(--muted);font-size:13px;margin-bottom:8px}
+.lead{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:14px 18px;margin:16px 0}
+.kpi{display:flex;gap:12px;flex-wrap:wrap;margin:14px 0}.kpi div{flex:1 1 200px;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:12px 14px}
+.kpi b{display:block;font-size:21px;margin-top:2px}.kpi .k{font-size:12px;color:var(--muted)}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;font-size:13.5px;margin:10px 0}
+th,td{padding:8px 11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:rgba(127,127,127,.08);font-weight:600;white-space:nowrap}tr:last-child td{border-bottom:none}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.b{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600}
+.b.ok{color:var(--ok);background:var(--okbg)}.b.no{color:var(--no);background:var(--nobg)}.b.w{color:var(--warn);background:var(--warnbg)}
+code{background:rgba(127,127,127,.14);padding:1px 5px;border-radius:4px;font-size:12.5px}
+ul{margin:8px 0 0 20px;padding:0}li{margin:5px 0}.note{color:var(--muted);font-size:12.5px}
+footer{margin-top:44px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+</style></head><body><div class="wrap">
+<h1>toolgate 最终评估：作用、边界与下一步（2026-11-15）</h1><div class="sub">toolgate · final assessment · 2026-11-15 · 单机实测，字节 UTF-8，延迟墙钟</div>
+
+<div class="lead"><b>结论</b>：机制已闭环，作用按形状分层。相对 2026-11-14 版，11-14 提出的三个 P0 建议（列表 2s 预算、长文先采样再摘要、/stats 可观测性）已全部落地；本地槽位也已真正接入 govern 降级链（R8），列表可按请求 query 排序（R9）。R10 已把长文摘要延迟降到 2–3s（600 行 40.4s→2.5s）；&gt;1000 行列表分段 rerank 成本 35–40s 远高于 2s 预算，明确不做，维持毫秒级兜底。R12 增两个默认关可选增强（分段 rerank、embedding 选行）与 L0 字节 clamp；3000 行列表 71927B→32969B。</div>
+<div class="kpi">
+<div><div class="k">长文 28.8KB → </div><b>101 B <span class="note">(0.4%, 2.5s)</span></b></div>
+<div><div class="k">列表 3000 行 兜底</div><b>2 ms</b><div class="note">71927B / 2004 行</div></div>
+<div><div class="k">R9 query 三态</div><b>已落地</b><div class="note">applied / rejected / not_provided</div></div>
+<div><div class="k">验证基线</div><b>554 / 547</b><div class="note">cargo test / feature</div></div>
+</div>
+
+<h2>01 机制：成立，且已在真实链路闭环</h2>
+<ul>
+<li>治理对象是 <code>content</code>（模型可见投影），不是 PTC 内层 <code>value</code>；适配器挂 post-execute 治理前者。</li>
+<li>嵌套调用跳过 /govern（内层 38ms，旧行为约 10.7s）。</li>
+<li>降级链 local → delegated → L0 三档，<code>policy.slmPrefer</code> 可切；本地槽位现已在这条链上。</li>
+<li>错误转发保真：fact/reason/nextSteps 只进 <code>structuredContent.error</code>。</li>
+</ul>
+
+<h2>02 作用评估：四个象限（本轮实测口径）</h2>
+<h3>高收益 / 可接受成本 <span class='b ok'>正收益</span></h3><ul><li>长文本（约 8–32KB）：本地摘要 0.4–0.7% 输出、2–3s 级延迟，是稳定的正收益场景。</li><li>需要语义排序的多文档候选：rerank 有价值；R9 起可按请求 query 定向保留，候选 ≤1000。</li><li>PTC 嵌套跳过：38ms，只在结果真正进模型时治理一次。</li></ul><h3>高收益 / 高成本 <span class='b w'>注意</span></h3><ul><li>超大长文（180KB 级）：先采样 32KiB 再摘要，2200 行 4.2s；不采样则更慢。</li><li>600 行 summary：R10 采样后仅 2.5s（原 35.3s）——已转为可接受成本。</li></ul><h3>低收益 / 高成本 <span class='b w'>注意</span></h3><ul><li>短错误：分类命中但正文保真、0% 压缩；价值在可归因不在瘦身。</li><li>60 行短列表：R10 已改为无 query 时跳过 rerank（1ms）。</li></ul><h3>低收益 / 低成本 <span class='b ok'>正收益</span></h3><ul><li>结构化 JSON：只补 meta/data，≈1ms。</li><li>列表超 1000 行：毫秒级兜底（2ms），不请求模型。</li></ul>
+
+<h2>03 三态：默认本地优先，会话模型是可选策略</h2>
+<table><tr><th>形态</th><th>原始</th><th>输出</th><th>模型 / 来源</th><th>延迟</th></tr>
+<tr><td>① 无包装 raw</td><td class="num">28,766 B</td><td class="num">28,766 B (100%)</td><td>—</td><td>—</td></tr>
+<tr><td>② 默认本地优先</td><td class="num">28,766 B</td><td class="num">101 B (0.4%)</td><td>local:summarize</td><td class="num">1984.6ms</td></tr>
+<tr><td>③ slmPrefer=delegate + stub</td><td class="num">28,766 B</td><td class="num">144 B (0.5%)</td><td>session / stub</td><td class="num">1341.3ms</td></tr>
+<tr><td>④ 无本地无委派 L0</td><td class="num">28,766 B</td><td class="num">28,766 B (100%)</td><td>L0/机械</td><td class="num">1.5ms</td></tr>
+</table>
+<p class="note">③ 用 stub 验证链路可达，不代表真实宿主延迟；本机 summarize 放本地 qwen3.6-35B-A3B，换隐私与零外部成本，代价是延迟。</p>
+
+<h2>04 已完成 / 待办</h2>
+<h3><span class="b ok">已完成</span> 11-14 版 P0 建议全部落地</h3>
+<ul>
+<li>列表治理 2s 预算 + 确定性兜底（超 1000 候选毫秒级，不再白等模型）。</li>
+<li>长文先采样再摘要（&gt;64KB 先采样到 32KiB；intent=summary 放宽 120KiB；完整原文落盘回指针）。</li>
+<li><code>/stats</code> 可观测性（按 shape 的请求数/字节/耗时）与结构化治理日志。</li>
+<li>额外：本地槽位入链（R8，含 embedding 长文去重）、列表按请求 query 排序（R9，三态 + DEGRADED 告知 + query 作为数据字段）。</li>
+</ul>
+<h3><span class="b ok">已完成</span> R10 治理时间预算优化</h3>
+<ul>
+<li><b>长文摘要延迟</b>：采样触发线 64KiB→32KiB、取消 summary 放宽 120KiB；600 行 40.4s→2.5s、1000 行 42.1s→2.2s。</li>
+<li><b>小列表无谓重排</b>：无 query 且 ≤32KiB 的小列表跳过 rerank（60 行 448ms→1ms）。</li>
+</ul>
+<h3><span class="b w">待办</span> 剩余短板</h3>
+<ul>
+<li><b>vision 本地未接</b>：受「图片只传引用」限制，除非宿主提供像素或本地解码，否则维持 L0/委派。</li>
+<li><b>第三级 classify 偶发误判</b>：实测 60 行 info 日志在 intent=debug/summary 时被判 long_text 并摘要为空（45B），raw 正常透传；需加确定性护栏，列为下一个独立主题。</li>
+</ul>
+<h3><span class="b no">不做</span> 明确不在本期</h3>
+<ul>
+<li>&gt;1000 行列表分段 rerank：成本约 35–40s（1000 docs≈11–13.6s×3）远高于 2s 预算，维持毫秒级兜底不排序。</li>
+<li>不为「槽位齐全」而接 decide / vision；decide 属工具判定用途，不在 govern 链。</li>
+<li>不为 query 单独写 ADR（向后兼容的可选字段，§18.7 已记录契约）。</li>
+</ul>
+
+<h2>05 边界与风险</h2>
+<ul>
+<li>冷启：本地 summarize 首次曾 23.5s；daemon 启动后台预热已缓解，重启后首个大请求仍可能长等待。</li>
+<li>长文硬上限：超大输入必须先减输入，只调超时会拉长等待；R10 采样固定 32KiB（头+关键行+尾），完整内容走落盘指针。</li>
+<li>rerank 服务端 1000 docs 上限：daemon 按 1000 分片串行合并分数。</li>
+<li>短错误不省字节、结构化 JSON 不压缩：均为有意的正确性/契约选择。</li>
+<li>单机单次实测，非吞吐/并发结论；平台仍为 macOS 第一期。</li>
+</ul>
+
+<h2>06 方法与复现</h2>
+<ul>
+<li>槽位 A/B 与三态：<code>reports/tg_slot_compare.py</code>（A=正式 config，B=HOME=/tmp/tg_nohome）。</li>
+<li>预算与形状：<code>reports/bench_govern_budget.py .toolgate/daemon.sock</code>。</li>
+<li>query 三态：<code>scripts/bench_govern.py --lines 120/1200 --query ...</code>，输出存 <code>reports/bench-rerank-query-*-2026-11-14.txt</code>。</li>
+<li>验证：cargo test --workspace 548；--features external-protocols 541；clippy 无告警；check-doc.sh 通过（7081 行）；适配器 node --test 35。</li>
+</ul>
+<footer>toolgate · 2026-11-15 · 数据口径：daemon /govern 实测，UTF-8 字节，墙钟延迟；本报告为单机单次快照</footer>
+</div></body></html>

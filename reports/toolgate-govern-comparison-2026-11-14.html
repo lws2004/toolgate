@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>toolgate 配置修复与治理效果对比 · 2026-11-14</title>
+<style>
+:root{--ink:#1f2937;--muted:#6b7280;--line:#e5e7eb;--bg:#f8fafc;--card:#fff;--blue:#0c447c;--bluebg:#b5d4f4;--green:#085041;--greenbg:#9fe1cb;--orange:#633806;--orangebg:#fac775;--red:#991b1b;--redbg:#fecaca;--purple:#3c3489;--purplebg:#cecbf6}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink);background:var(--bg);line-height:1.65}
+.wrap{max-width:1080px;margin:0 auto;padding:40px 28px 80px}
+h1{font-size:26px;margin:0 0 6px}h2{font-size:19px;margin:38px 0 12px;padding-bottom:6px;border-bottom:2px solid var(--line)}
+.sub{color:var(--muted);font-size:13px;margin-bottom:8px}
+.lead{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:8px;padding:16px 20px;margin:18px 0}
+.lead b{color:var(--blue)}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px}
+.stat .k{font-size:12px;color:var(--muted)}.stat .v{font-size:22px;font-weight:700;margin-top:4px}
+.stat.good .v{color:var(--green)}.stat.warn .v{color:var(--orange)}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;font-size:13.5px;margin:12px 0}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+th{background:#eef2f7;font-weight:600;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600}
+.p-good{background:var(--greenbg);color:var(--green)}.p-warn{background:var(--orangebg);color:var(--orange)}
+.p-bad{background:var(--redbg);color:var(--red)}.p-info{background:var(--bluebg);color:var(--blue)}.p-mute{background:#e5e7eb;color:#374151}
+.bar{height:10px;border-radius:5px;background:#e5e7eb;position:relative;min-width:90px}
+.bar>i{position:absolute;left:0;top:0;bottom:0;border-radius:5px}
+.defect{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--red);border-radius:8px;padding:14px 18px;margin:12px 0}
+.defect h3{margin:0 0 6px;font-size:15px;color:var(--red)}
+.evidence{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:#f3f4f6;border-radius:6px;padding:8px 10px;margin:8px 0;overflow:auto;white-space:pre-wrap}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:12.5px}
+pre{background:#0f172a;color:#e2e8f0;border-radius:8px;padding:14px 16px;overflow:auto;font-size:12.5px;line-height:1.5}
+.note{font-size:12.5px;color:var(--muted)}
+.legend{display:flex;gap:16px;font-size:12px;color:var(--muted);margin:6px 0}
+.legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+</style></head><body><div class="wrap">
+
+<h1>toolgate 配置修复与治理效果对比</h1>
+<div class="sub">生成时间 2026-11-14 · 工作目录 /Users/lanws/workspace/toolgate · 口径：daemon govern 实测</div>
+
+<div class="lead">
+<b>一句话结论：</b>配置已修复——把 release 构建从「默认（无 HTTP 客户端）」换成 <code>--features external-protocols</code> 后，六个本地模型槽位从「no_client」全部转为 <span class="pill p-good">ready</span>，并实测 lfm25/d3-nano 真被调用成功。
+<br><br>
+治理价值几乎全部来自<b>反向委派（宿主会话模型）</b>：81KB 长文经委派压缩到 855B（<b>≈95:1</b>），标准编译错误从机械模板变成三段式。而<b>无委派（纯 L0 机械）时，长文只做「保留末 50KB」的硬截断、错误模板反而膨胀 137%</b>。同时实测发现 3 个待修缺陷（见 §4），最严重的是 <code>error[E0308]:</code> 这类 Rust 标准编译错误被整段透传、完全不治理。
+</div>
+
+<div class="grid">
+  <div class="stat"><div class="k">本地槽位状态</div><div class="v">6/6 ready</div></div>
+  <div class="stat good"><div class="k">summarize(lfm25) 实测</div><div class="v">433ms</div></div>
+  <div class="stat good"><div class="k">decide(d3-nano) 实测</div><div class="v">136ms</div></div>
+  <div class="stat warn"><div class="k">待修缺陷</div><div class="v">3 条</div></div>
+</div>
+
+<h2>1 · 配置修复：默认构建 → 带 HTTP 客户端</h2>
+<table>
+<tr><th>项</th><th>修复前</th><th>修复后</th></tr>
+<tr><td>构建</td><td><code>cargo build --release -p toolgate-cli</code>（默认，无 reqwest）</td><td><code>... --features external-protocols</code>（编入 reqwest）</td></tr>
+<tr><td><code>toolgate list</code> 槽位</td><td><span class="pill p-bad">6 个全部「原因=no_client」</span></td><td><span class="pill p-good">6 个「绑定=自动，适配器 native/text」</span></td></tr>
+<tr><td>govern 内 slmStatus</td><td>全 unavailable</td><td><span class="pill p-good">全 ready</span>（search 工具 meta 实证）</td></tr>
+<tr><td>本地模型真实调用</td><td>空转（客户端未编入）</td><td>summarize 433ms ok / decide 136ms gate=adopt(p=1.0) / lfm25 直连 ok</td></tr>
+</table>
+<p class="note">槽位绑定（§3.10，<code>toolgate config check</code> 输出）：classify/decide=d3-nano(systemone:8082,native) · summarize=lfm25(openai:10031,text) · vision=minicpm-v(openai:10014,text) · rerank=jina-rerank(rerank:10020,native) · embedding=bge-m3(embedding:10020,native)。重启方式：<code>launchctl kickstart -k gui/$(id -u)/com.toolgate.daemon</code>，health 返回 <code>{"ok":true,"service":"toolgate-daemon"}</code>。</p>
+
+<h2>2 · 治理效果对比：未包装 vs 包装</h2>
+<div class="legend">
+<span style="--c:#9ca3af"><i style="display:inline-block;width:10px;height:10px;background:#9ca3af;border-radius:3px;margin-right:5px"></i>L0 机械（无委派）</span>
+<span><i style="display:inline-block;width:10px;height:10px;background:#0c447c;border-radius:3px;margin-right:5px"></i>DEL 反向委派</span>
+</div>
+<table>
+<tr><th>样本</th><th class="num">原始</th><th class="num">L0 机械输出</th><th class="num">委派输出</th><th>shape</th><th class="num">委派耗时</th><th>评价</th></tr>
+<tr>
+  <td>大文本<br><span class="note">81,273 B / 1528 行</span></td>
+  <td class="num">81.3 KB</td>
+  <td class="num">51.3 KB <span class="p-warn pill">63.2%</span></td>
+  <td class="num">855 B <span class="p-good pill">1.1%</span></td>
+  <td>long_text</td><td class="num">1145 ms</td>
+  <td>委派 ≈<b>95:1</b>；L0 只留末 50KB，丢前部不可读</td>
+</tr>
+<tr>
+  <td>大列表<br><span class="note">84,693 B / 2501 行</span></td>
+  <td class="num">84.7 KB</td>
+  <td class="num">51.5 KB <span class="p-warn pill">60.8%</span></td>
+  <td class="num">426 B <span class="p-good pill">0.5%</span></td>
+  <td>long_text</td><td class="num">588 ms</td>
+  <td>委派 ≈<b>199:1</b>；弱模型摘要出现事实错误（见缺陷D）</td>
+</tr>
+<tr>
+  <td>错误（标准 <code>error:</code> 开头）<br><span class="note">267 B</span></td>
+  <td class="num">267 B</td>
+  <td class="num">367 B <span class="p-bad pill">137.5%↑</span></td>
+  <td class="num">207 B <span class="p-good pill">77.5%</span></td>
+  <td>error</td><td class="num">1 ms</td>
+  <td>L0 模板比原文更长且无信息量；委派变三段式</td>
+</tr>
+<tr>
+  <td>错误（Rust <code>error[E0308]:</code>）<br><span class="note">145 B</span></td>
+  <td class="num">145 B</td>
+  <td class="num">145 B <span class="p-bad pill">100% 透传</span></td>
+  <td class="num">145 B <span class="p-bad pill">100% 透传</span></td>
+  <td>pass_through</td><td class="num">0.2 ms</td>
+  <td><b>⚠ 缺陷A：整段不治理</b></td>
+</tr>
+<tr>
+  <td>结构化 JSON<br><span class="note">300 条 / 13,441 B</span></td>
+  <td class="num">13.4 KB</td>
+  <td class="num">13.4 KB <span class="p-mute pill">100%</span></td>
+  <td class="num">13.4 KB <span class="p-mute pill">100%</span></td>
+  <td>structured</td><td class="num">1 ms</td>
+  <td>设计如此：保留结构，仅补 meta/data</td>
+</tr>
+<tr>
+  <td>小输出<br><span class="note">54 B</span></td>
+  <td class="num">54 B</td>
+  <td class="num">54 B <span class="p-mute pill">100%</span></td>
+  <td class="num">54 B <span class="p-mute pill">100%</span></td>
+  <td>pass_through</td><td class="num">0.1 ms</td>
+  <td>设计如此：形状不识别则原样透传</td>
+</tr>
+</table>
+<p class="note">口径说明：<b>L0 机械</b>=daemon 不带 <code>policy.delegate</code> 的确定性治理；<b>DEL 反向委派</b>=daemon 把内容回投委派端点（本测试用本地 lfm25 作替身，生产环境为宿主会话模型）；<b>原始</b>=未经治理的工具输出。压缩比=输出字节/原始字节。大文本/大列表样本为真实仓库文档与 2500 行文件清单。</p>
+
+<h2>3 · 关键架构事实：daemon 的 govern 不用本地 SLM</h2>
+<p><code>crates/toolgate-daemon/src/lib.rs</code> 的 <code>ServerCtx</code> 只有 <code>{ spill, cwd }</code>，<code>route</code> 里 <code>POST /govern → govern_with(&amp;req, &amp;ctx.spill, Some(&amp;HttpDelegate))</code>——<b>只把反向委派客户端交给 core，不注入任何本地 SlotClient</b>。所以：</p>
+<ul>
+<li>daemon 治理链的长文/错误/列表<b>只能靠宿主会话模型委派</b>；本地 6 槽位只服务 <code>toolgate serve</code>（MCP）/<code>list</code>/<code>call</code> 工具与 CLI 调试子命令。</li>
+<li>推论：宿主不提供 delegate 端点时（纯 CLI、未挂适配器），govern 只剩机械 L0——质量见上表（截断/膨胀）。</li>
+</ul>
+
+<h2>4 · 测试发现的缺陷（待修，未擅自改动）</h2>
+
+<div class="defect"><h3>缺陷 A（严重）：Rust 标准编译错误不被识别</h3>
+<p><code>looks_like_error</code>（govern.rs:816）只认行首 <code>error:</code> / <code>traceback</code> / <code>panicked at</code> / <code>exit code</code> 等，<b>不认 <code>error[E0308]:</code> 这种带 [CODE] 的 rustc 标准错误</b>。而这是 Rust 编译失败最高频的形态。</p>
+<div class="evidence">同内容改开头即被治理：<br>  开头 "error: could not compile ..."  → shape=error，三段式 367B/207B ✅<br>  开头 "error[E0308]: mismatched types" → shape=pass_through，145B 原样透传 ❌</div>
+<p class="note">影响：真实 <code>cargo build</code>/<code>cargo test</code> 失败输出大概率整段进上下文，不治理。</p>
+</div>
+
+<div class="defect"><h3>缺陷 B：govern 与本地 SLM 解耦，无委派时质量骤降</h3>
+<p>见 §3。本地 lfm25 明明能在 433ms 内摘要（实测），但 daemon govern 链用不上它——长文只能硬截断到 50KB、错误只能套机械模板（还膨胀）。</p>
+<p class="note">注：这是架构取舍（§18.7 委派给宿主），不是 bug；但意味着「配好本地模型」对 daemon govern 无增益，需向使用者讲清。</p>
+</div>
+
+<div class="defect"><h3>缺陷 C：L0 机械治理的兜底质量不佳</h3>
+<p>长文 <code>truncate_tail</code> 只保留末尾 50KB/2000 行（丢失前部 37%，非摘要、不可读）；错误模板 <code>error_view_from_text</code> 产出「事实/原因/可选下一步」固定句式，对具体错误无信息增益，还会让字节膨胀（267→367B，137%）。</p>
+</div>
+
+<div class="defect"><h3>缺陷 D：委派若用弱模型，摘要质量不可靠</h3>
+<p>本测试用 lfm25(1.2B) 作委派替身，2500 行文件清单被摘要成「27 篇文本、不超过 80MB」等<b>明显事实错误</b>。说明委派质量强依赖宿主模型强度——生产中回投宿主强模型是对的，但不应改用本地小模型做委派。</p>
+</div>
+
+<h2>5 · 复现命令</h2>
+<pre># 1) 带 HTTP 客户端构建 + 重启 daemon
+cd /Users/lanws/workspace/toolgate
+cargo build --release -p toolgate-cli --features external-protocols
+launchctl kickstart -k gui/$(id -u)/com.toolgate.daemon
+./target/release/toolgate config check          # 6 槽位绑定
+# 2) 本地槽位连通实测
+./target/release/toolgate summarize --json --text "任意文本"
+./target/release/toolgate decide --json --state "The sky is blue." --question "Is the sky blue?"
+# 3) 治理对比（起本地 delegate 替身 + 对 daemon /govern 发样本）
+python3 /tmp/tg_compare.py</pre>
+<p class="note">对比脚本 /tmp/tg_compare.py：起 127.0.0.1:18777 的 /delegate 替身（summarize 走 lfm25、classify/rerank 规则替身），对 daemon unix socket 分别发 L0 与 DEL 两种 policy，统计字节/耗时/shape。</p>
+
+<p class="note" style="margin-top:30px">本报告为单次实测快照，数字标口径：延迟=脚本端到端计时（含网络与本地模型生成），字节=UTF-8 编码长度。待修缺陷均属行为契约层面，按仓库 AGENTS.md「先文档后代码」纪律未擅自改动，仅报告。</p>
+
+</div></body></html>

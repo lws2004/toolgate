@@ -1,0 +1,41 @@
+{
+  "date": "2026-11-14",
+  "note": "报告边界修复复测；direct 为 Unix socket 直连 /govern，adapter 为 dsh 适配器 createPostHandler 经真实 daemon。",
+  "direct": [
+    {
+      "case": "linker_error",
+      "input_bytes": 102,
+      "ms": 0,
+      "is_error": true,
+      "out_bytes": 102,
+      "content_exact": true,
+      "fact": "返回携带错误标记：collect2: error: ld returned 1 exit status"
+    },
+    {
+      "case": "listing_3000_lines",
+      "input_lines": 3000,
+      "ms": 19546,
+      "out_lines": 2000,
+      "out_bytes": 70904,
+      "slm_status": "local"
+    },
+    {
+      "case": "long_text_2200_lines_183.7KB",
+      "input_lines": 2200,
+      "input_bytes": 183700,
+      "ms": 17359,
+      "out_lines": 5,
+      "out_bytes": 335,
+      "truncated": true,
+      "slm_status": "local"
+    }
+  ],
+  "adapter_handler": {
+    "case": "listing_3000_short_lines",
+    "input_lines": 3000,
+    "ms": 10540,
+    "out_lines": 2000,
+    "out_bytes": 23164,
+    "timeout_ms": 30000
+  }
+}

@@ -1,0 +1,164 @@
+{
+  "slots": [
+    {
+      "case": "summarize/long_text",
+      "rawBytes": 28766,
+      "A_local_on": {
+        "shape": "long_text",
+        "classified": false,
+        "classifiedShape": null,
+        "model": "local:summarize",
+        "slmActive": {
+          "summarize": "local"
+        },
+        "outBytes": 203,
+        "isError": false,
+        "latencyMs": 24631.7,
+        "preview": "结论：cn-east区域Worker集群运行正常，处理耗时与数据量呈线性增长。 关键数据：处理批次00000-00299（共300批），耗时1ms-299ms，累计行数897行。 待办：无。"
+      },
+      "B_local_off": {
+        "shape": "long_text",
+        "classified": false,
+        "classifiedShape": null,
+        "model": null,
+        "slmActive": {},
+        "outBytes": 28766,
+        "isError": false,
+        "latencyMs": 0.9,
+        "preview": "\u001b[31m2026-11-14T12:00:00Z INFO worker[0] processed batch id=00000 region=cn-east took=0ms rows=0 2026-11-14T12:01:00Z IN"
+      }
+    },
+    {
+      "case": "rerank/listing",
+      "rawBytes": 4950,
+      "A_local_on": {
+        "shape": "listing",
+        "classified": false,
+        "classifiedShape": null,
+        "model": "local:rerank",
+        "slmActive": {
+          "rerank": "local"
+        },
+        "outBytes": 4950,
+        "isError": false,
+        "latencyMs": 587.5,
+        "preview": "src/crates/toolgate-core/src/module_0000.rs:1: let handler_0 = process(item_0); src/crates/toolgate-core/src/module_0001"
+      },
+      "B_local_off": {
+        "shape": "listing",
+        "classified": false,
+        "classifiedShape": null,
+        "model": null,
+        "slmActive": {},
+        "outBytes": 5002,
+        "isError": false,
+        "latencyMs": 0.6,
+        "preview": "src/crates/toolgate-core/src/module_0000.rs:1: let handler_0 = process(item_0); src/crates/toolgate-core/src/module_0001"
+      }
+    },
+    {
+      "case": "classify/error-like",
+      "rawBytes": 2335,
+      "A_local_on": {
+        "shape": "error",
+        "classified": true,
+        "classifiedShape": "error",
+        "model": null,
+        "slmActive": {
+          "classify": "local"
+        },
+        "outBytes": 2335,
+        "isError": true,
+        "latencyMs": 301.5,
+        "preview": "构建在链接阶段终止，链接器报告若干未解析符号。 undefined reference to process_item_0 in module_0 during final link step undefined reference to "
+      },
+      "B_local_off": {
+        "shape": "pass_through",
+        "classified": false,
+        "classifiedShape": null,
+        "model": null,
+        "slmActive": {},
+        "outBytes": 2335,
+        "isError": false,
+        "latencyMs": 0.4,
+        "preview": "构建在链接阶段终止，链接器报告若干未解析符号。 undefined reference to process_item_0 in module_0 during final link step undefined reference to "
+      }
+    },
+    {
+      "case": "vision/image",
+      "rawBytes": 0,
+      "A_local_on": {
+        "shape": "vision",
+        "classified": false,
+        "classifiedShape": null,
+        "model": null,
+        "slmActive": {},
+        "outBytes": 144,
+        "isError": false,
+        "latencyMs": 0.2,
+        "preview": "图片（元信息档）：已识别 image block；视觉槽位不可用，未做 OCR / 描述  [SLOT_UNAVAILABLE] slot=vision fallback=metadata"
+      },
+      "B_local_off": {
+        "shape": "vision",
+        "classified": false,
+        "classifiedShape": null,
+        "model": null,
+        "slmActive": {},
+        "outBytes": 144,
+        "isError": false,
+        "latencyMs": 0.2,
+        "preview": "图片（元信息档）：已识别 image block；视觉槽位不可用，未做 OCR / 描述  [SLOT_UNAVAILABLE] slot=vision fallback=metadata"
+      }
+    }
+  ],
+  "three_state": [
+    {
+      "state": "① 无包装(raw)",
+      "rawBytes": 28766,
+      "outBytes": 28766
+    },
+    {
+      "state": "② 有包装/默认(本地优先)",
+      "rawBytes": 28766,
+      "shape": "long_text",
+      "classified": false,
+      "classifiedShape": null,
+      "model": "local:summarize",
+      "slmActive": {
+        "summarize": "local"
+      },
+      "outBytes": 203,
+      "isError": false,
+      "latencyMs": 1331.5,
+      "preview": "结论：cn-east区域Worker集群运行正常，处理耗时与数据量呈线性增长。 关键数据：处理批次00000-00299（共300批），耗时1ms-299ms，累计行数897行。 待办：无。"
+    },
+    {
+      "state": "③ 有包装/会话模型(slmPrefer=delegate)",
+      "rawBytes": 28766,
+      "shape": "long_text",
+      "classified": false,
+      "classifiedShape": null,
+      "model": "session/deepseek-v4.1-flash",
+      "slmActive": {
+        "summarize": "delegated"
+      },
+      "outBytes": 144,
+      "isError": false,
+      "latencyMs": 3.0,
+      "preview": "【会话模型摘要】收到长文 300 行；关键线索：worker 批处理正常，末段有 1 条超时告警；已保留路径与数字。"
+    },
+    {
+      "state": "④ 有包装/无本地无委派(L0)",
+      "rawBytes": 28766,
+      "shape": "long_text",
+      "classified": false,
+      "classifiedShape": null,
+      "model": null,
+      "slmActive": {},
+      "outBytes": 28766,
+      "isError": false,
+      "latencyMs": 0.6,
+      "preview": "\u001b[31m2026-11-14T12:00:00Z INFO worker[0] processed batch id=00000 region=cn-east took=0ms rows=0 2026-11-14T12:01:00Z IN"
+    }
+  ]
+}

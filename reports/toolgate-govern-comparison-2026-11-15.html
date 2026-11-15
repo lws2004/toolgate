@@ -1,0 +1,79 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>toolgate 配置修复与治理效果对比 · 2026-11-15</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1f2937;--muted:#6b7280;--line:#e5e7eb;--accent:#1e40af;--ok:#065f46;--okbg:#d1fae5;--no:#7c2d12;--nobg:#fee2e2;--warn:#b45309;--warnbg:#fef3c7}
+@media(prefers-color-scheme:dark){:root{--bg:#0f172a;--card:#111827;--fg:#e5e7eb;--muted:#9ca3af;--line:#374151;--accent:#93c5fd;--ok:#6ee7b7;--okbg:#064e3b;--no:#fca5a5;--nobg:#7f1d1d;--warn:#fcd34d;--warnbg:#78350f}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.65 system-ui,-apple-system,"PingFang SC",sans-serif}
+.wrap{max-width:1140px;margin:0 auto;padding:36px 22px 70px}
+h1{font-size:25px;margin:0 0 6px;letter-spacing:-.01em}h2{font-size:18px;margin:36px 0 10px;padding-left:10px;border-left:4px solid var(--accent)}
+h3{font-size:15px;margin:20px 0 6px}.sub{color:var(--muted);font-size:13px;margin-bottom:8px}
+.lead{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:14px 18px;margin:16px 0}
+.kpi{display:flex;gap:12px;flex-wrap:wrap;margin:14px 0}.kpi div{flex:1 1 200px;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:12px 14px}
+.kpi b{display:block;font-size:21px;margin-top:2px}.kpi .k{font-size:12px;color:var(--muted)}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;font-size:13.5px;margin:10px 0}
+th,td{padding:8px 11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:rgba(127,127,127,.08);font-weight:600;white-space:nowrap}tr:last-child td{border-bottom:none}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.b{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600}
+.b.ok{color:var(--ok);background:var(--okbg)}.b.no{color:var(--no);background:var(--nobg)}.b.w{color:var(--warn);background:var(--warnbg)}
+code{background:rgba(127,127,127,.14);padding:1px 5px;border-radius:4px;font-size:12.5px}
+ul{margin:8px 0 0 20px;padding:0}li{margin:5px 0}.note{color:var(--muted);font-size:12.5px}
+footer{margin-top:44px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+</style></head><body><div class="wrap">
+<h1>toolgate 配置修复与治理效果对比 · 2026-11-15</h1><div class="sub">生成时间 2026-11-15 · 工作目录 /Users/lanws/workspace/toolgate · 口径：daemon govern 实测</div>
+
+<div class="lead"><b>一句话结论</b>：把 release 构建从「默认（无 HTTP 客户端）」换成 <code>--features external-protocols</code> 后，6 个本地模型槽位从 <code>no_client</code> 全部转为 <code>ready</code>，并且（R8 之后）<b>已真正接入 daemon 的 govern 降级链</b>：summarize / rerank 实测 local 命中并改写输出；无委派时 L0 机械兜底仍可跑通。治理效果按形状分层：长文强（28.8KB→101B）、列表超 1000 行毫秒级兜底（省时）、短错误 100% 保真、超 32KiB 错误确定性压缩。R9 起列表还可按请求 query 排序；R10 把 600 行摘要由 40.4s 降到 2.5s、60 行列表由 448ms 降到 1ms（长文触发线下调 + 小列表跳过重排）。</div>
+<div class="kpi">
+<div><div class="k">本地槽位状态</div><b>6 / 6 ready</b></div>
+<div><div class="k">长文 28.8KB 治理后</div><b>101 B <span class="note">(0.4%)</span></b></div>
+<div><div class="k">列表 3000 行兜底</div><b>2 ms</b><div class="note">71927B / 2004 行</div></div>
+<div><div class="k">验证基线</div><b>554 / 547</b><div class="note">cargo test / feature</div></div>
+</div>
+
+<h2>1 · 配置修复：默认构建 → 带 HTTP 客户端</h2>
+<table><tr><th>项</th><th>修复前</th><th>修复后</th></tr>
+<tr><td>构建</td><td>cargo build --release（默认，无 reqwest）</td><td>... --features external-protocols（编入 reqwest）</td></tr>
+<tr><td>toolgate list 槽位</td><td>6 个全部「原因=no_client」</td><td>6 个「绑定=自动，适配器 native/text」</td></tr>
+<tr><td>govern 内 slmStatus</td><td>全 unavailable</td><td>参与槽位报 local/ready，未参与报绑定态</td></tr>
+<tr><td>本地模型真实调用</td><td>空转（客户端未编入）</td><td>summarize/rerank/embedding 实测命中（见下）</td></tr>
+</table>
+<p class="note">槽位绑定（§3.10）：classify/decide=d3-nano(systemone:8082) · summarize=qwen36-a3b(openai:10010) · vision=minicpm-v(openai:10014) · rerank/embedding=jina/bge-m3(rerank/embedding:10020)。</p>
+
+<h2>2 · 治理效果：按形状实测（本轮重跑）</h2>
+<table><tr><th>样本</th><th>输入字节</th><th>输出字节</th><th>输出行</th><th>耗时ms</th><th>shape</th><th>notices</th><th>评价</th></tr>
+<tr><td>长文 2200 行 / raw</td><td class='num'>186999</td><td class='num'>819</td><td class='num'>13</td><td class='num'>4208</td><td>long_text</td><td>TRUNCATED</td><td>先采样 32KiB 再摘要 <span class='b ok'>达成</span></td></tr><tr><td>长文 2200 行 / summary</td><td class='num'>186999</td><td class='num'>819</td><td class='num'>13</td><td class='num'>3414</td><td>long_text</td><td>TRUNCATED</td><td>同上 <span class='b ok'>达成</span></td></tr><tr><td>长文 600 行 / raw</td><td class='num'>50999</td><td class='num'>50999</td><td class='num'>600</td><td class='num'>2</td><td>pass_through</td><td>—</td><td>raw intent 不摘要，正确透传 <span class='b ok'>达成</span></td></tr><tr><td>长文 600 行 / summary（R10）</td><td class='num'>63046</td><td class='num'>385</td><td class='num'>2</td><td class='num'>2507</td><td>long_text</td><td>TRUNCATED</td><td>R10 采样 32KiB 后摘要（R10 前同量级 35.3s） <span class='b ok'>达成</span></td></tr><tr><td>长文 1000 行 / summary（R10）</td><td class='num'>105376</td><td class='num'>394</td><td class='num'>2</td><td class='num'>2233</td><td>long_text</td><td>TRUNCATED</td><td>R10 采样，2233ms（R10 前 42.1s） <span class='b ok'>达成</span></td></tr><tr><td>列表 3000 行</td><td class='num'>108779</td><td class='num'>71927</td><td class='num'>2004</td><td class='num'>2</td><td>listing</td><td>TRUNCATED,SLOT_UNAVAILABLE</td><td>超 1000 候选 → 毫秒级兜底 <span class='b ok'>达成</span></td></tr><tr><td>列表 60 行 / 无 query（R10）</td><td class='num'>3916</td><td class='num'>3916</td><td class='num'>60</td><td class='num'>1</td><td>listing</td><td>—</td><td>R10 跳过 rerank，原样返回（R10 前 448ms） <span class='b ok'>达成</span></td></tr><tr><td>长文 600 行日志 / summary（R12 聚类）</td><td class='num'>63046</td><td class='num'>352</td><td class='num'>2</td><td class='num'>2626</td><td>long_text</td><td>TRUNCATED</td><td>R12 先去重再采样 + embedding 聚类 312→3 行 <span class='b ok'>达成</span></td></tr><tr><td>长文 4000 行唯一 / summary（R12）</td><td class='num'>157300</td><td class='num'>428</td><td class='num'>2</td><td class='num'>946</td><td>long_text</td><td>TRUNCATED</td><td>R12 精确去重 4000→853，热态 946ms <span class='b ok'>达成</span></td></tr><tr><td>列表 3000 行 / 无 query（R12 字节 clamp）</td><td class='num'>123779</td><td class='num'>32969</td><td class='num'>2000</td><td class='num'>2</td><td>listing</td><td>TRUNCATED,SLOT_UNAVAILABLE</td><td>R12 正文 32KiB clamp（改前 71927B） <span class='b ok'>达成</span></td></tr><tr><td>列表 1500 行 / rerankChunk 开（R12）</td><td class='num'>96440</td><td class='num'>32846</td><td class='num'>2000</td><td class='num'>13941</td><td>listing</td><td>TRUNCATED</td><td>R12 分段重排 opt-in，chunked=true <span class='b w'>代价高</span></td></tr><tr><td>短文本 60 行</td><td class='num'>1179</td><td class='num'>1179</td><td class='num'>60</td><td class='num'>1</td><td>pass_through</td><td>—</td><td>设计如此，原样透传 <span class='b ok'>达成</span></td></tr><tr><td>错误 40KB（&gt;32KiB）</td><td class='num'>101779</td><td class='num'>16397</td><td class='num'>263</td><td class='num'>1</td><td>error</td><td>sampled</td><td>确定性压缩，不入模型 <span class='b ok'>达成</span></td></tr>
+</table>
+<p class="note">口径：直连 daemon /govern（<code>reports/bench_govern_budget.py</code>），<code>policy.isolation=summary</code>。raw intent 的长文/短文本按设计 pass_through；summary intent 才送 summarize。</p>
+
+<h2>3 · 关键架构事实（相对 11-14 版已变化）</h2>
+<ul>
+<li><b>daemon govern 已用本地槽位</b>：R8 起 <code>crates/toolgate-daemon/src/local_slots.rs</code> 实现 summarize / classify_shape / rerank / embed，并由 <code>govern</code> 通过 <code>LocalSlots</code> 注入；slmPrefer 决定本地优先还是委派优先。</li>
+<li><b>委派仍是一等通道</b>：宿主提供 delegate 端点时可把内容回投会话模型（slmPrefer=delegate），三态对比里 28.8KB→144B 即此路径（stub 验证）。</li>
+<li><b>L0 兜底始终可用</b>：无本地、无委派时仍以确定性机械治理跑通（头尾采样、落盘、脱敏、错误三段式），符合红线 #3。</li>
+<li>推论：旧版「daemon 的 govern 不用本地 SLM、配好本地模型对 govern 无增益」的结论<b>已不成立</b>——本地槽位现已进链。</li>
+</ul>
+
+<h2>4 · 缺陷状态（相对 11-14 版）</h2>
+<h3>缺陷 A（曾严重）：Rust 标准编译错误不被识别 —— <span class="b ok">已修复</span></h3>
+<p><code>looks_like_error</code> 已扩 <code>/usr/bin/ld:</code>、<code>ld:</code>、<code>undefined reference to</code>、<code>collect2:</code> 及 <code>error[CODE]</code> 前缀；本轮 error-like 由确定性嗅探直接命中（0.7ms）。</p>
+<h3>缺陷 B：govern 与本地 SLM 解耦 —— <span class="b ok">已解决</span></h3>
+<p>R8 后本地槽位已接入 govern 降级链（见 §3），本地模型对长文/列表/错误治理已有真实增益。</p>
+<h3>缺陷 C：L0 机械兜底质量仍偏低 —— <span class="b w">仍存在</span></h3>
+<p>无本地无委派时长文只做头尾采样硬截断、错误模板信息增益有限；这是刻意保底的代价，报告保留提示。</p>
+<h3>缺陷 D：委派若用弱模型摘要不可靠 —— <span class="b w">提示</span></h3>
+<p>生产中应回投宿主强模型，不用本地小模型充当委派。</p>
+<h3>R10 已解决的短板：长文摘要延迟 + 小列表无谓重排 —— <span class="b ok">已落地</span></h3>
+<p>长文采样触发线由 64KiB 降到 32KiB、取消 summary 放宽 120KiB：600 行 40.4s→2.5s、1000 行 42.1s→2.2s；无 query 且 ≤32KiB 的小列表不再调 rerank（60 行 448ms→1ms）。&gt;1000 行列表分段 rerank 成本约 35–40s，明确不做，维持毫秒级兜底。</p>
+<h3>R12 可选增强与确定性改进 —— <span class="b ok">已落地</span></h3>
+<p>默认关闭：<code>policy.rerankChunk</code>（超预算分批重排，1500 行 13.9s、默认关因十几秒级等待）与 <code>policy.sampleEmbedding</code>（采样前 embedding 选代表行）。默认生效的确定性改进：长文「先精确行去重再采样」（4000 行唯一 157KB→热态 946ms、600 行日志聚类 312→3 行）；L0/机械路径正文 32KiB 头截断（3000 行列表 71927B→32969B）。</p>
+
+<h2>5 · 复现命令</h2>
+<ul>
+<li>构建 + 重启：<code>cargo build --release --features external-protocols</code> → <code>launchctl kickstart -k gui/$(id -u)/com.toolgate.daemon</code> → <code>./target/release/toolgate config check</code></li>
+<li>槽位 A/B 与三态：<code>python3 reports/tg_slot_compare.py</code></li>
+<li>预算与形状：<code>python3 reports/bench_govern_budget.py .toolgate/daemon.sock</code></li>
+<li>query 三态：<code>python3 scripts/bench_govern.py --lines 120 --query '数据库迁移失败的原因'</code></li>
+<li>R10 重测：见 <code>reports/bench-r10-2026-11-15.txt</code>（长文 600/1000 行、列表 60/120/3000 行）。</li>
+</ul>
+<footer>toolgate · 2026-11-15 · 数据口径：daemon /govern 实测，UTF-8 字节，墙钟延迟；本报告为单机单次快照</footer>
+</div></body></html>

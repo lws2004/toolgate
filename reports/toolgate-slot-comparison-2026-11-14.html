@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>toolgate 槽位「有配置/无配置」与三态对比（2026-11-14）</title>
+<style>
+:root{--bg:#f7f8fa;--card:#fff;--fg:#1f2937;--muted:#6b7280;--line:#e5e7eb;--ok:#065f46;--okbg:#d1fae5;--no:#7c2d12;--nobg:#fee2e2;--accent:#1e40af}
+@media(prefers-color-scheme:dark){:root{--bg:#0f172a;--card:#111827;--fg:#e5e7eb;--muted:#9ca3af;--line:#374151;--ok:#6ee7b7;--okbg:#064e3b;--no:#fca5a5;--nobg:#7f1d1d;--accent:#93c5fd}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,-apple-system,"PingFang SC",sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 60px}
+h1{font-size:22px;margin:0 0 6px}h2{font-size:17px;margin:34px 0 10px;padding-left:10px;border-left:4px solid var(--accent)}
+.sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:14px 0}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;font-size:13.5px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:rgba(127,127,127,.08);font-weight:600;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.sm{color:var(--muted);font-size:12px;margin-top:2px}
+.b{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600}
+.b.ok{color:var(--ok);background:var(--okbg)}.b.no{color:var(--no);background:var(--nobg)}
+ul{margin:8px 0 0 18px;padding:0}li{margin:4px 0}
+code{background:rgba(127,127,127,.14);padding:1px 5px;border-radius:4px;font-size:12.5px}
+.note{color:var(--muted);font-size:12.5px}
+.kpi{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px}
+.kpi div{flex:1 1 180px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.kpi b{display:block;font-size:20px}
+</style></head><body><div class="wrap">
+<h1>toolgate 槽位「有配置 / 无配置」与三态对比</h1>
+<div class="sub">实测 2026-11-14 · 仓库 <code>/Users/lanws/workspace/toolgate</code> · 数据源 <code>reports/tg_slot_compare.json</code></div>
+
+<div class="card">
+<b>结论</b>
+<ul>
+<li><b>本地 6 槽位已真正接入 govern 降级链</b>：<code>summarize</code>（qwen3.6-35B-A3B）、<code>rerank</code>（jina-reranker）、<code>classify</code>（d3-nano）在正式 daemon 下 <code>meta.slmStatus</code> 报 <code>local</code> 并实际改写了输出；同一二进制在无配置环境（<code>HOME=/tmp/tg_nohome</code>，本地槽位 None）时这三类降级到 L0。</li>
+<li><b>vision 槽位本地未接</b>：<code>process_vision</code> 只走反向委派 / 元信息档，<code>LocalSlots.vision_text</code> 从未被调用；且图片只传引用不传字节，本地视觉模型拿不到像素，故 A/B 两态一致（都 <code>unavailable</code>）。</li>
+<li><b>decide / embedding 不属 govern 链</b>（分别用于各工具判定与检索重排），本表不体现其差异。</li>
+<li><b>slmPrefer 生效</b>：<code>delegate</code> 偏好下改走宿主会话模型（stub 实测 144B，<code>slmStatus.summarize=delegated</code>），与默认本地优先（203B，<code>local</code>）分流清晰。</li>
+<li><b>包装对真实会话已生效</b>：本会话中 agent 的 <code>bash</code>/<code>read</code> 输出被自动治理成中文摘要（多次观察），侧证 dsh 薄适配器已挂载运行。</li>
+</ul>
+</div>
+
+<div class="kpi">
+  <div><b>141×</b><span class="note">长文：本地 summarize 28.8KB→203B</span></div>
+  <div><b>200×</b><span class="note">长文：会话模型 28.8KB→144B</span></div>
+  <div><b>1.1–1.4s</b><span class="note">本地 summarize 热态延迟（冷启首次 23.5s；启动预热已缓解）</span></div>
+  <div><b>0.30s</b><span class="note">本地 classify 延迟</span></div>
+</div>
+
+<h2>一、每个槽位：有配置（A） vs 无配置（B）</h2>
+<div class="card">
+<table>
+<thead><tr>
+<th rowspan="2">场景</th><th rowspan="2">原始字节</th>
+<th colspan="3" style="text-align:center">A 有配置（本地槽位可用）</th>
+<th colspan="3" style="text-align:center">B 无配置（本地槽位 None）</th>
+</tr><tr>
+<th>命中</th><th>输出字节</th><th>延迟</th><th>命中</th><th>输出字节</th><th>延迟</th>
+</tr></thead>
+<tbody><tr>
+        <td>summarize/long_text</td>
+        <td class="num">28766</td>
+        <td><span class="b ok">local:summarize</span><div class="sm">shape=long_text</div></td>
+        <td class="num">203 <span class="sm">(0.7%)</span></td>
+        <td class="num">1448.2ms</td>
+        <td><span class="b no">无本地/L0</span><div class="sm">shape=long_text</div></td>
+        <td class="num">28766 <span class="sm">(100.0%)</span></td>
+        <td class="num">0.8ms</td>
+      </tr><tr>
+        <td>rerank/listing</td>
+        <td class="num">4950</td>
+        <td><span class="b ok">local:rerank</span><div class="sm">shape=listing</div></td>
+        <td class="num">4950 <span class="sm">(100.0%)</span></td>
+        <td class="num">453.6ms</td>
+        <td><span class="b no">无本地/L0</span><div class="sm">shape=listing</div></td>
+        <td class="num">5002 <span class="sm">(101.1%)</span></td>
+        <td class="num">0.8ms</td>
+      </tr><tr>
+        <td>classify/error-like</td>
+        <td class="num">2335</td>
+        <td><span class="b ok">classify=local</span><div class="sm">shape=error · classified=error</div></td>
+        <td class="num">2335 <span class="sm">(100.0%)</span></td>
+        <td class="num">301.5ms</td>
+        <td><span class="b no">无本地/L0</span><div class="sm">shape=pass_through</div></td>
+        <td class="num">2335 <span class="sm">(100.0%)</span></td>
+        <td class="num">0.3ms</td>
+      </tr><tr>
+        <td>vision/image</td>
+        <td class="num">0</td>
+        <td><span class="b no">L0/机械</span><div class="sm">shape=vision</div></td>
+        <td class="num">144 <span class="sm">(-)</span></td>
+        <td class="num">0.1ms</td>
+        <td><span class="b no">无本地/L0</span><div class="sm">shape=vision</div></td>
+        <td class="num">144 <span class="sm">(-)</span></td>
+        <td class="num">0.2ms</td>
+      </tr></tbody></table>
+<div class="note" style="margin-top:10px">
+A = 正式 daemon（<code>~/.toolgate/config.yaml</code>，6 槽位全部绑定本地服务）；B = 同一 release 二进制以 <code>HOME=/tmp/tg_nohome</code> 启动（无 config → <code>build_local_slots()</code> 返回 None）。两实例走同一 <code>/govern</code> 协议、同一 release 产物，仅本地槽位可用性不同。
+</div>
+</div>
+
+<h2>二、三态对比（同一段长文，28.8KB）</h2>
+<div class="card">
+<table>
+<thead><tr><th>形态</th><th>原始字节</th><th>输出字节</th><th>model / 来源</th><th>延迟</th><th>输出预览</th></tr></thead>
+<tbody><tr>
+        <td>① 无包装(raw)</td>
+        <td class="num">28766</td>
+        <td class="num">28766 <span class="sm">(100.0%)</span></td>
+        <td>—(不经过 daemon)</td>
+        <td class="num">—</td>
+        <td class="sm"></td>
+      </tr><tr>
+        <td>② 有包装/默认(本地优先)</td>
+        <td class="num">28766</td>
+        <td class="num">203 <span class="sm">(0.7%)</span></td>
+        <td>local:summarize</td>
+        <td class="num">1128.7ms</td>
+        <td class="sm">结论：cn-east区域Worker集群运行正常，处理耗时与数据量呈线性增长。 关键数据：处理批次00000-00299</td>
+      </tr><tr>
+        <td>③ 有包装/会话模型(slmPrefer=delegate)</td>
+        <td class="num">28766</td>
+        <td class="num">144 <span class="sm">(0.5%)</span></td>
+        <td>session/deepseek-v4.1-flash</td>
+        <td class="num">3.3ms</td>
+        <td class="sm">【会话模型摘要】收到长文 300 行；关键线索：worker 批处理正常，末段有 1 条超时告警；已保留路径与数字。</td>
+      </tr><tr>
+        <td>④ 有包装/无本地无委派(L0)</td>
+        <td class="num">28766</td>
+        <td class="num">28766 <span class="sm">(100.0%)</span></td>
+        <td>L0/机械</td>
+        <td class="num">0.8ms</td>
+        <td class="sm">[31m2026-11-14T12:00:00Z INFO worker[0] processed batch id=</td>
+      </tr></tbody></table>
+<div class="note" style="margin-top:10px">
+① 无包装 = 不经 daemon，直接原样；② 默认 = <code>policy</code> 缺省（本地优先）；③ 会话模型 = <code>policy.delegate</code> 指向宿主 stub + <code>slmPrefer:"delegate"</code>；④ 无本地无委派 = B 实例（L0 机械兜底）。
+</div>
+</div>
+
+<h2>三、发现与边界</h2>
+<div class="card">
+<ul>
+<li><b>本地 summarize 冷启与超时已收敛</b>：旧测首次 23.5s，116KB 长文曾触发 30s 客户端超时降 L0。现已：daemon 启动后<b>后台预热</b> summarize（不阻塞监听）；summarize 单请求超时放宽到 <b>120s</b>（classify/decide 仍 30s）；适配器 daemon 往返超时 <b>8000→30000ms</b>，避免 daemon 还在计算就被 failOpen 透传。复测 2200 行 / 约 183KB 长文：<b>17.4s、335B、slmStatus.summarize=local</b>。</li>
+<li><b>本地 rerank 输入上限已修</b>：jina 服务端单请求 <b>1000 docs</b> 上限（3000 docs 直接 HTTP 400）；daemon 现按 1000 分片串行、按全局偏移合并分数取前 <code>limit</code>，单批超时 180s。复测 3000 行列表：<b>19.5s、slmStatus.rerank=local、输出 2000 行</b>（受 <code>max_lines</code> 上限）。大列表仍有 20s 级等待，属本地重排吞吐边界（估算：线性于批数，非链路失败）。</li>
+<li><b>链接器错误已纳入确定性错误路由</b>：<code>looks_like_error</code> 新增 <code>/usr/bin/ld:</code>、<code>ld:</code>、<code>undefined reference to</code>、<code>collect2:</code> 前缀。复测无 <code>error:</code> 前缀的链接失败：<b>isError=true、原文逐字保留 102B</b>，fact 归因 <code>collect2: error: ld returned 1 exit status</code>。</li>
+<li><b>本地 classify 仍只在「确定性嗅探无结论且 intent != raw」时触发</b>：链接错误现已由确定性嗅探直接命中 error，不再依赖 classify（旧测 A 态 301.5ms、<code>classifiedShape=error</code>；因原文保真，输出不变）。</li>
+<li><b>错误保真已复核</b>：标准 <code>error:</code> 错误 267B→267B、rustc <code>error[E0308]</code> 145B→145B，L0 与委派 classify 成功两条路径均 100% 保留原文；fact/reason/nextSteps 只进 <code>structuredContent.error</code>，不再替换正文或追加 <code>SLOT_UNAVAILABLE</code>。</li>
+<li><b>vision 本地未接</b>（见结论）；<b>decide / embedding</b> 不在 govern 链，本轮未纳入对比。</li>
+</ul>
+</div>
+
+<h2>四、方法与复现</h2>
+<div class="card">
+<ul>
+<li>脚本：<code>reports/tg_slot_compare.py</code>（Python 标准库）：Unix socket 手写 HTTP/1.1 调 <code>POST /govern</code>；内置 127.0.0.1:18080 委派 stub 模拟宿主会话模型；以 <code>HOME=/tmp/tg_nohome</code> 起第二 daemon 模拟「无配置」。</li>
+<li>数据：<code>reports/tg_slot_compare.json</code>（A/B 每例的 shape、slmStatus、输出字节、延迟、预览，以及三态）；边界修复复测见 <code>reports/tg_boundary_retest-2026-11-14.json</code>（直连 /govern 与适配器处理器两种通道）。</li>
+<li>验证基线（2026-11-14 修复后）：<code>cargo test --workspace</code> 524 passed；<code>--features external-protocols</code> 517 passed；<code>cargo clippy --workspace --all-targets</code> 无问题；<code>./scripts/check-doc.sh</code> 通过；<code>cargo build --release -p toolgate-cli --features external-protocols</code> 零警告。</li>
+</ul>
+</div>
+</div></body></html>
